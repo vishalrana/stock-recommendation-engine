@@ -1,0 +1,101 @@
+ticker,industry,signals,wins,losses,win_rate,median_holding_days,average_holding_days,expectancy_pct
+MMM,Industrial Conglomerates,2,1,0,100.0,4.0,4.0,5.14
+AOS,Building Products,0,0,0,0.0,0.0,0.0,0.0
+ABT,Health Care Equipment,0,0,0,0.0,0.0,0.0,0.0
+ABBV,Biotechnology,0,0,0,0.0,0.0,0.0,0.0
+ACN,IT Consulting & Other Services,0,0,0,0.0,0.0,0.0,0.0
+ADBE,Application Software,0,0,0,0.0,0.0,0.0,0.0
+AMD,Semiconductors,0,0,0,0.0,0.0,0.0,0.0
+AES,Independent Power Producers & Energy Traders,1,0,0,0.0,0.0,0.0,0.0
+AFL,Life & Health Insurance,0,0,0,0.0,0.0,0.0,0.0
+A,Life Sciences Tools & Services,1,0,1,0.0,20.0,20.0,-4.98
+APD,Industrial Gases,1,0,1,0.0,26.0,26.0,-4.16
+ABNB,"Hotels, Resorts & Cruise Lines",0,0,0,0.0,0.0,0.0,0.0
+AKAM,Internet Services & Infrastructure,0,0,0,0.0,0.0,0.0,0.0
+ALB,Specialty Chemicals,1,0,1,0.0,33.0,33.0,-17.79
+ARE,Office REITs,0,0,0,0.0,0.0,0.0,0.0
+ALGN,Health Care Supplies,0,0,0,0.0,0.0,0.0,0.0
+ALLE,Building Products,1,0,1,0.0,31.0,31.0,-4.38
+LNT,Electric Utilities,2,0,0,0.0,0.0,0.0,0.0
+ALL,Property & Casualty Insurance,2,0,2,0.0,11.0,11.0,-3.91
+GOOGL,Interactive Media & Services,1,0,1,0.0,14.0,14.0,-2.71
+GOOG,Interactive Media & Services,0,0,0,0.0,0.0,0.0,0.0
+MO,Tobacco,0,0,0,0.0,0.0,0.0,0.0
+AMZN,Broadline Retail,0,0,0,0.0,0.0,0.0,0.0
+AMCR,Paper & Plastic Packaging Products & Materials,1,0,0,0.0,0.0,0.0,0.0
+AEE,Multi-Utilities,0,0,0,0.0,0.0,0.0,0.0
+AEP,Electric Utilities,1,0,1,0.0,0.0,0.0,-1.12
+AXP,Consumer Finance,0,0,0,0.0,0.0,0.0,0.0
+AIG,Multi-line Insurance,1,0,1,0.0,5.0,5.0,-4.67
+AMT,Telecom Tower REITs,0,0,0,0.0,0.0,0.0,0.0
+AWK,Water Utilities,0,0,0,0.0,0.0,0.0,0.0
+AMP,Asset Management & Custody Banks,1,0,1,0.0,29.0,29.0,-8.12
+AME,Electrical Components & Equipment,1,0,0,0.0,0.0,0.0,0.0
+AMGN,Biotechnology,0,0,0,0.0,0.0,0.0,0.0
+APH,Electronic Components,0,0,0,0.0,0.0,0.0,0.0
+ADI,Semiconductors,0,0,0,0.0,0.0,0.0,0.0
+AON,Insurance Brokers,0,0,0,0.0,0.0,0.0,0.0
+APA,Oil & Gas Exploration & Production,0,0,0,0.0,0.0,0.0,0.0
+APO,Asset Management & Custody Banks,1,0,1,0.0,4.0,4.0,-3.09
+AAPL,"Technology Hardware, Storage & Peripherals",0,0,0,0.0,0.0,0.0,0.0
+AMAT,Semiconductor Materials & Equipment,2,1,1,50.0,10.5,10.5,1.62
+APP,Application Software,0,0,0,0.0,0.0,0.0,0.0
+APTV,Automotive Parts & Equipment,0,0,0,0.0,0.0,0.0,0.0
+ACGL,Property & Casualty Insurance,1,0,1,0.0,0.0,0.0,-1.49
+ADM,Agricultural Products & Services,1,1,0,100.0,78.0,78.0,25.14
+ARES,Asset Management & Custody Banks,3,1,2,33.33,12.0,35.33,3.16
+ANET,Communications Equipment,0,0,0,0.0,0.0,0.0,0.0
+AJG,Insurance Brokers,1,1,0,100.0,92.0,92.0,11.96
+AIZ,Multi-line Insurance,1,0,1,0.0,7.0,7.0,-2.64
+T,Integrated Telecommunication Services,1,0,1,0.0,51.0,51.0,-3.61
+ATO,Gas Utilities,2,0,2,0.0,10.5,10.5,-3.53
+ADSK,Application Software,0,0,0,0.0,0.0,0.0,0.0
+ADP,Human Resource & Employment Services,0,0,0,0.0,0.0,0.0,0.0
+AZO,Automotive Retail,1,1,0,100.0,63.0,63.0,11.8
+AVB,Multi-Family Residential REITs,0,0,0,0.0,0.0,0.0,0.0
+AVY,Paper & Plastic Packaging Products & Materials,2,0,2,0.0,37.0,37.0,-3.15
+AXON,Aerospace & Defense,1,1,0,100.0,71.0,71.0,28.51
+BKR,Oil & Gas Equipment & Services,1,1,0,100.0,92.0,92.0,34.82
+BALL,"Metal, Glass & Plastic Containers",3,1,1,50.0,144.0,144.0,5.21
+BAC,Diversified Banks,1,0,0,0.0,0.0,0.0,0.0
+BAX,Health Care Equipment,0,0,0,0.0,0.0,0.0,0.0
+BDX,Health Care Equipment,1,0,1,0.0,0.0,0.0,-0.7
+BRK-B,Multi-Sector Holdings,3,2,1,66.67,14.0,33.33,-0.57
+BBY,Computer & Electronics Retail,0,0,0,0.0,0.0,0.0,0.0
+TECH,Life Sciences Tools & Services,1,0,1,0.0,18.0,18.0,-7.56
+BIIB,Biotechnology,1,0,1,0.0,5.0,5.0,-4.78
+BLK,Asset Management & Custody Banks,0,0,0,0.0,0.0,0.0,0.0
+BX,Asset Management & Custody Banks,2,0,2,0.0,11.0,11.0,-8.01
+XYZ,Transaction & Payment Processing Services,0,0,0,0.0,0.0,0.0,0.0
+BNY,Asset Management & Custody Banks,0,0,0,0.0,0.0,0.0,0.0
+BA,Aerospace & Defense,0,0,0,0.0,0.0,0.0,0.0
+BKNG,"Hotels, Resorts & Cruise Lines",1,0,1,0.0,3.0,3.0,-2.95
+BSX,Health Care Equipment,1,0,1,0.0,0.0,0.0,-1.31
+BMY,Pharmaceuticals,1,0,1,0.0,35.0,35.0,-4.09
+AVGO,Semiconductors,2,1,1,50.0,122.0,122.0,28.26
+BR,Data Processing & Outsourced Services,0,0,0,0.0,0.0,0.0,0.0
+BRO,Insurance Brokers,0,0,0,0.0,0.0,0.0,0.0
+BF-B,Distillers & Vintners,0,0,0,0.0,0.0,0.0,0.0
+BLDR,Building Products,1,1,0,100.0,16.0,16.0,13.86
+BG,Agricultural Products & Services,1,0,1,0.0,11.0,11.0,-3.34
+BXP,Office REITs,1,0,1,0.0,5.0,5.0,-5.12
+CHRW,Air Freight & Logistics,1,0,1,0.0,12.0,12.0,-8.82
+CDNS,Application Software,1,0,1,0.0,10.0,10.0,-5.99
+CPT,Multi-Family Residential REITs,0,0,0,0.0,0.0,0.0,0.0
+COF,Consumer Finance,0,0,0,0.0,0.0,0.0,0.0
+CAH,Health Care Distributors,1,1,0,100.0,43.0,43.0,23.37
+CCL,"Hotels, Resorts & Cruise Lines",0,0,0,0.0,0.0,0.0,0.0
+CARR,Building Products,2,0,2,0.0,15.0,15.0,-4.5
+CVNA,Automotive Retail,1,1,0,100.0,0.0,0.0,13.44
+CASY,Food Retail,3,1,1,50.0,14.5,14.5,7.87
+CAT,Construction Machinery & Heavy Transportation Equipment,0,0,0,0.0,0.0,0.0,0.0
+CBOE,Financial Exchanges & Data,1,0,1,0.0,0.0,0.0,-1.15
+CBRE,Real Estate Services,1,0,0,0.0,0.0,0.0,0.0
+CDW,Technology Distributors,2,0,2,0.0,9.5,9.5,-5.52
+COR,Health Care Distributors,4,1,3,25.0,23.0,22.5,-0.18
+CNC,Managed Health Care,0,0,0,0.0,0.0,0.0,0.0
+CNP,Multi-Utilities,2,1,0,100.0,11.0,11.0,9.23
+CF,Fertilizers & Agricultural Chemicals,0,0,0,0.0,0.0,0.0,0.0
+CRL,Life Sciences Tools & Services,0,0,0,0.0,0.0,0.0,0.0
+SCHW,Investment Banking & Brokerage,0,0,0,0.0,0.0,0.0,0.0
+CHTR,Cable & Satellite,0,0,0,0.0,0.0,0.0,0.0

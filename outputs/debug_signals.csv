@@ -1,0 +1,2 @@
+ticker,pattern,entry_price,stop_loss,exit_price,upside_pct,upside_valid,risk_reward,resistance_type,candidate_resistance_levels,removal_reason
+AAPL,Inside Bar,300.87,287.38,341.34,13.45,,3.0,,,PASSED

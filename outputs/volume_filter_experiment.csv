@@ -1,0 +1,4 @@
+volume_threshold,signals,completed_trades,wins,losses,win_rate,expectancy_pct,average_holding_days,median_holding_days
+1.5,73,63,18,45,28.57,1.72,29.44,14.0
+1.2,193,160,51,109,31.87,2.4,34.94,18.0
+1.0,389,318,101,217,31.76,2.57,38.53,18.0

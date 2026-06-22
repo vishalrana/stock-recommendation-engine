@@ -1,0 +1,36 @@
+name: Nightly Recommendation Update Scan
+
+on:
+  schedule:
+    # 10:00 PM EST is 3:00 AM UTC (Standard Time) or 2:00 AM UTC (Daylight Saving Time)
+    # We will trigger at 3:00 AM UTC daily
+    - cron: '0 3 * * *'
+  workflow_dispatch: # Allows manual triggering from GitHub UI
+
+jobs:
+  run-scan:
+    name: Run Nightly Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r jobs/requirements.txt
+
+    - name: Execute Nightly Update Scan
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      run: |
+        python -m jobs.generate_signals

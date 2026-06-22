@@ -1,0 +1,7 @@
+experiment,description,signals,completed_trades,wins,losses,win_rate,expectancy_pct,median_holding_days
+Baseline,All filters enabled,390,318,102,216,32.08,2.63,18.0
+Experiment A,Remove Volume Filter,1230,1009,343,666,33.99,2.96,20.0
+Experiment B,Remove Current RSI Filter,453,367,124,243,33.79,3.63,20.0
+Experiment C,Remove RSI Pullback Filter,1302,1021,335,686,32.81,2.03,15.0
+Experiment D,Remove Pattern Filter,2494,1840,667,1173,36.25,3.55,25.0
+Experiment E,Price Trend Only,36301,26470,8695,17775,32.85,3.02,19.0

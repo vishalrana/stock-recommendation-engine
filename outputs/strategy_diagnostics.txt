@@ -1,0 +1,48 @@
+STRATEGY VERSION 1.0 - VALIDATION DIAGNOSTICS
+======================================================
+Total Stocks Tested: 100
+Total Signals Generated: 74
+Total Wins: 18
+Total Losses: 45
+Completed Trades: 63
+Untriggered or Unresolved Signals: 11
+Overall Win Rate: 28.57%
+Overall Win Rate 95% Wilson CI: 18.90% to 40.70%
+Average Signals Per Stock: 0.74
+
+Stocks With:
+0 Signals: 48
+1 Signal: 36
+2-5 Signals: 16
+5+ Signals: 0
+Note: the requested 2-5 and 5+ ranges overlap for stocks with exactly 5 signals.
+
+Filter Diagnostics (independent failures; a bar may fail multiple filters):
+Price Filter: 66836 failures (63.71% of evaluated bars)
+RSI Minimum Filter: 45219 failures (43.11% of evaluated bars)
+Current RSI Filter: 48299 failures (46.04% of evaluated bars)
+Volume Filter: 93920 failures (89.53% of evaluated bars)
+Layer 1 Passes: 554
+Pattern Failures After Layer 1: 474
+Pattern Passes: 80
+Risk Failures After Pattern: 6
+Final Risk-Qualified Signals: 74
+
+Top 10 Stocks By Win Rate (minimum 5 signals):
+None
+
+Top 10 Stocks By Expectancy (minimum 5 signals):
+None
+
+Bottom 10 Stocks (at least one completed trade, ranked by expectancy):
+ticker  signals  wins  losses  win_rate  expectancy_pct
+   ALB        1     0       1       0.0          -17.79
+  CHRW        1     0       1       0.0           -8.82
+   AMP        1     0       1       0.0           -8.12
+    BX        2     0       2       0.0           -8.01
+  TECH        1     0       1       0.0           -7.56
+  CDNS        1     0       1       0.0           -5.99
+   CDW        2     0       2       0.0           -5.52
+   BXP        1     0       1       0.0           -5.12
+     A        1     0       1       0.0           -4.98
+  BIIB        1     0       1       0.0           -4.78

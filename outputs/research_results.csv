@@ -1,0 +1,2 @@
+run_id,run_timestamp_utc,volume_threshold,require_pattern,require_current_rsi,require_rsi_pullback,universe_size,signals,completed_trades,wins,losses,win_rate,expectancy_pct,average_holding_days,median_holding_days
+a03ae6c1a4b4465eb50b8eb1f55cef92,2026-06-21T12:30:04.404919+00:00,1.0,False,True,True,100,2494,1840,667,1173,36.25,3.55,47.31,25.0

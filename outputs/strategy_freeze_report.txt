@@ -1,0 +1,89 @@
+STRATEGY 1.1 — FREEZE VALIDATION REPORT
+=======================================================
+
+STRATEGY DEFINITION
+-------------------------------------------------------
+  Price > 50 DMA > 200 DMA
+  RSI Pullback (min RSI 10d < 45)
+  Current RSI Recovery (45 <= RSI <= 65)
+  Volume > 1.0x 20-day average
+  No Pattern Filter
+  3R Target (Exit = Entry + 3 × Risk)
+
+EXECUTION MODEL
+-------------------------------------------------------
+  Entry: T+1 buy-stop at High_T × 1.001, expires in 5 days
+  Entry gaps: fill at max(trigger, open)
+  Stop gaps: fill at open when gap-down below stop
+  Collision rule: stop wins same-bar ambiguity
+  Transaction cost: 0.10% round-trip
+
+DATA COVERAGE
+-------------------------------------------------------
+  Cached tickers         : 100
+  Tickers with signals   : 99
+  Cache date range       : 2021-06-22 to 2026-06-18
+  200-bar warmup burns   : ~200 trading days
+  First signal generated : 2022-04-21
+  Last signal generated  : 2026-06-16
+
+  WARNING: Cache starts 2021-06-22. The requested Train period
+  (2018-2022) only covers ~April 2022 to December 2022 after
+  the 200-bar indicator warmup. This means the Train period is
+  dominated by the 2022 bear market.
+
+AGGREGATE RESULTS (ALL PERIODS)
+-------------------------------------------------------
+  Total signals generated: 2494
+  Combined (all dates)
+  ====================
+  Total Completed Trades : 1840
+  Wins                   : 667
+  Losses                 : 1173
+  Win Rate               : 36.25%
+  95% Wilson CI          : 34.08% to 38.47%
+  Expectancy (per trade) : +3.0509%
+  Average Holding Time   : 47.3 days
+  Median Holding Time    : 25.0 days
+
+TRAIN vs VALIDATION SPLIT
+-------------------------------------------------------
+  Train signals : 201
+  Val signals   : 2293
+
+  Train Period (effective: ~Apr 2022 — Dec 2022)
+  ==============================================
+  Total Completed Trades : 144
+  Wins                   : 24
+  Losses                 : 120
+  Win Rate               : 16.67%
+  95% Wilson CI          : 11.46% to 23.60%
+  Expectancy (per trade) : -1.2457%
+  Average Holding Time   : 52.9 days
+  Median Holding Time    : 14.5 days
+
+  Validation Period (Jan 2023 — Jun 2026)
+  =======================================
+  Total Completed Trades : 1696
+  Wins                   : 643
+  Losses                 : 1053
+  Win Rate               : 37.91%
+  95% Wilson CI          : 35.63% to 40.25%
+  Expectancy (per trade) : +3.4157%
+  Average Holding Time   : 46.8 days
+  Median Holding Time    : 26.0 days
+
+YEAR-BY-YEAR BREAKDOWN
+-------------------------------------------------------
+  2022:  Trades=  144  Wins=  24  Losses= 120  WinRate= 16.67%  Exp= -1.246%  CI=[11.5%-23.6%]
+  2023:  Trades=  479  Wins= 194  Losses= 285  WinRate= 40.50%  Exp= +4.972%  CI=[36.2%-45.0%]
+  2024:  Trades=  602  Wins= 268  Losses= 334  WinRate= 44.52%  Exp= +5.677%  CI=[40.6%-48.5%]
+  2025:  Trades=  447  Wins= 132  Losses= 315  WinRate= 29.53%  Exp= -0.084%  CI=[25.5%-33.9%]
+  2026:  Trades=  168  Wins=  49  Losses= 119  WinRate= 29.17%  Exp= +0.186%  CI=[22.8%-36.4%]
+
+VERDICT
+=======================================================
+  Train period profitable  : NO
+  Validation profitable    : YES
+  Profitable years         : [2023, 2024, 2026]
+  Losing years             : [2022, 2025]

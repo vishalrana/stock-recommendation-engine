@@ -1,0 +1,11 @@
+ticker,industry,signals,wins,losses,win_rate,median_holding_days,average_holding_days,expectancy_pct
+AAPL,"Technology Hardware, Storage & Peripherals",0,0,0,0.0,0.0,0.0,0.0
+MSFT,Systems Software,0,0,0,0.0,0.0,0.0,0.0
+NVDA,Semiconductors,1,1,0,100.0,0.0,0.0,3.13
+AMZN,Broadline Retail,0,0,0,0.0,0.0,0.0,0.0
+META,Interactive Media & Services,2,1,0,100.0,31.0,31.0,22.43
+GOOGL,Interactive Media & Services,1,0,1,0.0,14.0,14.0,-2.71
+JPM,Diversified Banks,0,0,0,0.0,0.0,0.0,0.0
+XOM,Integrated Oil & Gas,0,0,0,0.0,0.0,0.0,0.0
+UNH,Managed Health Care,0,0,0,0.0,0.0,0.0,0.0
+LLY,Pharmaceuticals,0,0,0,0.0,0.0,0.0,0.0

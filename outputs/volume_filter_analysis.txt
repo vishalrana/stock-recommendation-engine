@@ -1,0 +1,22 @@
+VOLUME FILTER SENSITIVITY ANALYSIS
+==========================================
+
+1. Signal count increase
+> 1.5x: 73 signals (+0, +0.00% vs 1.5x)
+> 1.2x: 193 signals (+120, +164.38% vs 1.5x)
+> 1.0x: 389 signals (+316, +432.88% vs 1.5x)
+
+2. Win rate change
+> 1.5x: 28.57% (+0.00 percentage points vs 1.5x)
+> 1.2x: 31.87% (+3.30 percentage points vs 1.5x)
+> 1.0x: 31.76% (+3.19 percentage points vs 1.5x)
+
+3. Expectancy change
+> 1.5x: 1.72% (+0.00 percentage points vs 1.5x)
+> 1.2x: 2.40% (+0.68 percentage points vs 1.5x)
+> 1.0x: 2.57% (+0.85 percentage points vs 1.5x)
+
+4. Recommendation
+> Best observed threshold: 1.0x.
+> It produced 389 signals, 318 completed trades, a 31.76% win rate, and 2.57% expectancy.
+> This is an experimental comparison only; Strategy Version 1.0 remains unchanged.

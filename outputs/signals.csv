@@ -1,0 +1,2 @@
+ticker,date,price,dma_50,dma_200,rsi_14,current_rsi,min_rsi_10d,volume_20d_avg,volume_current,volume_ratio,pattern,entry_price,stop_loss,exit_price,upside_pct,risk_reward,target_r_multiple
+AAPL,2026-06-18,298.01,288.63,267.79,50.98,50.98,42.69,50323125,85962200,1.71,Inside Bar,300.87,287.38,341.34,13.45,3.0,3.0

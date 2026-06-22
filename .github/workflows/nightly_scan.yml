@@ -1,36 +1,78 @@
-name: Nightly Recommendation Update Scan
+name: Nightly Recommendation Scan
 
 on:
   schedule:
-    # 10:00 PM EST is 3:00 AM UTC (Standard Time) or 2:00 AM UTC (Daylight Saving Time)
-    # We will trigger at 3:00 AM UTC daily
-    - cron: '0 3 * * *'
-  workflow_dispatch: # Allows manual triggering from GitHub UI
+    # Run daily at 1:00 AM UTC = ~9:00 PM EST (after US market close)
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch: # Manual trigger from GitHub UI
 
 jobs:
-  run-scan:
-    name: Run Nightly Scan
+  nightly-scan:
+    name: Generate Signals
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Log Start Time
+        run: |
+          echo "=========================================="
+          echo "  NIGHTLY SCAN — STARTED"
+          echo "=========================================="
+          echo "Trigger:    ${{ github.event_name }}"
+          echo "UTC Time:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Runner:     $(uname -a)"
+          echo "=========================================="
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install -r jobs/requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-    - name: Execute Nightly Update Scan
-      env:
-        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-      run: |
-        python -m jobs.generate_signals
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r jobs/requirements.txt
+          echo "✅ Dependencies installed."
+
+      - name: Run Signal Generation
+        id: scan
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_ACTIONS: 'true'
+        run: |
+          echo "Starting signal generation..."
+          START_EPOCH=$(date +%s)
+
+          python -m jobs.generate_signals
+          EXIT_CODE=$?
+
+          END_EPOCH=$(date +%s)
+          DURATION=$((END_EPOCH - START_EPOCH))
+
+          echo "duration=${DURATION}" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Signal generation FAILED (exit code: $EXIT_CODE)"
+            exit $EXIT_CODE
+          fi
+
+          echo "✅ Signal generation completed in ${DURATION}s"
+
+      - name: Log Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "  NIGHTLY SCAN — FINISHED"
+          echo "=========================================="
+          echo "UTC Time:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Duration:   ${{ steps.scan.outputs.duration || 'N/A' }}s"
+          echo "Exit Code:  ${{ steps.scan.outputs.exit_code || 'N/A' }}"
+          echo "Status:     ${{ job.status }}"
+          echo "=========================================="

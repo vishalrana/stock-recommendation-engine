@@ -1,12 +1,12 @@
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 import { Recommendation } from '../types/database';
 import RecommendationsTable from '../components/recommendations-table';
 
-// Revalidate every hour
-export const revalidate = 3600;
+// Force dynamic rendering — never prerender at build time
+export const dynamic = 'force-dynamic';
 
 async function getRecommendations() {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('recommendations')
     .select('*');
 

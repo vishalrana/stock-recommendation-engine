@@ -19,6 +19,8 @@ export interface Recommendation {
   historical_wins: number;
   historical_losses: number;
   median_holding_days: number;
+  composite_score: number | null;
+  tier_label: string | null;
 }
 
 export interface ScanLog {

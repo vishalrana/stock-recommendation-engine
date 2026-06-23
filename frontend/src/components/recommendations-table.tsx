@@ -22,8 +22,8 @@ function RegimeBanner({ regime }: { regime: string | null }) {
   if (regime === 'bull') {
     return (
       <div className="mb-6 rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
-        <span className="mr-2 font-bold">Bull Market</span>
-        &mdash; Standard Gates Active (Expectancy &gt; 0%, Win Rate &ge; 25%)
+        <span className="mr-2 font-bold">Bull Market Regime Active</span>
+        &mdash; Strategy 1.2 Rev B Composite Scoring Active (Focusing on Technical Momentum &amp; Trend continuation).
       </div>
     );
   }
@@ -31,8 +31,17 @@ function RegimeBanner({ regime }: { regime: string | null }) {
   if (regime === 'bear') {
     return (
       <div className="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">
-        <span className="mr-2 font-bold">Bear Market</span>
-        &mdash; Strategy Inactive. No recommendations in unfavorable conditions.
+        <span className="mr-2 font-bold">Bear Market Regime Active</span>
+        &mdash; Composite Scoring Active (Boosting low-beta/defensive sectors).
+      </div>
+    );
+  }
+
+  if (regime === 'sideways') {
+    return (
+      <div className="mb-6 rounded-lg border border-blue-300 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-800">
+        <span className="mr-2 font-bold">Sideways Market Regime Active</span>
+        &mdash; Composite Scoring Active (Boosting mean-reversion candidates near RSI 50).
       </div>
     );
   }
@@ -66,23 +75,85 @@ function tradesBadge(val: number): React.ReactNode {
   return <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Low ({val})</span>;
 }
 
+function formatDate(val: string | null | undefined): string {
+  if (!val) return '-';
+  const parts = val.split('-');
+  if (parts.length !== 3) return val;
+  const year = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10) - 1;
+  const day = parseInt(parts[2], 10);
+  const date = new Date(year, month, day);
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function tierBadge(val: string | null | undefined): React.ReactNode {
+  if (!val) return '-';
+  let badgeClass = 'bg-gray-100 text-gray-800 border border-gray-200';
+  if (val === 'Strong Buy') badgeClass = 'bg-green-100 text-green-800 border border-green-200 font-semibold';
+  else if (val === 'Buy') badgeClass = 'bg-blue-100 text-blue-800 border border-blue-200 font-semibold';
+  else if (val === 'Watch') badgeClass = 'bg-gray-100 text-gray-600 border border-gray-200';
+  else if (val === 'Speculative') badgeClass = 'border border-red-200 text-red-600 bg-red-50/20';
+  
+  return (
+    <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ${badgeClass}`}>
+      {val}
+    </span>
+  );
+}
+
+function compositeScoreBar(val: number | null | undefined): React.ReactNode {
+  if (typeof val !== 'number') return '-';
+  let barColor = 'bg-red-500';
+  if (val >= 70) barColor = 'bg-green-500';
+  else if (val >= 55) barColor = 'bg-yellow-500';
+  else if (val >= 40) barColor = 'bg-gray-400';
+  
+  return (
+    <div className="flex flex-col gap-1 w-24">
+      <span className="font-bold text-gray-900">{val.toFixed(1)}</span>
+      <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
+        <div className={`${barColor} h-1.5 rounded-full`} style={{ width: `${val}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export default function RecommendationsTable({ data, regime }: TableProps) {
   const [sorting, setSorting] = useState<SortingState>([
-    { id: 'score', desc: true }
+    { id: 'composite_score', desc: true }
   ]);
   const [globalFilter, setGlobalFilter] = useState('');
 
   const columns = React.useMemo<ColumnDef<Recommendation>[]>(
     () => [
       {
-        accessorKey: 'company_name',
-        header: 'Company',
-        cell: (info) => info.getValue() || info.row.original.ticker,
+        accessorKey: 'scan_date',
+        header: 'Signal Date',
+        cell: (info) => formatDate(info.getValue() as string),
       },
       {
         accessorKey: 'ticker',
         header: 'Ticker',
         cell: (info) => <span className="font-mono font-bold text-gray-800">{info.getValue() as string}</span>,
+      },
+      {
+        accessorKey: 'company_name',
+        header: 'Company',
+        cell: (info) => info.getValue() || info.row.original.ticker,
+      },
+      {
+        accessorKey: 'tier_label',
+        header: 'Tier',
+        cell: (info) => tierBadge(info.getValue() as string),
+      },
+      {
+        accessorKey: 'composite_score',
+        header: 'Composite Score',
+        cell: (info) => compositeScoreBar(info.getValue() as number),
       },
       {
         accessorKey: 'industry',
@@ -122,10 +193,10 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
       },
       {
         accessorKey: 'score',
-        header: 'Score',
+        header: 'Raw Score',
         cell: (info) => {
           const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? <span className="font-bold text-blue-600">{val.toFixed(4)}</span> : '-';
+          return typeof val === 'number' ? <span className="font-mono text-gray-500">{val.toFixed(4)}</span> : '-';
         },
       },
       {
@@ -175,11 +246,6 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
           const val = info.getValue() as number | null | undefined;
           return typeof val === 'number' ? `${val} days` : '-';
         },
-      },
-      {
-        accessorKey: 'scan_date',
-        header: 'Signal Date',
-        cell: (info) => info.getValue() as string,
       },
     ],
     []

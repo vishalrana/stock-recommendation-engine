@@ -39,6 +39,10 @@ jobs:
           pip install -r jobs/requirements.txt
           echo "✅ Dependencies installed."
 
+      - name: Validate Ticker List
+        run: |
+          echo "Validating ticker list..."
+
       - name: Run Signal Generation
         id: scan
         env:

@@ -67,9 +67,19 @@ $$;
 
 
 -- =========================
--- 5. Update recommendations view
+-- 5. Add Strategy 1.2 Rev B Columns
 -- =========================
--- Drop and recreate to add regime column from signals table.
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS composite_score FLOAT DEFAULT 0;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS tier_label TEXT DEFAULT 'Speculative';
+
+ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS composite_score FLOAT DEFAULT 0;
+ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS tier_label TEXT DEFAULT 'Speculative';
+
+
+-- =========================
+-- 6. Update recommendations view
+-- =========================
+-- Drop and recreate to add new columns.
 DROP VIEW IF EXISTS recommendations;
 
 CREATE VIEW recommendations AS
@@ -88,6 +98,8 @@ SELECT
     s.volume_ratio,
     s.score,
     s.regime,
+    s.composite_score,
+    s.tier_label,
     COALESCE(m.win_rate, 0)            AS past_win_rate,
     COALESCE(m.expectancy_pct, 0)      AS expectancy_pct,
     COALESCE(m.total_signals, 0)       AS historical_signals,
@@ -101,7 +113,8 @@ LEFT JOIN ticker_metrics m ON s.ticker = m.ticker;
 -- ============================================================
 -- DONE. Verify in Table Editor:
 --   - scan_log has columns: regime, signals_qualified, signals_recommended
---   - signals has column: regime
---   - signals_history table exists with indexes
---   - recommendations view includes regime column
+--   - signals has columns: regime, composite_score, tier_label
+--   - signals_history table exists with indexes and columns: composite_score, tier_label
+--   - recommendations view includes regime, composite_score, tier_label
 -- ============================================================
+

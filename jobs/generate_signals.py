@@ -39,6 +39,9 @@ from regime import get_regime, should_trade
 from ranker import SignalRanker
 from jobs.supabase_client import get_client
 
+# Ticker Blacklist
+BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
+
 # Strategy parameters (unchanged from 1.1 Beta)
 RSI_PULLBACK_THRESHOLD = 45
 RSI_RECOVERY_MIN = 45
@@ -92,13 +95,19 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
             timeout=15,
         )
         response.raise_for_status()
-        table = pd.read_html(StringIO(response.text))[0].head(100)
-        for _, row in table.iterrows():
+        raw_table = pd.read_html(StringIO(response.text))[0]
+        count = 0
+        for _, row in raw_table.iterrows():
             ticker = str(row["Symbol"]).strip().upper().replace(".", "-")
+            if ticker in BLACKLIST:
+                continue
             tickers.append(ticker)
             company_names[ticker] = str(row["Security"]).strip()
             industries[ticker] = str(row["GICS Sub-Industry"]).strip()
-        logger.info(f"Loaded {len(tickers)} tickers from Wikipedia.")
+            count += 1
+            if count >= 100:
+                break
+        logger.info(f"Loaded {len(tickers)} tickers from Wikipedia (skipped blacklisted).")
     except Exception as e:
         logger.warning(f"Wikipedia fetch failed: {e}. Loading local fallback...")
         csv_path = os.path.join(PROJECT_ROOT, "outputs", "backtest_summary.csv")
@@ -107,6 +116,8 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
                 summary_df = pd.read_csv(csv_path)
                 for _, row in summary_df.iterrows():
                     ticker = str(row["ticker"]).strip().upper()
+                    if ticker in BLACKLIST:
+                        continue
                     tickers.append(ticker)
                     industries[ticker] = str(row["industry"]).strip()
                     company_names[ticker] = ticker
@@ -197,6 +208,7 @@ def check_latest_signal(
         "company_name": company_name,
         "industry": industry,
         "price": round(c, 2),
+        "dma_50": round(d50, 2),
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "exit_price": exit_price,
@@ -235,6 +247,8 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "current_rsi": sig.get("current_rsi"),
                 "volume_ratio": sig.get("volume_ratio"),
                 "score": sig.get("score"),
+                "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
+                "tier_label": sig.get("tier_label", "Speculative"),
                 "past_win_rate": m.get("win_rate", 0),
                 "expectancy_pct": m.get("expectancy_pct", 0),
                 "total_trades": m.get("total_trades", 0),
@@ -297,6 +311,8 @@ def main():
         start_date = end_date - timedelta(days=500)
 
         for i, ticker in enumerate(tickers, 1):
+            if ticker in BLACKLIST:
+                continue
             logger.info(f"[{i}/{len(tickers)}] Downloading {ticker}...")
             fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
         logger.info("Finished downloading daily data.")
@@ -398,16 +414,40 @@ def main():
             lambda t: metrics_map.get(t, {}).get("total_trades", 0)
         )
 
-        logger.info("Applying gated percentile ranking...")
-        ranker = SignalRanker(
-            min_expectancy=min_expectancy,
-            min_win_rate=min_win_rate,
-            min_trades=min_trades,
-        )
-        ranked_df = ranker.rank(signals_df, top_n=TOP_N)
+        logger.info("Applying composite ranking (Strategy 1.2 Rev B)...")
+        ranker = SignalRanker()
+        # Fetch all ranked candidates to log them
+        scored_df = ranker.composite_rank(signals_df, regime_str, top_n=len(signals_df))
 
-        if not ranked_df.empty:
+        if not scored_df.empty:
+            # Log per-candidate
+            for idx, row in scored_df.iterrows():
+                breakdown = row["score_breakdown"]
+                a = 0.40 * breakdown["momentum"]
+                b = 0.30 * breakdown["expectancy"]
+                c = 0.20 * breakdown["winrate"]
+                d = 0.10 * breakdown["regime"]
+                
+                logger.info(
+                    f"{row['ticker']} | Composite: {row['composite_score']:.1f} | Tier: {row['tier_label']} | "
+                    f"Momentum: {a:.1f}/40, Expectancy: {b:.1f}/30, WinRate: {c:.1f}/20, Regime: {d:.1f}/10 | "
+                    f"Raw: exp={row['expectancy_pct']:.2f}%, win={row['win_rate']:.1f}%, trades={row['total_trades']}"
+                )
+
+            # Select top recommendations
+            ranked_df = scored_df.head(TOP_N)
             signals_recommended = len(ranked_df)
+
+            # Log summary
+            t1 = sum(ranked_df["tier_label"] == "Strong Buy")
+            t2 = sum(ranked_df["tier_label"] == "Buy")
+            t3 = sum(ranked_df["tier_label"] == "Watch")
+            t4 = sum(ranked_df["tier_label"] == "Speculative")
+            logger.info(
+                f"Final recommendations: {signals_recommended} signals "
+                f"(T1: {t1}, T2: {t2}, T3: {t3}, Speculative: {t4})"
+            )
+
             for _, row in ranked_df.iterrows():
                 ranked_signals.append({
                     "scan_date": row["scan_date"],
@@ -422,16 +462,11 @@ def main():
                     "risk_reward": row["risk_reward"],
                     "current_rsi": row["current_rsi"],
                     "volume_ratio": row["volume_ratio"],
-                    "score": round(float(row["score"]), 4),
+                    "score": round(float(row["composite_score"]), 4),
+                    "composite_score": round(float(row["composite_score"]), 4),
+                    "tier_label": row["tier_label"],
                     "regime": regime_str,
                 })
-                logger.info(
-                    f"[RANKED #{_ + 1}] {row['ticker']} | "
-                    f"Score: {row['score']:.4f} | "
-                    f"WR: {row['win_rate']:.1f}% | "
-                    f"Exp: {row['expectancy_pct']:.2f}% | "
-                    f"Upside: {row['upside_pct']:.1f}%"
-                )
         else:
             logger.warning("No signals survived gates. 0 recommendations this scan.")
     elif not trade_allowed:

@@ -46,10 +46,10 @@ def fetch_sp500_tickers() -> List[str]:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         tables = pd.read_html(url, timeout=10)
         sp500_table = tables[0]
-        tickers = sp500_table["Symbol"].tolist()
         
         # Clean and validate
-        tickers = [t.strip().upper().replace(".", "-") for t in tickers if isinstance(t, str)]
+        tickers = sp500_table["Symbol"].str.replace(".", "-", regex=False).tolist()
+        tickers = [t.strip().upper() for t in tickers if isinstance(t, str)]
         
         logger.info(f"Successfully fetched {len(tickers)} tickers from Wikipedia")
         return tickers

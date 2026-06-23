@@ -63,7 +63,7 @@ export default async function Page() {
                 Stock Recommendation Engine
               </h1>
               <p className="mt-2 text-sm text-gray-600">
-                Strategy 1.2 &mdash; Regime-Aware Ranking. Gated &amp; percentile-normalized. Updated nightly.
+                Strategy 1.3 &mdash; Regime-Aware Ranking. RSI Pullback+Recovery, ADX&ge;20, MACD Confirmed. Updated nightly.
               </p>
             </div>
             {data.length > 0 && (

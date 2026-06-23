@@ -19,11 +19,13 @@ interface TableProps {
 }
 
 function RegimeBanner({ regime }: { regime: string | null }) {
+  const strategyDesc = "Strategy 1.3 — Regime-Aware Ranking. RSI Pullback+Recovery, ADX≥20, MACD Confirmed. Updated nightly.";
+
   if (regime === 'bull') {
     return (
       <div className="mb-6 rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
         <span className="mr-2 font-bold">Bull Market Regime Active</span>
-        &mdash; Strategy 1.2 Rev B Composite Scoring Active (Focusing on Technical Momentum &amp; Trend continuation).
+        &mdash; {strategyDesc}
       </div>
     );
   }
@@ -32,7 +34,7 @@ function RegimeBanner({ regime }: { regime: string | null }) {
     return (
       <div className="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">
         <span className="mr-2 font-bold">Bear Market Regime Active</span>
-        &mdash; Composite Scoring Active (Boosting low-beta/defensive sectors).
+        &mdash; {strategyDesc}
       </div>
     );
   }
@@ -41,7 +43,7 @@ function RegimeBanner({ regime }: { regime: string | null }) {
     return (
       <div className="mb-6 rounded-lg border border-blue-300 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-800">
         <span className="mr-2 font-bold">Sideways Market Regime Active</span>
-        &mdash; Composite Scoring Active (Boosting mean-reversion candidates near RSI 50).
+        &mdash; {strategyDesc}
       </div>
     );
   }
@@ -54,14 +56,13 @@ function RegimeBanner({ regime }: { regime: string | null }) {
 }
 
 function winRateColor(val: number): string {
-  if (val > 40) return 'text-green-600 font-semibold';
-  if (val >= 25) return 'text-yellow-600 font-semibold';
+  if (val >= 40) return 'text-green-600 font-semibold';
+  if (val >= 30) return 'text-yellow-600 font-semibold';
   return 'text-red-600 font-semibold';
 }
 
 function expectancyColor(val: number): string {
-  if (val > 2) return 'text-green-600 font-semibold';
-  if (val >= 0) return 'text-yellow-600 font-semibold';
+  if (val > 0) return 'text-green-600 font-semibold';
   return 'text-red-600 font-semibold';
 }
 
@@ -105,16 +106,32 @@ function tierBadge(val: string | null | undefined): React.ReactNode {
   );
 }
 
-function compositeScoreBar(val: number | null | undefined): React.ReactNode {
+const adxBadge = (adx: number | null) => {
+  if (adx === null) return <span className="text-gray-400">—</span>;
+  if (adx >= 40) return <span className="bg-green-100 text-green-800 px-2 py-0.5 rounded text-xs font-medium border border-green-200">ADX {adx.toFixed(0)} Power</span>;
+  if (adx >= 25) return <span className="bg-blue-100 text-blue-800 px-2 py-0.5 rounded text-xs font-medium border border-blue-200">ADX {adx.toFixed(0)} Strong</span>;
+  return <span className="bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs font-medium border border-gray-200">ADX {adx.toFixed(0)}</span>;
+};
+
+function compositeScoreBar(val: number | null | undefined, macdHist: number | null): React.ReactNode {
   if (typeof val !== 'number') return '-';
   let barColor = 'bg-red-500';
   if (val >= 70) barColor = 'bg-green-500';
   else if (val >= 55) barColor = 'bg-yellow-500';
   else if (val >= 40) barColor = 'bg-gray-400';
   
+  const macdArrow = (histogram: number | null) => {
+    if (histogram === null) return null;
+    if (histogram > 0) return <span className="text-green-600 font-bold ml-1" title={`MACD Hist: ${histogram.toFixed(4)}`}>↑</span>;
+    return <span className="text-red-500 font-bold ml-1" title={`MACD Hist: ${histogram.toFixed(4)}`}>↓</span>;
+  };
+
   return (
     <div className="flex flex-col gap-1 w-24">
-      <span className="font-bold text-gray-900">{val.toFixed(1)}</span>
+      <div className="flex items-center">
+        <span className="font-bold text-gray-900">{val.toFixed(1)}</span>
+        {macdArrow(macdHist)}
+      </div>
       <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
         <div className={`${barColor} h-1.5 rounded-full`} style={{ width: `${val}%` }} />
       </div>
@@ -151,9 +168,31 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
         cell: (info) => tierBadge(info.getValue() as string),
       },
       {
+        accessorKey: 'adx_value',
+        header: 'ADX(14)',
+        cell: (info) => adxBadge(info.getValue() as number | null),
+      },
+      {
         accessorKey: 'composite_score',
         header: 'Composite Score',
-        cell: (info) => compositeScoreBar(info.getValue() as number),
+        cell: (info) => compositeScoreBar(info.getValue() as number, info.row.original.macd_histogram),
+      },
+      {
+        accessorKey: 'current_rsi',
+        header: 'RSI(14)',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          if (typeof val !== 'number') return '-';
+          const rsiMin = info.row.original.rsi_min_10d;
+          return (
+            <span 
+              className="underline decoration-dotted cursor-help text-gray-800 font-medium"
+              title={`RSI dipped to ${rsiMin !== null && rsiMin !== undefined ? rsiMin.toFixed(1) : 'N/A'} in last 10 days, now at ${val.toFixed(1)} — confirmed pullback recovery`}
+            >
+              {val.toFixed(1)}
+            </span>
+          );
+        }
       },
       {
         accessorKey: 'industry',

@@ -21,6 +21,10 @@ export interface Recommendation {
   median_holding_days: number;
   composite_score: number | null;
   tier_label: string | null;
+  adx_value: number | null;
+  macd_histogram: number | null;
+  rsi_min_10d: number | null;
+  ema20: number | null;
 }
 
 export interface ScanLog {

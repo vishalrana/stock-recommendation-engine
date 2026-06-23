@@ -1,12 +1,12 @@
 """
-Signal Ranker — Strategy 1.2 Rev B
+Signal Ranker — Strategy 1.3 Rev A
 ===================================
-Composite-normalized, tiered ranking engine for Strategy 1.2.
+Composite-normalized, tiered ranking engine for Strategy 1.3.
 
-Replaces hard gates with a composite scoring system:
-  - Technical Momentum (40%): RSI, Proximity to 50 DMA, Volume Ratio
-  - Risk-Adjusted Expectancy (30%): Z-score in pool, with negative expectancy penalty
-  - Historical Win Rate (20%): Percentile rank (min 3 trades required)
+Weights:
+  - Technical Momentum (30%): RSI, Proximity to 50 DMA, Volume Ratio, MACD histogram
+  - Risk-Adjusted Expectancy (40%): Z-score in pool, with negative expectancy penalty
+  - Historical Win Rate (20%): Percentile rank
   - Regime Adjustment (10%): Bull/Bear/Sideways specific bonus
 """
 
@@ -23,8 +23,8 @@ class SignalRanker:
     Composite-normalized ranking engine with tiered fallback.
     """
 
-    WEIGHT_MOMENTUM = 0.40
-    WEIGHT_EXPECTANCY = 0.30
+    WEIGHT_MOMENTUM = 0.30
+    WEIGHT_EXPECTANCY = 0.40
     WEIGHT_WIN_RATE = 0.20
     WEIGHT_REGIME = 0.10
 
@@ -94,6 +94,14 @@ class SignalRanker:
             + self.WEIGHT_REGIME * regime_score
         )
         
+        # Absolute Composite Floor:
+        # A stock with negative expectancy AND win rate < 30% cannot score above 45
+        # (caps it at Watch or Speculative tier, never Buy or Strong Buy)
+        expectancy_pct = row.get("expectancy_pct", 0.0)
+        win_rate = row.get("win_rate", 0.0)
+        if expectancy_pct < 0.0 and win_rate < 30.0:
+            total = min(total, 45.0)
+        
         return {
             "total": round(total, 4),
             "breakdown": {
@@ -111,13 +119,9 @@ class SignalRanker:
         if df.empty:
             return df.copy()
 
-        # Hard minimum trades gate: total_trades >= 3
-        df_filtered = df[df["total_trades"] >= 3].copy()
-        if df_filtered.empty:
-            logger.warning("No signals passed the minimum trades gate (total_trades >= 3).")
-            return df_filtered
+        df_filtered = df.copy()
 
-        # 1. Compute Technical Momentum
+        # 1. Compute Technical Momentum (30% weight)
         # RSI score (peaks at 50, decreases as it moves away)
         rsi_vals = df_filtered["current_rsi"]
         rsi_score = 100.0 - (rsi_vals - 50.0).abs() * 4.0
@@ -135,10 +139,19 @@ class SignalRanker:
         volume_score = vol_ratio_vals * 50.0
         volume_score = volume_score.clip(lower=0.0, upper=100.0)
 
-        raw_momentum = (rsi_score + proximity_score + volume_score) / 3.0
-        df_filtered["momentum_score"] = self.normalize_percentile(raw_momentum)
+        # MACD score
+        macd_hist_vals = df_filtered.get("macd_histogram", pd.Series(0.0, index=df_filtered.index))
+        macd_score = 50.0 + macd_hist_vals * 200.0
+        macd_score = macd_score.clip(lower=0.0, upper=100.0)
 
-        # 2. Risk-Adjusted Expectancy
+        raw_momentum = (rsi_score + proximity_score + volume_score + macd_score) / 4.0
+        
+        # Absolute floor BEFORE percentile normalization:
+        # If raw_momentum < 55, this stock gets a Momentum Score of 0 regardless of pool rank.
+        pct_normalized = self.normalize_percentile(raw_momentum)
+        df_filtered["momentum_score"] = pct_normalized.where(raw_momentum >= 55.0, 0.0)
+
+        # 2. Risk-Adjusted Expectancy (40% weight)
         mean_exp = df_filtered["expectancy_pct"].mean()
         std_exp = df_filtered["expectancy_pct"].std()
         if pd.isna(std_exp) or std_exp < 0.0001:
@@ -149,12 +162,13 @@ class SignalRanker:
         # Map to 0-100 using sigmoid
         exp_score = 100.0 / (1.0 + np.exp(-z_scores))
 
-        # Soften negative expectancy penalty: raw = max(15, raw - 20)
+        # Increase the negative expectancy penalty from -20 to -30:
+        # If expectancy_pct < 0, raw = max(5, raw - 30)
         neg_mask = df_filtered["expectancy_pct"] < 0
-        exp_score[neg_mask] = (exp_score[neg_mask] - 20.0).clip(lower=15.0)
+        exp_score[neg_mask] = (exp_score[neg_mask] - 30.0).clip(lower=5.0)
         df_filtered["expectancy_score"] = exp_score
 
-        # 3. Historical Win Rate
+        # 3. Historical Win Rate (20% weight)
         df_filtered["winrate_score"] = self.normalize_percentile(df_filtered["win_rate"])
 
         # 4. Regime Adjustment & 5. Composite Score
@@ -162,7 +176,6 @@ class SignalRanker:
         composite_scores = []
         score_breakdowns = []
         for _, row in df_filtered.iterrows():
-            # Pass pre-calculated scores in row dict
             reg_score = self.regime_adjustment(row["momentum_score"], regime, row)
             regime_scores.append(reg_score)
             
@@ -178,19 +191,20 @@ class SignalRanker:
         df_filtered["score_breakdown"] = score_breakdowns
 
         # 6. Assign Tier Labels
-        # Tier 1 "Strong Buy": score >= 70, all raw metrics positive (exp > 0, win > 0)
-        # Tier 2 "Buy": score >= 55, expectancy >= -2.0, win_rate >= 20
-        # Tier 3 "Watch": score >= 40
-        # Tier 4 "Speculative": score < 40
+        # Tier 1 "Strong Buy": score >= 70, expectancy_pct > 0.0, win_rate >= 35.0, total_trades >= 10
+        # Tier 2 "Buy": score >= 58, expectancy_pct >= 0.0, win_rate >= 30.0, total_trades >= 10
+        # Tier 3 "Watch": score >= 45, expectancy_pct >= -1.0
+        # Tier 4 "Speculative": score < 45 or doesn't meet Watch
         tiers = []
         for _, row in df_filtered.iterrows():
             score = row["composite_score"]
             exp = row["expectancy_pct"]
             wr = row["win_rate"]
+            trades = row.get("total_trades", 0)
 
-            is_t1 = (score >= 70) and (exp > 0) and (wr > 0)
-            is_t2 = (score >= 55) and (exp >= -2.0) and (wr >= 20)
-            is_t3 = (score >= 40)
+            is_t1 = (score >= 70) and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
+            is_t2 = (score >= 58) and (exp >= 0.0) and (wr >= 30.0) and (trades >= 10)
+            is_t3 = (score >= 45) and (exp >= -1.0)
 
             if is_t1:
                 tiers.append(1)
@@ -213,7 +227,7 @@ class SignalRanker:
         t3_eligible = df_filtered[df_filtered["temp_tier"] == 3]
         t4_eligible = df_filtered[df_filtered["temp_tier"] == 4]
 
-        # Auto-relax selection
+        # Auto-relax selection (T1 -> T2 -> T3 -> Speculative)
         if len(t1_eligible) >= 3:
             t1_sorted = t1_eligible.sort_values("composite_score", ascending=False)
             t2_sorted = t2_eligible.sort_values("composite_score", ascending=False)
@@ -236,10 +250,11 @@ class SignalRanker:
 
     def rank(self, signals_df: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
         """Backward compatibility wrapper mapping to composite_rank with default bull regime."""
-        # Add default dma_50 to input if missing
         df = signals_df.copy()
         if "dma_50" not in df.columns:
             df["dma_50"] = df["price"]
+        if "macd_histogram" not in df.columns:
+            df["macd_histogram"] = 0.0
         return self.composite_rank(df, "bull", top_n)
 
 
@@ -250,7 +265,7 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("  SIGNAL COMPOSITE RANKER TEST (Strategy 1.2 Rev B)")
+    print("  SIGNAL COMPOSITE RANKER TEST (Strategy 1.3 Rev A)")
     print("=" * 60)
 
     # Test data mimicking actual conditions
@@ -264,7 +279,8 @@ if __name__ == "__main__":
             "dma_50": [135.0, 82.0, 58.0, 240.0, 110.0, 15.0],
             "current_rsi": [56.1, 53.9, 60.3, 52.0, 68.0, 30.0],
             "volume_ratio": [1.10, 1.17, 2.33, 1.5, 2.0, 0.5],
-            "total_trades": [15, 12, 10, 22, 30, 2],  # INVALID has 2 trades (< 3)
+            "macd_histogram": [0.12, -0.05, 0.22, 0.45, 0.35, -0.20],
+            "total_trades": [15, 12, 10, 22, 30, 2],
             "industry": ["Hotels, Resorts & Cruise Lines", "Multi-Utilities", "Metal, Glass & Plastic Containers", "Automobile Manufacturers", "Semiconductors", "Unknown"],
         }
     )
@@ -284,18 +300,19 @@ if __name__ == "__main__":
 
     # Assertions
     tickers_ranked = result_bull["ticker"].tolist()
-    assert "INVALID" not in tickers_ranked, "INVALID should be filtered due to total_trades = 2 < 3"
     assert len(tickers_ranked) == 5, f"Expected 5 ranked signals, got {len(tickers_ranked)}"
     
     # TSLA should be Tier 1 (Strong Buy) because scores are high and expectancy/winrate positive
     tsla_row = result_bull[result_bull["ticker"] == "TSLA"].iloc[0]
     nvda_row = result_bull[result_bull["ticker"] == "NVDA"].iloc[0]
     assert tsla_row["tier_label"] == "Strong Buy", f"TSLA expected Strong Buy, got {tsla_row['tier_label']}"
-    assert nvda_row["tier_label"] == "Buy", f"NVDA expected Buy, got {nvda_row['tier_label']}"
+    assert nvda_row["tier_label"] == "Strong Buy", f"NVDA expected Strong Buy, got {nvda_row['tier_label']}"
     
-    # BALL should be Tier 2 (Buy) because exp is -0.6 >= -2.0, winrate is 24.1 >= 20
+    # AEE and BALL have expectancy < 0 and win_rate < 30 so they must be capped at 45.0. Since they meet Watch expectancy min (-1.0), they should be Watch.
+    aee_row = result_bull[result_bull["ticker"] == "AEE"].iloc[0]
     ball_row = result_bull[result_bull["ticker"] == "BALL"].iloc[0]
-    assert ball_row["tier_label"] == "Buy", f"BALL expected Buy, got {ball_row['tier_label']}"
+    assert aee_row["composite_score"] <= 45.0, f"AEE score capped at 45, got {aee_row['composite_score']}"
+    assert ball_row["composite_score"] <= 45.0, f"BALL score capped at 45, got {ball_row['composite_score']}"
     
     print("  All assertions passed!")
     print("=" * 60)

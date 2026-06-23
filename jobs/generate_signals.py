@@ -1,16 +1,16 @@
 """
-Generate Signals — Strategy 1.2
-================================
+Generate Signals — Strategy 1.3 Rev A
+======================================
 Regime-aware, gated, percentile-normalized signal generator.
 
 Flow:
   1. Detect market regime (SPY vs 200 DMA)
-  2. Scan tickers with technical filters (trend, RSI, volume)
+  2. Scan tickers with technical filters (trend, RSI, ADX, MACD, volume, risk/reward, trades floor)
   3. Merge with historical backtest metrics from ticker_metrics
   4. Apply gated percentile-normalized ranking (SignalRanker)
-  5. Archive previous signals to signals_history
+  5. Archive previous signals to signals_history (including new indicator columns)
   6. Clear and insert ranked signals
-  7. Log results with regime metadata
+  7. Log results with regime metadata and gate rejection breakdown
 
 Usage:
     python -m jobs.generate_signals
@@ -42,10 +42,10 @@ from jobs.supabase_client import get_client
 # Ticker Blacklist
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
 
-# Strategy parameters (unchanged from 1.1 Beta)
-RSI_PULLBACK_THRESHOLD = 45
-RSI_RECOVERY_MIN = 45
-RSI_RECOVERY_MAX = 65
+# Strategy parameters
+RSI_PULLBACK_THRESHOLD = 45.0
+RSI_RECOVERY_MIN = 45.0
+RSI_RECOVERY_MAX = 62.0  # Changed from 65
 VOLUME_MULTIPLIER = 1.0
 TARGET_R_MULTIPLE = 3.0
 LOOKBACK_RSI_DAYS = 10
@@ -80,8 +80,8 @@ def find_swing_low(df_slice: pd.DataFrame) -> float:
     return None
 
 
-def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
-    """Fetch the first 100 constituents of S&P 500 from Wikipedia with fallbacks."""
+def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
+    """Fetch all constituents of S&P 500 from Wikipedia with fallbacks."""
     tickers = []
     company_names = {}
     industries = {}
@@ -91,12 +91,11 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         response = requests.get(
             url,
-            headers={"User-Agent": "stock-recommendation-engine/1.2"},
+            headers={"User-Agent": "stock-recommendation-engine/1.3"},
             timeout=15,
         )
         response.raise_for_status()
         raw_table = pd.read_html(StringIO(response.text))[0]
-        count = 0
         for _, row in raw_table.iterrows():
             ticker = str(row["Symbol"]).strip().upper().replace(".", "-")
             if ticker in BLACKLIST:
@@ -104,9 +103,6 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
             tickers.append(ticker)
             company_names[ticker] = str(row["Security"]).strip()
             industries[ticker] = str(row["GICS Sub-Industry"]).strip()
-            count += 1
-            if count >= 100:
-                break
         logger.info(f"Loaded {len(tickers)} tickers from Wikipedia (skipped blacklisted).")
     except Exception as e:
         logger.warning(f"Wikipedia fetch failed: {e}. Loading local fallback...")
@@ -133,17 +129,17 @@ def check_latest_signal(
     df: pd.DataFrame,
     company_name: str,
     industry: str,
-) -> dict:
+    total_trades: int,
+) -> tuple[dict, str]:
     """
-    Evaluate Strategy 1.2 technical filters on the latest bar.
+    Evaluate Strategy 1.3 Rev A technical filters on the latest bar.
 
-    Returns a dict with signal data if the ticker qualifies, or None.
-    Score is NOT calculated here — that's done by SignalRanker after all
-    signals are collected and metrics are merged.
+    Returns a tuple (signal_data, failed_gate_name).
+    If the stock passes all gates, failed_gate_name is None.
     """
     n_bars = len(df)
     if n_bars < 201:
-        return None
+        return None, "failed_trend_gate"
 
     t = n_bars - 1
 
@@ -154,44 +150,74 @@ def check_latest_signal(
     volumes = df["VOLUME"].to_numpy(dtype=float)
     vol_mas = df["VOLUME_MA_20"].to_numpy(dtype=float)
     highs = df["HIGH"].to_numpy(dtype=float)
+    adxs = df["ADX_14"].to_numpy(dtype=float)
+    macd_lines = df["MACD_LINE"].to_numpy(dtype=float)
+    macd_sigs = df["MACD_SIGNAL"].to_numpy(dtype=float)
+    macd_hists = df["MACD_HIST"].to_numpy(dtype=float)
+    ema20s = df["EMA_20"].to_numpy(dtype=float)
     dates = df.index
 
-    c, d50, d200, rsi_now = closes[t], dma50s[t], dma200s[t], rsis[t]
-    vol, vma = volumes[t], vol_mas[t]
-    if any(np.isnan(x) for x in (c, d50, d200, rsi_now, vol, vma)):
-        return None
+    c = closes[t]
+    d50 = dma50s[t]
+    d200 = dma200s[t]
+    rsi_now = rsis[t]
+    vol = volumes[t]
+    vma = vol_mas[t]
+    adx_now = adxs[t]
+    macd_line = macd_lines[t]
+    macd_sig = macd_sigs[t]
+    macd_hist = macd_hists[t]
+    ema20 = ema20s[t]
 
-    # 1. Trend: Price > 50 DMA > 200 DMA
+    if any(np.isnan(x) for x in (c, d50, d200, rsi_now, vol, vma, adx_now, macd_line, macd_sig, macd_hist, ema20)):
+        return None, "failed_trend_gate"
+
+    # 1. Trend alignment: Price > 50 DMA > 200 DMA
     if not (c > d50 > d200):
-        return None
+        return None, "failed_trend_gate"
 
-    # 2. RSI Pullback: min RSI in last 10 days < 45
+    # 2. RSI pullback-recovery: rsi_min_10d < 45 AND 45 <= current_rsi <= 62
     rsi_window = rsis[max(0, t - LOOKBACK_RSI_DAYS + 1) : t + 1]
-    min_rsi = np.nanmin(rsi_window)
-    if min_rsi >= RSI_PULLBACK_THRESHOLD:
-        return None
+    rsi_min_10d = np.nanmin(rsi_window)
+    if not (rsi_min_10d < RSI_PULLBACK_THRESHOLD and RSI_RECOVERY_MIN <= rsi_now <= RSI_RECOVERY_MAX):
+        return None, "failed_rsi_gate"
 
-    # 3. Current RSI Recovery: 45 <= RSI <= 65
-    if not (RSI_RECOVERY_MIN <= rsi_now <= RSI_RECOVERY_MAX):
-        return None
+    # 3. ADX trend strength: adx_14 >= 20
+    if not (adx_now >= 20.0):
+        return None, "failed_adx_gate"
 
-    # 4. Volume > 1.0x 20-day average
-    if not (vol > vma * VOLUME_MULTIPLIER):
-        return None
+    # 4. MACD momentum: macd_line > signal_line
+    if not (macd_line > macd_sig):
+        return None, "failed_macd_gate"
 
-    # 5. Swing Low Stop-loss
+    # 5. Volume confirmation: volume_ratio >= 1.0x
+    volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
+    if not (volume_ratio >= VOLUME_MULTIPLIER):
+        return None, "failed_volume_gate"
+
+    # 6. Swing Low Stop-loss
     stop_loss = find_swing_low(df)
     if stop_loss is None:
-        return None
+        return None, "failed_rr_gate"
 
     entry_price = round(highs[t] * 1.001, 2)
     if stop_loss >= entry_price:
-        return None
+        return None, "failed_rr_gate"
 
     risk = entry_price - stop_loss
     if risk <= 0:
-        return None
+        return None, "failed_rr_gate"
+    
     exit_price = round(entry_price + risk * TARGET_R_MULTIPLE, 2)
+    
+    # Risk/Reward check
+    rr = (exit_price - entry_price) / (entry_price - stop_loss)
+    if rr < 3.0:
+        return None, "failed_rr_gate"
+
+    # 7. Historical data floor: total_trades >= 10 in ticker_metrics
+    if total_trades < 10:
+        return None, "failed_trades_gate"
 
     latest_date = dates[t]
     if hasattr(latest_date, 'date'):
@@ -200,7 +226,6 @@ def check_latest_signal(
         signal_date = str(latest_date)[:10]
 
     upside_pct = round(((exit_price - entry_price) / entry_price) * 100.0, 2)
-    volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
 
     return {
         "scan_date": signal_date,
@@ -215,8 +240,12 @@ def check_latest_signal(
         "upside_pct": upside_pct,
         "risk_reward": float(TARGET_R_MULTIPLE),
         "current_rsi": round(rsi_now, 2),
+        "rsi_min_10d": round(float(rsi_min_10d), 2),
         "volume_ratio": volume_ratio,
-    }
+        "adx_value": round(float(adx_now), 2),
+        "macd_histogram": round(float(macd_hist), 4),
+        "ema20": round(float(ema20), 2),
+    }, None
 
 
 def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
@@ -245,7 +274,11 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "upside_pct": sig.get("upside_pct"),
                 "risk_reward": sig.get("risk_reward"),
                 "current_rsi": sig.get("current_rsi"),
+                "rsi_min_10d": sig.get("rsi_min_10d"),
                 "volume_ratio": sig.get("volume_ratio"),
+                "adx_value": sig.get("adx_value"),
+                "macd_histogram": sig.get("macd_histogram"),
+                "ema20": sig.get("ema20"),
                 "score": sig.get("score"),
                 "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
                 "tier_label": sig.get("tier_label", "Speculative"),
@@ -265,8 +298,19 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
 def main():
     start_time = time.time()
     logger.info("=" * 60)
-    logger.info("Strategy 1.2 — Regime-Aware Signal Generator")
+    logger.info("Strategy 1.3 Rev A — Regime-Aware Signal Generator")
     logger.info("=" * 60)
+
+    # Initialize gate rejection counts
+    gate_rejections = {
+        "failed_rsi_gate": 0,
+        "failed_adx_gate": 0,
+        "failed_macd_gate": 0,
+        "failed_trend_gate": 0,
+        "failed_volume_gate": 0,
+        "failed_rr_gate": 0,
+        "failed_trades_gate": 0,
+    }
 
     # ── Step 1: Detect market regime ─────────────────────────
     regime_info = get_regime()
@@ -281,26 +325,12 @@ def main():
         trade_allowed,
     )
 
-    # ── Step 2: Set gate thresholds based on regime ──────────
-    if regime_str == "bull":
-        min_expectancy = 0
-        min_win_rate = 25
-    else:
-        min_expectancy = 2.0
-        min_win_rate = 35
-    min_trades = 5
-
-    logger.info(
-        "Gate thresholds: expectancy > %.1f, win_rate >= %.1f, trades >= %d",
-        min_expectancy, min_win_rate, min_trades,
-    )
-
-    # ── Step 3: Load S&P 500 tickers ─────────────────────────
-    tickers, company_names, industries = fetch_sp500_tickers_100()
+    # ── Step 2: Load S&P 500 tickers ─────────────────────────
+    tickers, company_names, industries = fetch_sp500_tickers_all()
 
     os.makedirs(os.path.join(PROJECT_ROOT, "data", "cache"), exist_ok=True)
 
-    # ── Step 4: Download data if CI or cache empty ───────────
+    # ── Step 3: Download data if CI or cache empty ───────────
     is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     force_download = os.environ.get("DOWNLOAD_DATA") == "true"
     cache_empty = len(glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet"))) == 0
@@ -317,7 +347,7 @@ def main():
             fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
         logger.info("Finished downloading daily data.")
 
-    # ── Step 5: Scan tickers with technical filters ──────────
+    # ── Step 4: Scan tickers with technical filters ──────────
     cache_path = os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")
     parquet_files = sorted(glob.glob(cache_path))
     total_files = len(parquet_files)
@@ -377,15 +407,22 @@ def main():
 
             company_name = company_names.get(ticker, ticker)
             industry = industries.get(ticker, "Unknown")
+            
+            # Fetch total trades for this ticker (historical_data_floor gate)
+            total_trades = metrics_map.get(ticker, {}).get("total_trades", 0)
 
-            sig = check_latest_signal(ticker, df, company_name, industry)
+            sig, failed_gate = check_latest_signal(ticker, df, company_name, industry, total_trades)
             if sig is not None:
                 raw_signals.append(sig)
                 logger.info(
                     f"[QUALIFIED] {ticker} | Entry: ${sig['entry_price']:.2f} | "
                     f"Stop: ${sig['stop_loss']:.2f} | Exit: ${sig['exit_price']:.2f} | "
-                    f"RSI: {sig['current_rsi']:.1f} | Vol: {sig['volume_ratio']:.2f}x"
+                    f"RSI: {sig['current_rsi']:.1f} | Vol: {sig['volume_ratio']:.2f}x | "
+                    f"ADX: {sig['adx_value']:.1f} | MACD Hist: {sig['macd_histogram']:.4f}"
                 )
+            else:
+                if failed_gate in gate_rejections:
+                    gate_rejections[failed_gate] += 1
 
         except Exception as e:
             logger.error(f"Error scanning {ticker}: {e}")
@@ -397,40 +434,40 @@ def main():
         logger.error("No valid scan date could be determined.")
         sys.exit(1)
 
-    # ── Step 6: Merge with metrics and apply ranking ─────────
+    # ── Step 5: Merge with metrics and apply ranking ─────────
     signals_recommended = 0
     ranked_signals = []
+    error_msg = None
 
     if raw_signals and trade_allowed:
         # Build DataFrame with metrics columns for the ranker
         signals_df = pd.DataFrame(raw_signals)
         signals_df["win_rate"] = signals_df["ticker"].apply(
-            lambda t: metrics_map.get(t, {}).get("win_rate", 0)
+            lambda t: metrics_map.get(t, {}).get("win_rate", 0.0)
         )
         signals_df["expectancy_pct"] = signals_df["ticker"].apply(
-            lambda t: metrics_map.get(t, {}).get("expectancy_pct", 0)
+            lambda t: metrics_map.get(t, {}).get("expectancy_pct", 0.0)
         )
         signals_df["total_trades"] = signals_df["ticker"].apply(
             lambda t: metrics_map.get(t, {}).get("total_trades", 0)
         )
 
-        logger.info("Applying composite ranking (Strategy 1.2 Rev B)...")
+        logger.info("Applying composite ranking (Strategy 1.3 Rev A)...")
         ranker = SignalRanker()
-        # Fetch all ranked candidates to log them
         scored_df = ranker.composite_rank(signals_df, regime_str, top_n=len(signals_df))
 
         if not scored_df.empty:
             # Log per-candidate
             for idx, row in scored_df.iterrows():
                 breakdown = row["score_breakdown"]
-                a = 0.40 * breakdown["momentum"]
-                b = 0.30 * breakdown["expectancy"]
+                a = 0.30 * breakdown["momentum"]
+                b = 0.40 * breakdown["expectancy"]
                 c = 0.20 * breakdown["winrate"]
                 d = 0.10 * breakdown["regime"]
                 
                 logger.info(
                     f"{row['ticker']} | Composite: {row['composite_score']:.1f} | Tier: {row['tier_label']} | "
-                    f"Momentum: {a:.1f}/40, Expectancy: {b:.1f}/30, WinRate: {c:.1f}/20, Regime: {d:.1f}/10 | "
+                    f"Momentum: {a:.1f}/30, Expectancy: {b:.1f}/40, WinRate: {c:.1f}/20, Regime: {d:.1f}/10 | "
                     f"Raw: exp={row['expectancy_pct']:.2f}%, win={row['win_rate']:.1f}%, trades={row['total_trades']}"
                 )
 
@@ -461,7 +498,11 @@ def main():
                     "upside_pct": row["upside_pct"],
                     "risk_reward": row["risk_reward"],
                     "current_rsi": row["current_rsi"],
+                    "rsi_min_10d": row["rsi_min_10d"],
                     "volume_ratio": row["volume_ratio"],
+                    "adx_value": row["adx_value"],
+                    "macd_histogram": row["macd_histogram"],
+                    "ema20": row["ema20"],
                     "score": round(float(row["composite_score"]), 4),
                     "composite_score": round(float(row["composite_score"]), 4),
                     "tier_label": row["tier_label"],
@@ -476,10 +517,14 @@ def main():
     else:
         logger.info("No technically qualified signals found.")
 
-    # ── Step 7: Archive current signals before clearing ──────
+    # Auto-relax warning check
+    if signals_recommended < 3 and trade_allowed:
+        error_msg = "WARN: Low signal count — consider relaxing RSI dip_threshold to 48"
+        logger.warning(error_msg)
+
+    # ── Step 6: Archive current signals before clearing ──────
     duration = round(time.time() - start_time, 2)
     status = "success"
-    error_msg = None
 
     try:
         archive_current_signals(supabase, regime_str, metrics_map)
@@ -502,7 +547,7 @@ def main():
         error_msg = str(e)
         logger.error(f"Database update failed: {e}")
 
-    # ── Step 8: Log to scan_log ──────────────────────────────
+    # ── Step 7: Log to scan_log ──────────────────────────────
     scan_log_row = {
         "scan_date": signal_date,
         "tickers_scanned": scanned_count,
@@ -513,6 +558,13 @@ def main():
         "status": status,
         "error_message": error_msg,
         "regime": regime_str,
+        "failed_rsi_gate": gate_rejections["failed_rsi_gate"],
+        "failed_adx_gate": gate_rejections["failed_adx_gate"],
+        "failed_macd_gate": gate_rejections["failed_macd_gate"],
+        "failed_trend_gate": gate_rejections["failed_trend_gate"],
+        "failed_volume_gate": gate_rejections["failed_volume_gate"],
+        "failed_rr_gate": gate_rejections["failed_rr_gate"],
+        "failed_trades_gate": gate_rejections["failed_trades_gate"],
     }
 
     try:
@@ -527,7 +579,7 @@ def main():
         sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("Strategy 1.2 signal generation complete.")
+    logger.info("Strategy 1.3 Rev A signal generation complete.")
     logger.info(
         "Regime: %s | Scanned: %d | Qualified: %d | Recommended: %d | Duration: %.1fs",
         regime_str.upper(), scanned_count, signals_qualified, signals_recommended, duration,

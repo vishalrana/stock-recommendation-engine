@@ -1,19 +1,21 @@
 """
-Validate Ranking — Strategy 1.2
-================================
+Validate Ranking — Strategy 1.3 Rev A
+======================================
 Post-deployment validation script that evaluates the quality of
-signals produced by the new gated percentile-normalized ranking.
+signals produced by the ranking system.
 
-Queries signals_history, fetches actual prices 20 trading days later,
-and determines whether each signal hit its target, stop, or is still open.
+Can be run manually to generate a markdown validation report, or
+automatically with the `--auto` flag to track outcomes 28 days later.
 
 Usage:
-    python -m jobs.validate_ranking
+    python -m jobs.validate_ranking [--auto]
 """
 
 import os
 import sys
 import logging
+import time
+import argparse
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -55,7 +57,7 @@ def fetch_signals_history(supabase, days: int = 30) -> pd.DataFrame:
 
 
 def evaluate_signal(ticker: str, scan_date_str: str, entry_price: float,
-                    stop_loss: float, exit_price: float) -> dict:
+                     stop_loss: float, exit_price: float) -> dict:
     """
     Fetch actual price data after the signal date and determine outcome.
 
@@ -131,7 +133,7 @@ def evaluate_signal(ticker: str, scan_date_str: str, entry_price: float,
 def generate_report(results: list, signals_df: pd.DataFrame) -> str:
     """Generate markdown validation report."""
     lines = []
-    lines.append("# Validation Report - Strategy 1.2")
+    lines.append("# Validation Report - Strategy 1.3 Rev A")
     lines.append("")
     lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
@@ -215,7 +217,6 @@ def generate_report(results: list, signals_df: pd.DataFrame) -> str:
     lines.append("")
     lines.append("## Notes")
     lines.append("")
-    lines.append("- Old ranking formula comparison requires historical signals_history with old scores. Future enhancement.")
     lines.append("- Signals marked 'open' have not yet hit target or stop within the evaluation window.")
     lines.append(f"- Evaluation window: {EVALUATION_DAYS} trading days.")
 
@@ -223,45 +224,169 @@ def generate_report(results: list, signals_df: pd.DataFrame) -> str:
 
 
 def main():
-    logger.info("Starting Strategy 1.2 ranking validation...")
+    parser = argparse.ArgumentParser(description="Validate Stock Ranking Recommendations")
+    parser.add_argument("--auto", action="store_true", help="Automated outcome tracking mode (28 calendar days lag)")
+    args = parser.parse_args()
 
     supabase = get_client()
-    signals_df = fetch_signals_history(supabase, days=30)
 
-    if signals_df.empty:
-        logger.warning("No signals_history entries found. Writing minimal report.")
-        report = generate_report([], signals_df)
+    if args.auto:
+        start_time = time.time()
+        # Validation date is exactly 28 calendar days ago (approx 20 trading days)
+        target_date = datetime.now().date() - timedelta(days=28)
+        target_date_str = target_date.isoformat()
+        logger.info(f"Starting automated outcome tracking for scan_date: {target_date_str}...")
+
+        # Query signals_history
+        res = (
+            supabase.table("signals_history")
+            .select("*")
+            .eq("scan_date", target_date_str)
+            .execute()
+        )
+        signals = res.data or []
+
+        if not signals:
+            logger.info(f"No historical signals found for date: {target_date_str}. Nothing to validate.")
+            # Log a summary row anyway to record that we checked
+            duration = round(time.time() - start_time, 2)
+            scan_log_row = {
+                "scan_date": target_date_str,
+                "tickers_scanned": 0,
+                "signals_generated": 0,
+                "signals_qualified": 0,
+                "signals_recommended": 0,
+                "scan_duration_secs": duration,
+                "status": "validation",
+                "error_message": f"No signals found for validation on {target_date_str}",
+            }
+            supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
+            return
+
+        logger.info(f"Found {len(signals)} signals to validate for {target_date_str}.")
+
+        wins_count = 0
+        losses_count = 0
+
+        for sig in signals:
+            ticker = sig.get("ticker", "").upper()
+            entry = float(sig.get("entry_price"))
+            stop = float(sig.get("stop_loss"))
+            target = float(sig.get("exit_price"))
+
+            logger.info(f"Validating outcome for {ticker}...")
+            outcome = evaluate_signal(ticker, target_date_str, entry, stop, target)
+            r = outcome.get("return_pct")
+
+            if r is None:
+                logger.warning(f"Could not retrieve price history for {ticker}. Skipping.")
+                continue
+
+            # Determine win or loss
+            if outcome["outcome"] == "target_hit":
+                is_win = True
+            elif outcome["outcome"] == "stop_hit":
+                is_win = False
+            elif outcome["outcome"] == "open":
+                is_win = (r > 0.0)
+            else:
+                logger.warning(f"Outcome is {outcome['outcome']} for {ticker}. Skipping.")
+                continue
+
+            if is_win:
+                wins_count += 1
+            else:
+                losses_count += 1
+
+            # Fetch existing metrics
+            met_res = supabase.table("ticker_metrics").select("*").eq("ticker", ticker).execute()
+            if met_res.data:
+                row = met_res.data[0]
+                wins = int(row.get("wins") or 0)
+                losses = int(row.get("losses") or 0)
+                total_signals = int(row.get("total_signals") or 0)
+                expectancy_pct_old = float(row.get("expectancy_pct") or 0.0)
+
+                if is_win:
+                    wins += 1
+                else:
+                    losses += 1
+                new_total = total_signals + 1
+                new_expectancy = (expectancy_pct_old * total_signals + r) / new_total
+                new_win_rate = (wins / new_total) * 100.0
+            else:
+                wins = 1 if is_win else 0
+                losses = 0 if is_win else 1
+                new_total = 1
+                new_expectancy = r
+                new_win_rate = 100.0 if is_win else 0.0
+
+            # Upsert ticker_metrics
+            upsert_data = {
+                "ticker": ticker,
+                "wins": wins,
+                "losses": losses,
+                "total_signals": new_total,
+                "win_rate": round(new_win_rate, 2),
+                "expectancy_pct": round(new_expectancy, 4),
+                "updated_at": datetime.now().isoformat(),
+            }
+            supabase.table("ticker_metrics").upsert(upsert_data, on_conflict="ticker").execute()
+            logger.info(f"Updated ticker_metrics for {ticker}: win_rate={upsert_data['win_rate']}%, expectancy={upsert_data['expectancy_pct']}%")
+
+        duration = round(time.time() - start_time, 2)
+        # Log a summary row to scan_log with status = 'validation'
+        scan_log_row = {
+            "scan_date": target_date_str,
+            "tickers_scanned": len(signals),
+            "signals_generated": wins_count + losses_count,
+            "signals_qualified": wins_count + losses_count,
+            "signals_recommended": len(signals),
+            "scan_duration_secs": duration,
+            "status": "validation",
+            "error_message": f"Auto validation complete. Wins: {wins_count}, Losses: {losses_count}",
+        }
+        supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
+        logger.info(f"Recorded validation log in scan_log for {target_date_str}. Duration: {duration}s")
+
     else:
-        logger.info("Found %d signals_history entries to evaluate.", len(signals_df))
+        logger.info("Starting manual validation report generation...")
+        signals_df = fetch_signals_history(supabase, days=30)
 
-        results = []
-        for idx, row in signals_df.iterrows():
-            ticker = row["ticker"]
-            scan_date = row["scan_date"]
-            entry = float(row["entry_price"])
-            stop = float(row["stop_loss"])
-            target = float(row["exit_price"])
+        if signals_df.empty:
+            logger.warning("No signals_history entries found. Writing minimal report.")
+            report = generate_report([], signals_df)
+        else:
+            logger.info("Found %d signals_history entries to evaluate.", len(signals_df))
 
-            logger.info("[%d/%d] Evaluating %s (scan_date=%s)...", idx + 1, len(signals_df), ticker, scan_date)
+            results = []
+            for idx, row in signals_df.iterrows():
+                ticker = row["ticker"]
+                scan_date = row["scan_date"]
+                entry = float(row["entry_price"])
+                stop = float(row["stop_loss"])
+                target = float(row["exit_price"])
 
-            outcome = evaluate_signal(ticker, str(scan_date), entry, stop, target)
-            outcome["ticker"] = ticker
-            outcome["scan_date"] = scan_date
-            outcome["entry_price"] = entry
-            outcome["stop_loss"] = stop
-            outcome["exit_price"] = target
-            results.append(outcome)
+                logger.info("[%d/%d] Evaluating %s (scan_date=%s)...", idx + 1, len(signals_df), ticker, scan_date)
 
-        report = generate_report(results, signals_df)
+                outcome = evaluate_signal(ticker, str(scan_date), entry, stop, target)
+                outcome["ticker"] = ticker
+                outcome["scan_date"] = scan_date
+                outcome["entry_price"] = entry
+                outcome["stop_loss"] = stop
+                outcome["exit_price"] = target
+                results.append(outcome)
 
-    # Write report
-    report_path = os.path.join(PROJECT_ROOT, "data", "validation_report.md")
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report)
+            report = generate_report(results, signals_df)
 
-    logger.info("Validation report written to: %s", report_path)
-    print("\n" + report)
+        # Write report
+        report_path = os.path.join(PROJECT_ROOT, "data", "validation_report.md")
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report)
+
+        logger.info("Validation report written to: %s", report_path)
+        print("\n" + report)
 
 
 if __name__ == "__main__":

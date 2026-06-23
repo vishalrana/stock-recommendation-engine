@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Stock Recommendation Engine",
-  description: "Nightly qualified stock recommendations using Strategy 1.1 Beta.",
+  description: "Nightly qualified stock recommendations using Strategy 1.3.",
 };
 
 export default function RootLayout({

@@ -1,5 +1,5 @@
 import { getSupabase } from '../lib/supabase';
-import { Recommendation } from '../types/database';
+import { Recommendation, ScanLog } from '../types/database';
 import RecommendationsTable from '../components/recommendations-table';
 
 // Force dynamic rendering — never prerender at build time
@@ -18,12 +18,37 @@ async function getRecommendations() {
   return (data || []) as Recommendation[];
 }
 
+async function getLatestScanLog(): Promise<ScanLog | null> {
+  try {
+    const { data, error } = await getSupabase()
+      .from('scan_log')
+      .select('*')
+      .order('scan_date', { ascending: false })
+      .limit(1);
+
+    if (error || !data || data.length === 0) {
+      return null;
+    }
+
+    return data[0] as ScanLog;
+  } catch {
+    return null;
+  }
+}
+
 export default async function Page() {
   let data: Recommendation[] = [];
   let errorMsg = '';
+  let regime: string | null = null;
 
   try {
-    data = await getRecommendations();
+    const [recommendations, scanLog] = await Promise.all([
+      getRecommendations(),
+      getLatestScanLog(),
+    ]);
+
+    data = recommendations;
+    regime = scanLog?.regime || (data.length > 0 ? data[0].regime : null);
   } catch (e: any) {
     errorMsg = e.message || 'Failed to load recommendations';
   }
@@ -38,7 +63,7 @@ export default async function Page() {
                 Stock Recommendation Engine
               </h1>
               <p className="mt-2 text-sm text-gray-600">
-                Qualified recommendations scan powered by Strategy 1.1 Beta rules. Updated nightly.
+                Strategy 1.2 &mdash; Regime-Aware Ranking. Gated &amp; percentile-normalized. Updated nightly.
               </p>
             </div>
             {data.length > 0 && (
@@ -67,7 +92,7 @@ export default async function Page() {
           </div>
         ) : (
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-            <RecommendationsTable data={data} />
+            <RecommendationsTable data={data} regime={regime} />
           </div>
         )}
       </div>

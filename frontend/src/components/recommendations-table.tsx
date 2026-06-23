@@ -15,11 +15,60 @@ import { ArrowUpDown, ArrowUp, ArrowDown, Search } from 'lucide-react';
 
 interface TableProps {
   data: Recommendation[];
+  regime: string | null;
 }
 
-export default function RecommendationsTable({ data }: TableProps) {
+function RegimeBanner({ regime }: { regime: string | null }) {
+  if (regime === 'bull') {
+    return (
+      <div className="mb-6 rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
+        <span className="mr-2 font-bold">Bull Market</span>
+        &mdash; Standard Gates Active (Expectancy &gt; 0%, Win Rate &ge; 25%)
+      </div>
+    );
+  }
+
+  if (regime === 'bear') {
+    return (
+      <div className="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">
+        <span className="mr-2 font-bold">Bear Market</span>
+        &mdash; Strategy Inactive. No recommendations in unfavorable conditions.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-6 rounded-lg border border-gray-300 bg-gray-50 px-4 py-3 text-sm font-medium text-gray-600">
+      Loading market regime...
+    </div>
+  );
+}
+
+function winRateColor(val: number): string {
+  if (val > 40) return 'text-green-600 font-semibold';
+  if (val >= 25) return 'text-yellow-600 font-semibold';
+  return 'text-red-600 font-semibold';
+}
+
+function expectancyColor(val: number): string {
+  if (val > 2) return 'text-green-600 font-semibold';
+  if (val >= 0) return 'text-yellow-600 font-semibold';
+  return 'text-red-600 font-semibold';
+}
+
+function tradesBadge(val: number): React.ReactNode {
+  if (val > 20) {
+    return <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">High ({val})</span>;
+  }
+  if (val >= 10) {
+    return <span className="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">Medium ({val})</span>;
+  }
+  return <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Low ({val})</span>;
+}
+
+export default function RecommendationsTable({ data, regime }: TableProps) {
   const [sorting, setSorting] = useState<SortingState>([
-    { id: 'score', desc: true } // Default sorting by ranking score descending
+    { id: 'score', desc: true }
   ]);
   const [globalFilter, setGlobalFilter] = useState('');
 
@@ -41,32 +90,42 @@ export default function RecommendationsTable({ data }: TableProps) {
         cell: (info) => info.getValue() || '-',
       },
       {
-        accessorKey: 'score',
-        header: 'Ranking Score',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? <span className="font-bold text-blue-600">{val.toFixed(2)}</span> : '-';
-        },
-      },
-      {
         accessorKey: 'past_win_rate',
-        header: 'Past Win Rate',
+        header: 'Win Rate',
         cell: (info) => {
           const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `${val.toFixed(1)}%` : '-';
+          if (typeof val !== 'number') return '-';
+          return <span className={winRateColor(val)}>{val.toFixed(1)}%</span>;
         },
       },
       {
         accessorKey: 'expectancy_pct',
-        header: 'Performance Forecast',
+        header: 'Expectancy',
         cell: (info) => {
           const val = info.getValue() as number | null | undefined;
           if (typeof val !== 'number') return '-';
           return (
-            <span className={val >= 0 ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'}>
+            <span className={expectancyColor(val)}>
               {val >= 0 ? '+' : ''}{val.toFixed(2)}%
             </span>
           );
+        },
+      },
+      {
+        accessorKey: 'historical_signals',
+        header: 'Total Trades',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          if (typeof val !== 'number') return '-';
+          return tradesBadge(val);
+        },
+      },
+      {
+        accessorKey: 'score',
+        header: 'Score',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? <span className="font-bold text-blue-600">{val.toFixed(4)}</span> : '-';
         },
       },
       {
@@ -95,7 +154,7 @@ export default function RecommendationsTable({ data }: TableProps) {
       },
       {
         accessorKey: 'upside_pct',
-        header: 'Upside Potential',
+        header: 'Upside',
         cell: (info) => {
           const val = info.getValue() as number | null | undefined;
           return typeof val === 'number' ? <span className="text-green-600 font-bold">+{val.toFixed(1)}%</span> : '-';
@@ -142,6 +201,9 @@ export default function RecommendationsTable({ data }: TableProps) {
 
   return (
     <div className="w-full">
+      {/* Regime Banner */}
+      <RegimeBanner regime={regime} />
+
       {/* Search Input */}
       <div className="flex items-center gap-2 mb-6 max-w-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
         <Search className="w-4 h-4 text-gray-400" />
@@ -211,7 +273,9 @@ export default function RecommendationsTable({ data }: TableProps) {
                   colSpan={columns.length}
                   className="px-6 py-10 text-center text-gray-500 font-medium"
                 >
-                  No active stock recommendations found.
+                  {regime === 'bear'
+                    ? 'Market conditions unfavorable. No recommendations during bear market regime.'
+                    : 'No active stock recommendations found.'}
                 </td>
               </tr>
             )}

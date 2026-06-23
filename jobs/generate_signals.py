@@ -1,9 +1,16 @@
 """
-Generate Signals
-================
-Evaluates Strategy 1.1 Beta on the latest bar of all cached tickers,
-clears previous signals, inserts the new qualified signals (with ranking score),
-and logs the scan. Supports automatic data downloading in CI/CD.
+Generate Signals — Strategy 1.2
+================================
+Regime-aware, gated, percentile-normalized signal generator.
+
+Flow:
+  1. Detect market regime (SPY vs 200 DMA)
+  2. Scan tickers with technical filters (trend, RSI, volume)
+  3. Merge with historical backtest metrics from ticker_metrics
+  4. Apply gated percentile-normalized ranking (SignalRanker)
+  5. Archive previous signals to signals_history
+  6. Clear and insert ranked signals
+  7. Log results with regime metadata
 
 Usage:
     python -m jobs.generate_signals
@@ -12,7 +19,6 @@ Usage:
 import os
 import sys
 import glob
-import math
 import time
 import logging
 from datetime import datetime, timedelta
@@ -29,9 +35,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from indicators import calculate_indicators
 from downloader import fetch_ohlcv_data
+from regime import get_regime, should_trade
+from ranker import SignalRanker
 from jobs.supabase_client import get_client
 
-# Strategy parameters
+# Strategy parameters (unchanged from 1.1 Beta)
 RSI_PULLBACK_THRESHOLD = 45
 RSI_RECOVERY_MIN = 45
 RSI_RECOVERY_MAX = 65
@@ -39,6 +47,9 @@ VOLUME_MULTIPLIER = 1.0
 TARGET_R_MULTIPLE = 3.0
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
+
+# Ranking
+TOP_N = 5
 
 # Configure logging
 logging.basicConfig(
@@ -77,7 +88,7 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         response = requests.get(
             url,
-            headers={"User-Agent": "stock-recommendation-engine/1.0"},
+            headers={"User-Agent": "stock-recommendation-engine/1.2"},
             timeout=15,
         )
         response.raise_for_status()
@@ -90,7 +101,6 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
         logger.info(f"Loaded {len(tickers)} tickers from Wikipedia.")
     except Exception as e:
         logger.warning(f"Wikipedia fetch failed: {e}. Loading local fallback...")
-        # Fallback to local backtest_summary.csv
         csv_path = os.path.join(PROJECT_ROOT, "outputs", "backtest_summary.csv")
         if os.path.exists(csv_path):
             try:
@@ -103,7 +113,7 @@ def fetch_sp500_tickers_100() -> tuple[list, dict, dict]:
                 logger.info(f"Loaded {len(tickers)} fallback tickers from local CSV.")
             except Exception as csv_err:
                 logger.error(f"Could not load fallback CSV: {csv_err}")
-                
+
     return tickers, company_names, industries
 
 
@@ -112,16 +122,20 @@ def check_latest_signal(
     df: pd.DataFrame,
     company_name: str,
     industry: str,
-    metrics_map: dict
 ) -> dict:
-    """Evaluate Strategy 1.1 Beta and compute ranking score on the latest bar."""
+    """
+    Evaluate Strategy 1.2 technical filters on the latest bar.
+
+    Returns a dict with signal data if the ticker qualifies, or None.
+    Score is NOT calculated here — that's done by SignalRanker after all
+    signals are collected and metrics are merged.
+    """
     n_bars = len(df)
     if n_bars < 201:
         return None
 
-    # Latest bar index is len(df) - 1
     t = n_bars - 1
-    
+
     closes = df["CLOSE"].to_numpy(dtype=float)
     dma50s = df["DMA_50"].to_numpy(dtype=float)
     dma200s = df["DMA_200"].to_numpy(dtype=float)
@@ -131,7 +145,6 @@ def check_latest_signal(
     highs = df["HIGH"].to_numpy(dtype=float)
     dates = df.index
 
-    # Check for NaNs in latest values
     c, d50, d200, rsi_now = closes[t], dma50s[t], dma200s[t], rsis[t]
     vol, vma = volumes[t], vol_mas[t]
     if any(np.isnan(x) for x in (c, d50, d200, rsi_now, vol, vma)):
@@ -178,12 +191,6 @@ def check_latest_signal(
     upside_pct = round(((exit_price - entry_price) / entry_price) * 100.0, 2)
     volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
 
-    # Calculate Ranking Score: 40% win_rate + 40% expectancy + 20% upside
-    m_info = metrics_map.get(ticker, {"win_rate": 0.0, "expectancy_pct": 0.0})
-    win_rate = m_info["win_rate"]
-    expectancy_pct = m_info["expectancy_pct"]
-    score = round(0.4 * win_rate + 0.4 * expectancy_pct + 0.2 * upside_pct, 4)
-
     return {
         "scan_date": signal_date,
         "ticker": ticker,
@@ -197,36 +204,104 @@ def check_latest_signal(
         "risk_reward": float(TARGET_R_MULTIPLE),
         "current_rsi": round(rsi_now, 2),
         "volume_ratio": volume_ratio,
-        "score": score
     }
+
+
+def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
+    """Archive current signals to signals_history before clearing."""
+    try:
+        res = supabase.table("signals").select("*").execute()
+        current_signals = res.data or []
+
+        if not current_signals:
+            logger.info("No existing signals to archive.")
+            return
+
+        history_rows = []
+        for sig in current_signals:
+            ticker = sig.get("ticker", "")
+            m = metrics_map.get(ticker.upper(), {})
+            history_rows.append({
+                "scan_date": sig.get("scan_date"),
+                "ticker": ticker,
+                "company_name": sig.get("company_name"),
+                "industry": sig.get("industry"),
+                "price": sig.get("price"),
+                "entry_price": sig.get("entry_price"),
+                "stop_loss": sig.get("stop_loss"),
+                "exit_price": sig.get("exit_price"),
+                "upside_pct": sig.get("upside_pct"),
+                "risk_reward": sig.get("risk_reward"),
+                "current_rsi": sig.get("current_rsi"),
+                "volume_ratio": sig.get("volume_ratio"),
+                "score": sig.get("score"),
+                "past_win_rate": m.get("win_rate", 0),
+                "expectancy_pct": m.get("expectancy_pct", 0),
+                "total_trades": m.get("total_trades", 0),
+                "regime": regime_str,
+            })
+
+        supabase.table("signals_history").insert(history_rows).execute()
+        logger.info("Archived %d signals to signals_history.", len(history_rows))
+
+    except Exception as e:
+        logger.error("Failed to archive signals to history: %s", e)
 
 
 def main():
     start_time = time.time()
-    logger.info("Starting Strategy 1.1 Beta nightly signal generator...")
+    logger.info("=" * 60)
+    logger.info("Strategy 1.2 — Regime-Aware Signal Generator")
+    logger.info("=" * 60)
 
-    # Load S&P 500 tickers
+    # ── Step 1: Detect market regime ─────────────────────────
+    regime_info = get_regime()
+    regime_str = regime_info["regime"]
+    trade_allowed = should_trade(regime_str, "swing_momentum")
+
+    logger.info(
+        "REGIME: %s | SPY: $%.2f | 200 DMA: $%.2f | Trade allowed: %s",
+        regime_str.upper(),
+        regime_info["spy_price"],
+        regime_info["spy_200dma"],
+        trade_allowed,
+    )
+
+    # ── Step 2: Set gate thresholds based on regime ──────────
+    if regime_str == "bull":
+        min_expectancy = 0
+        min_win_rate = 25
+    else:
+        min_expectancy = 2.0
+        min_win_rate = 35
+    min_trades = 5
+
+    logger.info(
+        "Gate thresholds: expectancy > %.1f, win_rate >= %.1f, trades >= %d",
+        min_expectancy, min_win_rate, min_trades,
+    )
+
+    # ── Step 3: Load S&P 500 tickers ─────────────────────────
     tickers, company_names, industries = fetch_sp500_tickers_100()
 
-    # Create directories if they do not exist
     os.makedirs(os.path.join(PROJECT_ROOT, "data", "cache"), exist_ok=True)
 
-    # Check if we should download fresh data (default: in CI/GitHub Actions, or when cache is empty)
+    # ── Step 4: Download data if CI or cache empty ───────────
     is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     force_download = os.environ.get("DOWNLOAD_DATA") == "true"
     cache_empty = len(glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet"))) == 0
 
     if is_ci or force_download or cache_empty:
-        logger.info("CI environment, forced download, or empty cache detected. Fetching daily data from yfinance...")
+        logger.info("Fetching fresh data from yfinance...")
         end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=500)  # ~1.5 years for indicator calculation
-        
+        start_date = end_date - timedelta(days=500)
+
         for i, ticker in enumerate(tickers, 1):
-            logger.info(f"[{i}/{len(tickers)}] Downloading fresh data for {ticker}...")
+            logger.info(f"[{i}/{len(tickers)}] Downloading {ticker}...")
             fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
         logger.info("Finished downloading daily data.")
 
-    # Find cached files
+    # ── Step 5: Scan tickers with technical filters ──────────
     cache_path = os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")
     parquet_files = sorted(glob.glob(cache_path))
     total_files = len(parquet_files)
@@ -243,30 +318,32 @@ def main():
         logger.error(f"Failed to initialize Supabase client: {e}")
         sys.exit(1)
 
-    # Fetch historical metrics from Supabase to compute ranking score
+    # Fetch historical metrics
     metrics_map = {}
     try:
         logger.info("Fetching historical metrics from Supabase ticker_metrics...")
-        res = supabase.table("ticker_metrics").select("ticker, win_rate, expectancy_pct").execute()
+        res = supabase.table("ticker_metrics").select(
+            "ticker, win_rate, expectancy_pct, total_signals"
+        ).execute()
         for row in res.data:
             ticker = row["ticker"].upper()
             metrics_map[ticker] = {
                 "win_rate": float(row["win_rate"] or 0),
-                "expectancy_pct": float(row["expectancy_pct"] or 0)
+                "expectancy_pct": float(row["expectancy_pct"] or 0),
+                "total_trades": int(row["total_signals"] or 0),
             }
-        logger.info(f"Successfully loaded metrics for {len(metrics_map)} tickers from Supabase.")
+        logger.info(f"Loaded metrics for {len(metrics_map)} tickers.")
     except Exception as e:
-        logger.warning(f"Could not load ticker metrics from Supabase: {e}. Using fallback 0.0 values.")
+        logger.warning(f"Could not load ticker metrics: {e}. Using fallback values.")
 
-    signals = []
+    # Technical scan
+    raw_signals = []
     scanned_count = 0
     signal_date = None
 
-    # Process all tickers
     for idx, fpath in enumerate(parquet_files, 1):
         ticker = os.path.basename(fpath).replace(".parquet", "").upper()
-        
-        # Only process if in our 100 tickers list (prevents processing random cache files)
+
         if tickers and ticker not in tickers:
             continue
 
@@ -274,8 +351,7 @@ def main():
             raw = pd.read_parquet(fpath, engine="pyarrow")
             df = calculate_indicators(raw).sort_index()
             scanned_count += 1
-            
-            # Determine scan date from the latest row of the first successful file
+
             if signal_date is None and len(df) > 0:
                 latest_date = df.index[-1]
                 if hasattr(latest_date, 'date'):
@@ -285,60 +361,127 @@ def main():
 
             company_name = company_names.get(ticker, ticker)
             industry = industries.get(ticker, "Unknown")
-            
-            sig = check_latest_signal(ticker, df, company_name, industry, metrics_map)
+
+            sig = check_latest_signal(ticker, df, company_name, industry)
             if sig is not None:
-                signals.append(sig)
+                raw_signals.append(sig)
                 logger.info(
                     f"[QUALIFIED] {ticker} | Entry: ${sig['entry_price']:.2f} | "
                     f"Stop: ${sig['stop_loss']:.2f} | Exit: ${sig['exit_price']:.2f} | "
-                    f"RSI: {sig['current_rsi']:.1f} | Score: {sig['score']:.2f} | Vol Ratio: {sig['volume_ratio']:.2f}x"
+                    f"RSI: {sig['current_rsi']:.1f} | Vol: {sig['volume_ratio']:.2f}x"
                 )
 
         except Exception as e:
             logger.error(f"Error scanning {ticker}: {e}")
 
-    logger.info(f"Scan complete. Scanned: {scanned_count}, Qualified signals: {len(signals)}")
-    
+    signals_qualified = len(raw_signals)
+    logger.info(f"Technical scan complete. Scanned: {scanned_count}, Qualified: {signals_qualified}")
+
     if signal_date is None:
         logger.error("No valid scan date could be determined.")
         sys.exit(1)
-        
+
+    # ── Step 6: Merge with metrics and apply ranking ─────────
+    signals_recommended = 0
+    ranked_signals = []
+
+    if raw_signals and trade_allowed:
+        # Build DataFrame with metrics columns for the ranker
+        signals_df = pd.DataFrame(raw_signals)
+        signals_df["win_rate"] = signals_df["ticker"].apply(
+            lambda t: metrics_map.get(t, {}).get("win_rate", 0)
+        )
+        signals_df["expectancy_pct"] = signals_df["ticker"].apply(
+            lambda t: metrics_map.get(t, {}).get("expectancy_pct", 0)
+        )
+        signals_df["total_trades"] = signals_df["ticker"].apply(
+            lambda t: metrics_map.get(t, {}).get("total_trades", 0)
+        )
+
+        logger.info("Applying gated percentile ranking...")
+        ranker = SignalRanker(
+            min_expectancy=min_expectancy,
+            min_win_rate=min_win_rate,
+            min_trades=min_trades,
+        )
+        ranked_df = ranker.rank(signals_df, top_n=TOP_N)
+
+        if not ranked_df.empty:
+            signals_recommended = len(ranked_df)
+            for _, row in ranked_df.iterrows():
+                ranked_signals.append({
+                    "scan_date": row["scan_date"],
+                    "ticker": row["ticker"],
+                    "company_name": row["company_name"],
+                    "industry": row["industry"],
+                    "price": row["price"],
+                    "entry_price": row["entry_price"],
+                    "stop_loss": row["stop_loss"],
+                    "exit_price": row["exit_price"],
+                    "upside_pct": row["upside_pct"],
+                    "risk_reward": row["risk_reward"],
+                    "current_rsi": row["current_rsi"],
+                    "volume_ratio": row["volume_ratio"],
+                    "score": round(float(row["score"]), 4),
+                    "regime": regime_str,
+                })
+                logger.info(
+                    f"[RANKED #{_ + 1}] {row['ticker']} | "
+                    f"Score: {row['score']:.4f} | "
+                    f"WR: {row['win_rate']:.1f}% | "
+                    f"Exp: {row['expectancy_pct']:.2f}% | "
+                    f"Upside: {row['upside_pct']:.1f}%"
+                )
+        else:
+            logger.warning("No signals survived gates. 0 recommendations this scan.")
+    elif not trade_allowed:
+        logger.warning(
+            "Bear market -- strategy inactive. No recommendations will be inserted."
+        )
+    else:
+        logger.info("No technically qualified signals found.")
+
+    # ── Step 7: Archive current signals before clearing ──────
     duration = round(time.time() - start_time, 2)
     status = "success"
     error_msg = None
 
     try:
-        # 1. Clear previous signals from signals table
+        archive_current_signals(supabase, regime_str, metrics_map)
+
+        # Clear signals
         logger.info("Clearing previous signals from Supabase...")
         supabase.table("signals").delete().neq("ticker", "").execute()
         logger.info("Previous signals cleared.")
 
-        # 2. Insert new signals
-        if signals:
-            logger.info(f"Inserting {len(signals)} new signals into Supabase...")
-            supabase.table("signals").insert(signals).execute()
+        # Insert ranked signals
+        if ranked_signals:
+            logger.info(f"Inserting {len(ranked_signals)} ranked signals...")
+            supabase.table("signals").insert(ranked_signals).execute()
             logger.info("Signals inserted successfully.")
         else:
-            logger.info("No new signals to insert.")
+            logger.info("No signals to insert.")
 
     except Exception as e:
         status = "failed"
         error_msg = str(e)
         logger.error(f"Database update failed: {e}")
 
-    # 3. Log results into scan_log
+    # ── Step 8: Log to scan_log ──────────────────────────────
     scan_log_row = {
         "scan_date": signal_date,
         "tickers_scanned": scanned_count,
-        "signals_generated": len(signals),
+        "signals_generated": signals_qualified,
+        "signals_qualified": signals_qualified,
+        "signals_recommended": signals_recommended,
         "scan_duration_secs": duration,
         "status": status,
-        "error_message": error_msg
+        "error_message": error_msg,
+        "regime": regime_str,
     }
 
     try:
-        logger.info(f"Logging scan execution to scan_log: {scan_log_row}...")
+        logger.info(f"Logging scan to scan_log: {scan_log_row}")
         supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
         logger.info("Scan log recorded successfully.")
     except Exception as e:
@@ -348,7 +491,13 @@ def main():
     if status == "failed":
         sys.exit(1)
 
-    logger.info("Generate signals task finished successfully.")
+    logger.info("=" * 60)
+    logger.info("Strategy 1.2 signal generation complete.")
+    logger.info(
+        "Regime: %s | Scanned: %d | Qualified: %d | Recommended: %d | Duration: %.1fs",
+        regime_str.upper(), scanned_count, signals_qualified, signals_recommended, duration,
+    )
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

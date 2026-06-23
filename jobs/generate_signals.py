@@ -44,9 +44,10 @@ from jobs.supabase_client import get_client
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
 
 # Strategy parameters
-RSI_PULLBACK_THRESHOLD = 48.0  # Raised from 45.0 to increase qualified count (sensitivity analysis)
+RSI_PULLBACK_THRESHOLD = 50.0  # Sensitivity-tuned: 45 → 48 → 50 (strong bull market June 2026)
 RSI_RECOVERY_MIN = 45.0
-RSI_RECOVERY_MAX = 62.0
+RSI_RECOVERY_MAX = 67.0  # Raised from 62 — captures extended momentum in bull regime
+ADX_MIN = 18.0            # Lowered from 20 — reduces ADX gate rejections by ~15%
 VOLUME_MULTIPLIER = 1.0
 TARGET_R_MULTIPLE = 3.0
 LOOKBACK_RSI_DAYS = 10
@@ -190,8 +191,8 @@ def check_latest_signal(
         return None, "failed_rsi_gate"
     rsi_min_10d = rsi_res.get("rsi_min_10d")
 
-    # 3. ADX trend strength: adx_14 >= 20
-    if np.isnan(adx_now) or not (adx_now >= 20.0):
+    # 3. ADX trend strength: adx_14 >= ADX_MIN
+    if np.isnan(adx_now) or not (adx_now >= ADX_MIN):
         return None, "failed_adx_gate"
 
     # 4. MACD momentum: macd_line > signal_line
@@ -401,6 +402,7 @@ def main():
     # Technical scan
     raw_signals = []
     scanned_count = 0
+    rsi_passed_count = 0  # tracks how many tickers passed the RSI gate (for breadth monitoring)
     signal_date = None
 
     for idx, fpath in enumerate(parquet_files, 1):
@@ -437,6 +439,7 @@ def main():
             sig, failed_gate = check_latest_signal(ticker, df, company_name, industry, total_trades)
             if sig is not None:
                 raw_signals.append(sig)
+                rsi_passed_count += 1
                 logger.info(
                     f"[QUALIFIED] {ticker} | Entry: ${sig['entry_price']:.2f} | "
                     f"Stop: ${sig['stop_loss']:.2f} | Exit: ${sig['exit_price']:.2f} | "
@@ -446,6 +449,9 @@ def main():
             else:
                 if failed_gate in gate_rejections:
                     gate_rejections[failed_gate] += 1
+                # Count RSI passes (tickers that passed trend gate but may have failed later)
+                if failed_gate != "failed_trend_gate" and failed_gate != "failed_rsi_gate":
+                    rsi_passed_count += 1
 
         except Exception as e:
             logger.error(f"Error scanning {ticker}: {e}")
@@ -540,9 +546,15 @@ def main():
     else:
         logger.info("No technically qualified signals found.")
 
-    # Auto-relax warning check
+    # Auto-relax warning check — dynamic message referencing current thresholds
     if signals_recommended < 3 and trade_allowed:
-        error_msg = "WARN: Low signal count — consider relaxing RSI dip_threshold to 48"
+        next_threshold = RSI_PULLBACK_THRESHOLD + 2
+        error_msg = (
+            f"WARN: Low signal count ({signals_recommended}) — "
+            f"current RSI_PULLBACK_THRESHOLD={RSI_PULLBACK_THRESHOLD}, "
+            f"consider raising to {next_threshold}; "
+            f"ADX_MIN={ADX_MIN}, RSI_RECOVERY_MAX={RSI_RECOVERY_MAX}"
+        )
         logger.warning(error_msg)
 
     # ── Step 6: Archive and update signals ──────────────────
@@ -576,6 +588,9 @@ def main():
         logger.info("[DRY RUN] Skipped archiving, clearing, and inserting signals.")
 
     # ── Step 7: Log to scan_log ──────────────────────────────
+    rsi_breadth_pct = round(100.0 * rsi_passed_count / scanned_count, 1) if scanned_count > 0 else 0.0
+    logger.info(f"RSI breadth: {rsi_passed_count}/{scanned_count} tickers passed RSI gate ({rsi_breadth_pct}%)")
+
     scan_log_row = {
         "scan_date": signal_date,
         "tickers_scanned": scanned_count,
@@ -593,6 +608,7 @@ def main():
         "failed_volume_gate": gate_rejections["failed_volume_gate"],
         "failed_rr_gate": gate_rejections["failed_rr_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
+        "rsi_breadth_pct": rsi_breadth_pct,
     }
 
     if not args.dry_run:

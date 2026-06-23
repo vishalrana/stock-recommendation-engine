@@ -13,7 +13,7 @@ Flow:
   7. Log results with regime metadata and gate rejection breakdown
 
 Usage:
-    python -m jobs.generate_signals
+    python -m jobs.generate_signals [--dry-run]
 """
 
 import os
@@ -21,6 +21,7 @@ import sys
 import glob
 import time
 import logging
+import argparse
 from datetime import datetime, timedelta
 from io import StringIO
 
@@ -33,7 +34,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, PROJECT_ROOT)
 
-from indicators import calculate_indicators
+from indicators import calculate_indicators, check_rsi_pullback_recovery
 from downloader import fetch_ohlcv_data
 from regime import get_regime, should_trade
 from ranker import SignalRanker
@@ -43,9 +44,9 @@ from jobs.supabase_client import get_client
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
 
 # Strategy parameters
-RSI_PULLBACK_THRESHOLD = 45.0
+RSI_PULLBACK_THRESHOLD = 48.0  # Raised from 45.0 to increase qualified count (sensitivity analysis)
 RSI_RECOVERY_MIN = 45.0
-RSI_RECOVERY_MAX = 62.0  # Changed from 65
+RSI_RECOVERY_MAX = 62.0
 VOLUME_MULTIPLIER = 1.0
 TARGET_R_MULTIPLE = 3.0
 LOOKBACK_RSI_DAYS = 10
@@ -177,13 +178,20 @@ def check_latest_signal(
         return None, "failed_trend_gate"
 
     # 2. RSI pullback-recovery: rsi_min_10d < 45 AND 45 <= current_rsi <= 62
-    rsi_window = rsis[max(0, t - LOOKBACK_RSI_DAYS + 1) : t + 1]
-    rsi_min_10d = np.nanmin(rsi_window)
-    if not (rsi_min_10d < RSI_PULLBACK_THRESHOLD and RSI_RECOVERY_MIN <= rsi_now <= RSI_RECOVERY_MAX):
+    # Check RSI using check_rsi_pullback_recovery from indicators module
+    rsi_res = check_rsi_pullback_recovery(
+        df["RSI_14"],
+        lookback=LOOKBACK_RSI_DAYS,
+        dip_threshold=RSI_PULLBACK_THRESHOLD,
+        recovery_min=RSI_RECOVERY_MIN,
+        recovery_max=RSI_RECOVERY_MAX
+    )
+    if not rsi_res.get("passed"):
         return None, "failed_rsi_gate"
+    rsi_min_10d = rsi_res.get("rsi_min_10d")
 
     # 3. ADX trend strength: adx_14 >= 20
-    if not (adx_now >= 20.0):
+    if np.isnan(adx_now) or not (adx_now >= 20.0):
         return None, "failed_adx_gate"
 
     # 4. MACD momentum: macd_line > signal_line
@@ -297,8 +305,16 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
 
 def main():
     start_time = time.time()
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Generate Nightly Stock Signals")
+    parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
+    args = parser.parse_args()
+
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev A — Regime-Aware Signal Generator")
+    if args.dry_run:
+        logger.info("DRY RUN ACTIVE — database writes will be skipped")
     logger.info("=" * 60)
 
     # Initialize gate rejection counts
@@ -395,6 +411,13 @@ def main():
 
         try:
             raw = pd.read_parquet(fpath, engine="pyarrow")
+            
+            # Guard for short history (minimum 60 bars for stable ADX)
+            if len(raw) < 60:
+                logger.warning(f"{ticker}: not enough history ({len(raw)} bars) for stable ADX. Skipping.")
+                gate_rejections["failed_adx_gate"] += 1
+                continue
+
             df = calculate_indicators(raw).sort_index()
             scanned_count += 1
 
@@ -522,30 +545,35 @@ def main():
         error_msg = "WARN: Low signal count — consider relaxing RSI dip_threshold to 48"
         logger.warning(error_msg)
 
-    # ── Step 6: Archive current signals before clearing ──────
+    # ── Step 6: Archive and update signals ──────────────────
     duration = round(time.time() - start_time, 2)
     status = "success"
 
-    try:
-        archive_current_signals(supabase, regime_str, metrics_map)
+    if not args.dry_run:
+        # Separate archiving and clearing from insertion to prevent silent swallowing or orphaned deletes
+        try:
+            archive_current_signals(supabase, regime_str, metrics_map)
+            logger.info("Clearing previous signals from Supabase...")
+            supabase.table("signals").delete().neq("ticker", "").execute()
+            logger.info("Previous signals cleared.")
+        except Exception as e:
+            logger.error(f"Failed to clear/archive signals: {e}")
+            error_msg = f"Archive/Clear failed: {e}"
 
-        # Clear signals
-        logger.info("Clearing previous signals from Supabase...")
-        supabase.table("signals").delete().neq("ticker", "").execute()
-        logger.info("Previous signals cleared.")
-
-        # Insert ranked signals
-        if ranked_signals:
-            logger.info(f"Inserting {len(ranked_signals)} ranked signals...")
-            supabase.table("signals").insert(ranked_signals).execute()
-            logger.info("Signals inserted successfully.")
-        else:
-            logger.info("No signals to insert.")
-
-    except Exception as e:
-        status = "failed"
-        error_msg = str(e)
-        logger.error(f"Database update failed: {e}")
+        try:
+            # Insert ranked signals
+            if ranked_signals:
+                logger.info(f"Inserting {len(ranked_signals)} ranked signals...")
+                supabase.table("signals").insert(ranked_signals).execute()
+                logger.info("Signals inserted successfully.")
+            else:
+                logger.info("No signals to insert.")
+        except Exception as e:
+            status = "failed"
+            error_msg = str(e)
+            logger.error(f"Database insertion failed: {e}")
+    else:
+        logger.info("[DRY RUN] Skipped archiving, clearing, and inserting signals.")
 
     # ── Step 7: Log to scan_log ──────────────────────────────
     scan_log_row = {
@@ -567,13 +595,16 @@ def main():
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
     }
 
-    try:
-        logger.info(f"Logging scan to scan_log: {scan_log_row}")
-        supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
-        logger.info("Scan log recorded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to record scan log: {e}")
-        sys.exit(1)
+    if not args.dry_run:
+        try:
+            logger.info(f"Logging scan to scan_log: {scan_log_row}")
+            supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
+            logger.info("Scan log recorded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to record scan log: {e}")
+            sys.exit(1)
+    else:
+        logger.info(f"[DRY RUN] Skipped logging scan to scan_log. Row: {scan_log_row}")
 
     if status == "failed":
         sys.exit(1)

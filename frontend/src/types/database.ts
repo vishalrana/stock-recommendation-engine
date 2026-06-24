@@ -25,6 +25,7 @@ export interface Recommendation {
   macd_histogram: number | null;
   rsi_min_10d: number | null;
   ema20: number | null;
+  is_fallback: boolean | null;
 }
 
 export interface ScanLog {

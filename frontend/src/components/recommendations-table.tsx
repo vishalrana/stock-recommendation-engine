@@ -91,18 +91,34 @@ function formatDate(val: string | null | undefined): string {
   });
 }
 
-function tierBadge(val: string | null | undefined): React.ReactNode {
+function tierBadge(val: string | null | undefined, isFallback?: boolean | null): React.ReactNode {
   if (!val) return '-';
   let badgeClass = 'bg-gray-100 text-gray-800 border border-gray-200';
   if (val === 'Strong Buy') badgeClass = 'bg-green-100 text-green-800 border border-green-200 font-semibold';
   else if (val === 'Buy') badgeClass = 'bg-blue-100 text-blue-800 border border-blue-200 font-semibold';
-  else if (val === 'Watch') badgeClass = 'bg-gray-100 text-gray-600 border border-gray-200';
+  else if (val === 'Watch') {
+    if (isFallback) {
+      badgeClass = 'bg-purple-50 text-purple-700 border border-purple-200 font-medium';
+    } else {
+      badgeClass = 'bg-gray-100 text-gray-600 border border-gray-200';
+    }
+  }
   else if (val === 'Speculative') badgeClass = 'border border-red-200 text-red-600 bg-red-50/20';
   
   return (
-    <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ${badgeClass}`}>
-      {val}
-    </span>
+    <div className="flex items-center gap-1.5">
+      <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ${badgeClass}`}>
+        {val}
+      </span>
+      {isFallback && (
+        <span 
+          className="inline-flex items-center rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-purple-800 cursor-help"
+          title="Extended Bull Fallback signal (RSI pullback threshold relaxed to 57)"
+        >
+          Fallback
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -165,7 +181,7 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
       {
         accessorKey: 'tier_label',
         header: 'Tier',
-        cell: (info) => tierBadge(info.getValue() as string),
+        cell: (info) => tierBadge(info.getValue() as string, info.row.original.is_fallback),
       },
       {
         accessorKey: 'adx_value',

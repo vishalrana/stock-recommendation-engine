@@ -222,7 +222,11 @@ def check_latest_signal(
     If the stock passes all gates, failed_gate_name is None.
     """
     effective_rsi_threshold = rsi_threshold_override if rsi_threshold_override is not None else RSI_PULLBACK_THRESHOLD
-    effective_adx_min = adx_min_override if adx_min_override is not None else ADX_MIN
+    
+    if adx_min_override is not None:
+        effective_adx_min = adx_min_override
+    else:
+        effective_adx_min = 15.0 if regime_str.lower() == "bull" else 18.0
 
     n_bars = len(df)
     if n_bars < 201:
@@ -760,7 +764,7 @@ def main():
             "fallback scan" if fallback_triggered else "primary scan",
             f"— RSI_PULLBACK_THRESHOLD={RSI_PULLBACK_THRESHOLD},",
             f"consider raising to {next_threshold};",
-            f"ADX_MIN={ADX_MIN}, RSI_RECOVERY_MAX={RSI_RECOVERY_MAX}",
+            f"ADX_MIN={15.0 if regime_str.lower() == 'bull' else 18.0}, RSI_RECOVERY_MAX={RSI_RECOVERY_MAX}",
         ]
         error_msg = " ".join(warn_parts)
         logger.warning(error_msg)

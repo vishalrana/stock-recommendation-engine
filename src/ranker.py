@@ -221,28 +221,18 @@ class SignalRanker:
         tier_map = {1: "Strong Buy", 2: "Buy", 3: "Watch", 4: "Speculative"}
         df_filtered["tier_label"] = df_filtered["temp_tier"].map(tier_map)
 
-        # Split by tier
+        # Split by tier (only Tier 1 and Tier 2 are kept)
         t1_eligible = df_filtered[df_filtered["temp_tier"] == 1]
         t2_eligible = df_filtered[df_filtered["temp_tier"] == 2]
-        t3_eligible = df_filtered[df_filtered["temp_tier"] == 3]
-        t4_eligible = df_filtered[df_filtered["temp_tier"] == 4]
 
-        # Auto-relax selection (T1 -> T2 -> T3 -> Speculative)
+        t1_sorted = t1_eligible.sort_values("composite_score", ascending=False)
+        t2_sorted = t2_eligible.sort_values("composite_score", ascending=False)
+
+        # Auto-relax selection: ONLY relax Tier 1 -> Tier 2. Never relax to Watch or Speculative.
         if len(t1_eligible) >= 3:
-            t1_sorted = t1_eligible.sort_values("composite_score", ascending=False)
-            t2_sorted = t2_eligible.sort_values("composite_score", ascending=False)
-            t3_sorted = t3_eligible.sort_values("composite_score", ascending=False)
-            t4_sorted = t4_eligible.sort_values("composite_score", ascending=False)
-            selected = pd.concat([t1_sorted, t2_sorted, t3_sorted, t4_sorted])
-        elif len(t1_eligible) + len(t2_eligible) >= 3:
-            t12_sorted = pd.concat([t1_eligible, t2_eligible]).sort_values("composite_score", ascending=False)
-            t3_sorted = t3_eligible.sort_values("composite_score", ascending=False)
-            t4_sorted = t4_eligible.sort_values("composite_score", ascending=False)
-            selected = pd.concat([t12_sorted, t3_sorted, t4_sorted])
+            selected = pd.concat([t1_sorted, t2_sorted])
         else:
-            t123_sorted = pd.concat([t1_eligible, t2_eligible, t3_eligible]).sort_values("composite_score", ascending=False)
-            t4_sorted = t4_eligible.sort_values("composite_score", ascending=False)
-            selected = pd.concat([t123_sorted, t4_sorted])
+            selected = pd.concat([t1_eligible, t2_eligible]).sort_values("composite_score", ascending=False)
 
         result = selected.head(top_n).copy()
         result = result.drop(columns=["temp_tier"])
@@ -300,7 +290,7 @@ if __name__ == "__main__":
 
     # Assertions
     tickers_ranked = result_bull["ticker"].tolist()
-    assert len(tickers_ranked) == 5, f"Expected 5 ranked signals, got {len(tickers_ranked)}"
+    assert len(tickers_ranked) == 2, f"Expected 2 ranked signals, got {len(tickers_ranked)}"
     
     # TSLA should be Tier 1 (Strong Buy) because scores are high and expectancy/winrate positive
     tsla_row = result_bull[result_bull["ticker"] == "TSLA"].iloc[0]
@@ -308,11 +298,9 @@ if __name__ == "__main__":
     assert tsla_row["tier_label"] == "Strong Buy", f"TSLA expected Strong Buy, got {tsla_row['tier_label']}"
     assert nvda_row["tier_label"] == "Strong Buy", f"NVDA expected Strong Buy, got {nvda_row['tier_label']}"
     
-    # AEE and BALL have expectancy < 0 and win_rate < 30 so they must be capped at 45.0. Since they meet Watch expectancy min (-1.0), they should be Watch.
-    aee_row = result_bull[result_bull["ticker"] == "AEE"].iloc[0]
-    ball_row = result_bull[result_bull["ticker"] == "BALL"].iloc[0]
-    assert aee_row["composite_score"] <= 45.0, f"AEE score capped at 45, got {aee_row['composite_score']}"
-    assert ball_row["composite_score"] <= 45.0, f"BALL score capped at 45, got {ball_row['composite_score']}"
+    # AEE and BALL should be filtered out since they are Watch/Speculative tier
+    assert "AEE" not in tickers_ranked
+    assert "BALL" not in tickers_ranked
     
     print("  All assertions passed!")
     print("=" * 60)

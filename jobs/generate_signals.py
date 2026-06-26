@@ -780,6 +780,11 @@ def main():
                 min(len(fallback_signals), slots_remaining),
             )
 
+    # Final recommendations check
+    signals_recommended = len(ranked_signals)
+    if signals_recommended == 0:
+        logger.info("No high-confidence setups tonight. Cash is a position.")
+
     # Auto-relax warning check — dynamic message referencing current thresholds
     if signals_recommended < 3 and trade_allowed:
         next_threshold = RSI_PULLBACK_THRESHOLD + 2

@@ -38,6 +38,9 @@ Database prerequisites (run once in Supabase SQL Editor):
 
   -- Max Gap Gate column on scan_log:
   ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_maxgap_gate INT DEFAULT 0;
+
+  -- Earnings Gate column on scan_log:
+  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_earnings_gate INT DEFAULT 0;
 """
 
 import os
@@ -215,6 +218,33 @@ def compute_atr14(df: pd.DataFrame) -> float:
     return float(tr.rolling(14).mean().iloc[-1])
 
 
+def get_earnings_date(ticker: str) -> str | None:
+    """Fetch next earnings date from yfinance for a ticker, returning ISO string or None."""
+    try:
+        import yfinance as yf
+        stock = yf.Ticker(ticker)
+        calendar = stock.calendar
+        if calendar is None:
+            return None
+        
+        # If it is a dictionary
+        if isinstance(calendar, dict):
+            dates = calendar.get("Earnings Date")
+            if dates and isinstance(dates, list) and len(dates) > 0:
+                import pandas as pd
+                return pd.Timestamp(dates[0]).strftime("%Y-%m-%d")
+            return None
+            
+        # If it is a pandas DataFrame
+        if hasattr(calendar, "empty") and not calendar.empty:
+            if hasattr(calendar, "index") and len(calendar.index) > 0:
+                import pandas as pd
+                return pd.Timestamp(calendar.index[0]).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return None
+
+
 def check_latest_signal(
     ticker: str,
     df: pd.DataFrame,
@@ -354,6 +384,16 @@ def check_latest_signal(
     if total_trades < 10:
         return None, "failed_trades_gate"
 
+    # Strategy 1.3 Rev B: Earnings Calendar filter (avoid reporting during expected hold)
+    EARNINGS_BUFFER_DAYS = 7
+    earnings_date = get_earnings_date(ticker)
+    if earnings_date:
+        ts_earnings = pd.Timestamp(earnings_date).normalize()
+        ts_now = pd.Timestamp.now().normalize()
+        days_to_earnings = (ts_earnings - ts_now).days
+        if 0 < days_to_earnings <= EARNINGS_BUFFER_DAYS:
+            return None, "failed_earnings_gate"
+
     latest_date = dates[t]
     if hasattr(latest_date, 'date'):
         signal_date = latest_date.date().isoformat()
@@ -380,6 +420,7 @@ def check_latest_signal(
         "adx_value": round(float(adx_now), 2),
         "macd_histogram": round(float(macd_hist), 4),
         "ema20": round(float(ema20), 2),
+        "earnings_date": earnings_date,
     }, None
 
 
@@ -421,6 +462,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "expectancy_pct": m.get("expectancy_pct", 0),
                 "total_trades": m.get("total_trades", 0),
                 "regime": regime_str,
+                "earnings_date": sig.get("earnings_date"),
             })
 
         # Upsert instead of insert to safely handle retries / duplicate archive calls.
@@ -468,6 +510,7 @@ def main():
         "failed_maxrisk_gate": 0,
         "failed_minrisk_gate": 0,
         "failed_maxgap_gate": 0,
+        "failed_earnings_gate": 0,
         "failed_trades_gate": 0,
     }
 
@@ -870,6 +913,7 @@ def main():
         "failed_maxrisk_gate": gate_rejections["failed_maxrisk_gate"],
         "failed_minrisk_gate": gate_rejections["failed_minrisk_gate"],
         "failed_maxgap_gate": gate_rejections["failed_maxgap_gate"],
+        "failed_earnings_gate": gate_rejections["failed_earnings_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
         "rsi_breadth_pct": rsi_breadth_pct,
     }

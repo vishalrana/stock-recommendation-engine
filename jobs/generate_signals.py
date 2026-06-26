@@ -48,6 +48,13 @@ Database prerequisites (run once in Supabase SQL Editor):
   -- is_momentum_exception column on signals and signals_history:
   ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_momentum_exception BOOLEAN DEFAULT FALSE;
   ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS is_momentum_exception BOOLEAN DEFAULT FALSE;
+
+  -- Distance from 20-Day High column on scan_log:
+  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_extended_high_gate INT DEFAULT 0;
+
+  -- distance_from_high_pct column on signals and signals_history:
+  ALTER TABLE signals ADD COLUMN IF NOT EXISTS distance_from_high_pct DECIMAL(5,2);
+  ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS distance_from_high_pct DECIMAL(5,2);
 """
 
 import os
@@ -423,6 +430,15 @@ def check_latest_signal(
         if 0 < days_to_earnings <= EARNINGS_BUFFER_DAYS:
             return None, "failed_earnings_gate"
 
+    # Strategy 1.3 Rev B: Distance from 20-Day High gate (avoid peak buying on pullbacks)
+    high_20d = float(df['HIGH'].rolling(20).max().iloc[-1])
+    distance_from_high_pct = (high_20d - c) / high_20d * 100
+    MAX_DISTANCE_FROM_HIGH_PCT = 5.0
+    
+    if not is_momentum_exception:
+        if distance_from_high_pct < MAX_DISTANCE_FROM_HIGH_PCT:
+            return None, "failed_extended_high_gate"
+
     latest_date = dates[t]
     if hasattr(latest_date, 'date'):
         signal_date = latest_date.date().isoformat()
@@ -451,6 +467,7 @@ def check_latest_signal(
         "ema20": round(float(ema20), 2),
         "earnings_date": earnings_date,
         "is_momentum_exception": is_momentum_exception,
+        "distance_from_high_pct": round(float(distance_from_high_pct), 2),
     }, None
 
 
@@ -494,6 +511,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "regime": regime_str,
                 "earnings_date": sig.get("earnings_date"),
                 "is_momentum_exception": sig.get("is_momentum_exception", False),
+                "distance_from_high_pct": sig.get("distance_from_high_pct"),
             })
 
         # Upsert instead of insert to safely handle retries / duplicate archive calls.
@@ -542,6 +560,7 @@ def main():
         "failed_minrisk_gate": 0,
         "failed_maxgap_gate": 0,
         "failed_earnings_gate": 0,
+        "failed_extended_high_gate": 0,
         "failed_trades_gate": 0,
         "momentum_exceptions": 0,
     }
@@ -948,6 +967,7 @@ def main():
         "failed_minrisk_gate": gate_rejections["failed_minrisk_gate"],
         "failed_maxgap_gate": gate_rejections["failed_maxgap_gate"],
         "failed_earnings_gate": gate_rejections["failed_earnings_gate"],
+        "failed_extended_high_gate": gate_rejections["failed_extended_high_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
         "momentum_exceptions": gate_rejections["momentum_exceptions"],
         "rsi_breadth_pct": rsi_breadth_pct,

@@ -200,6 +200,15 @@ def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
     return tickers, company_names, industries
 
 
+def compute_atr14(df: pd.DataFrame) -> float:
+    """Compute 14-day Average True Range."""
+    high_low = df['HIGH'] - df['LOW']
+    high_close = abs(df['HIGH'] - df['CLOSE'].shift())
+    low_close = abs(df['LOW'] - df['CLOSE'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return float(tr.rolling(14).mean().iloc[-1])
+
+
 def check_latest_signal(
     ticker: str,
     df: pd.DataFrame,
@@ -209,6 +218,7 @@ def check_latest_signal(
     regime_str: str = "neutral",
     rsi_threshold_override: float | None = None,
     adx_min_override: float | None = None,
+    median_win_return: float = 0.0,
 ) -> tuple[dict, str]:
     """
     Evaluate Strategy 1.3 Rev B technical filters on the latest bar.
@@ -310,7 +320,16 @@ def check_latest_signal(
     if (entry_price - stop_loss) / entry_price > 0.15:
         return None, "failed_maxrisk_gate"
 
-    exit_price = round(entry_price + risk * TARGET_R_MULTIPLE, 2)
+    if median_win_return and median_win_return > 0:
+        # 15% buffer above historical median winning return, min 5%, max 20%
+        target_pct = min(max(median_win_return * 1.15, 5.0), 20.0)
+    else:
+        # ATR fallback for stocks with no winning trade history
+        atr14 = compute_atr14(df)
+        target_pct = min((2.5 * atr14 / c) * 100, 20.0)
+
+    exit_price = round(entry_price * (1 + target_pct / 100), 2)
+    risk_reward = round(target_pct / ((entry_price - stop_loss) / entry_price * 100), 2)
 
     # 7. Historical data floor: total_trades >= 10 in ticker_metrics
     if total_trades < 10:
@@ -335,7 +354,7 @@ def check_latest_signal(
         "stop_loss": stop_loss,
         "exit_price": exit_price,
         "upside_pct": upside_pct,
-        "risk_reward": float(TARGET_R_MULTIPLE),
+        "risk_reward": risk_reward,
         "current_rsi": round(rsi_now, 2),
         "rsi_min_10d": round(float(rsi_min_10d), 2),
         "volume_ratio": volume_ratio,
@@ -500,7 +519,7 @@ def main():
     try:
         logger.info("Fetching historical metrics from Supabase ticker_metrics...")
         res = supabase.table("ticker_metrics").select(
-            "ticker, win_rate, expectancy_pct, total_signals"
+            "ticker, win_rate, expectancy_pct, total_signals, median_win_return"
         ).execute()
         for row in res.data:
             ticker = row["ticker"].upper()
@@ -508,6 +527,7 @@ def main():
                 "win_rate": float(row["win_rate"] or 0),
                 "expectancy_pct": float(row["expectancy_pct"] or 0),
                 "total_trades": int(row["total_signals"] or 0),
+                "median_win_return": float(row.get("median_win_return") or 0.0),
             }
         logger.info(f"Loaded metrics for {len(metrics_map)} tickers.")
     except Exception as e:
@@ -543,10 +563,12 @@ def main():
             
             # Fetch total trades for this ticker (historical_data_floor gate)
             total_trades = metrics_map.get(ticker, {}).get("total_trades", 0)
+            median_win_return = metrics_map.get(ticker, {}).get("median_win_return", 0.0)
 
             sig, failed_gate = check_latest_signal(
                 ticker, df, company_name, industry, total_trades,
-                regime_str=regime_str
+                regime_str=regime_str,
+                median_win_return=median_win_return
             )
             if sig is not None:
                 sig["is_fallback"] = False
@@ -696,11 +718,13 @@ def main():
                 company_name = company_names.get(f_ticker, f_ticker)
                 industry = industries.get(f_ticker, "Unknown")
                 total_trades = metrics_map.get(f_ticker, {}).get("total_trades", 0)
+                median_win_return = metrics_map.get(f_ticker, {}).get("median_win_return", 0.0)
                 sig, _ = check_latest_signal(
                     f_ticker, df_f, company_name, industry, total_trades,
                     regime_str=regime_str,
                     rsi_threshold_override=FALLBACK_RSI_PULLBACK_THRESHOLD,
                     adx_min_override=FALLBACK_ADX_MIN,
+                    median_win_return=median_win_return,
                 )
                 if sig is not None:
                     sig["is_fallback"] = True

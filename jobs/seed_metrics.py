@@ -1,24 +1,27 @@
 """
-Seed Ticker Metrics
-===================
-Calculates Strategy 1.1 Beta backtest metrics for all cached tickers
-and seeds them into the Supabase database.
+Seed Ticker Metrics — Strategy 1.3 Rev B
+========================================
+Calculates Strategy 1.1 Beta backtest metrics for all S&P 500 + Nasdaq-100 tickers
+and seeds/updates them in the Supabase ticker_metrics table.
 
 Usage:
-    python -m jobs.seed_metrics
+    python -m jobs.seed_metrics [--force-refresh] [--tickers AAPL,MSFT,TSLA]
 """
 
 import os
 import sys
-import glob
 import math
 import logging
+import argparse
 from collections import defaultdict
 from statistics import mean, median
 from datetime import datetime
+from io import StringIO
+import requests
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 # Add project root and src to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,7 +31,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from indicators import calculate_indicators
 from jobs.supabase_client import get_client
 
-# Strategy parameters
+# Strategy parameters (Strategy 1.1 Beta backtest logic)
 RSI_PULLBACK_THRESHOLD = 45
 RSI_RECOVERY_MIN = 45
 RSI_RECOVERY_MAX = 65
@@ -38,6 +41,8 @@ ENTRY_EXPIRY_DAYS = 5
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
 TRANSACTION_COST_PCT = 0.10  # round-trip
+
+BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
 
 # Configure logging
 logging.basicConfig(
@@ -157,7 +162,6 @@ def backtest_ticker_metrics(ticker: str, df: pd.DataFrame, industry: str) -> dic
     completed_trades = []
 
     for t in range(200, n_bars - 1):  # need at least T+1 bar
-        # NaN guards
         c, d50, d200, rsi_now = closes[t], dma50s[t], dma200s[t], rsis[t]
         vol, vma = volumes[t], vol_mas[t]
         if any(np.isnan(x) for x in (c, d50, d200, rsi_now, vol, vma)):
@@ -195,10 +199,8 @@ def backtest_ticker_metrics(ticker: str, df: pd.DataFrame, industry: str) -> dic
             continue
         target_price = round(entry_price + risk * TARGET_R_MULTIPLE, 2)
 
-        # Increment total signals
         total_signals += 1
 
-        # Simulate
         trade_res = simulate_trade_with_gaps(df, t, entry_price, stop_loss, target_price)
         if trade_res is not None:
             completed_trades.append(trade_res)
@@ -224,55 +226,84 @@ def backtest_ticker_metrics(ticker: str, df: pd.DataFrame, industry: str) -> dic
     }
 
 
-def load_industries() -> dict:
-    """Load GICS Sub-Industry mappings from Wikipedia and local backtest summary CSV."""
-    industry_map = {}
+def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
+    """Fetch S&P 500 + Nasdaq-100 universe from Wikipedia."""
+    tickers: list[str] = []
+    company_names: dict[str, str] = {}
+    industries: dict[str, str] = {}
+    sp500_set: set[str] = set()
 
-    # 1. Read from Wikipedia constituents if possible
+    # S&P 500
     try:
-        from backtester import fetch_validation_universe
-        logger.info("Attempting to fetch current S&P 500 industries from Wikipedia...")
-        _, wiki_industries = fetch_validation_universe()
-        industry_map.update(wiki_industries)
-        logger.info(f"Loaded {len(wiki_industries)} industry mappings from Wikipedia.")
+        logger.info("Fetching S&P 500 company info from Wikipedia...")
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        response = requests.get(
+            url,
+            headers={"User-Agent": "stock-recommendation-engine/1.3b"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        raw_table = pd.read_html(StringIO(response.text))[0]
+        for _, row in raw_table.iterrows():
+            ticker = str(row["Symbol"]).strip().upper().replace(".", "-")
+            if ticker in BLACKLIST:
+                continue
+            tickers.append(ticker)
+            sp500_set.add(ticker)
+            company_names[ticker] = str(row["Security"]).strip()
+            industries[ticker] = str(row["GICS Sub-Industry"]).strip()
+        logger.info(f"S&P 500: loaded {len(sp500_set)} tickers from Wikipedia.")
     except Exception as e:
-        logger.warning(f"Could not fetch industry mappings from Wikipedia: {e}")
+        logger.warning(f"S&P 500 Wikipedia fetch failed: {e}.")
 
-    # 2. Fallback to local CSV
-    csv_path = os.path.join(PROJECT_ROOT, "outputs", "backtest_summary.csv")
-    if os.path.exists(csv_path):
-        try:
-            logger.info(f"Reading fallback industry mappings from {csv_path}...")
-            summary_df = pd.read_csv(csv_path)
-            csv_count = 0
-            for _, row in summary_df.iterrows():
-                ticker = str(row["ticker"]).strip().upper()
-                industry = str(row["industry"]).strip()
-                if ticker not in industry_map or industry_map[ticker] == "nan" or not industry_map[ticker]:
-                    industry_map[ticker] = industry
-                    csv_count += 1
-            logger.info(f"Loaded/updated {csv_count} industry mappings from local CSV.")
-        except Exception as e:
-            logger.warning(f"Could not read local CSV industry mappings: {e}")
+    sp500_count = len(sp500_set)
 
-    return industry_map
+    # Nasdaq-100
+    ndx_unique_count = 0
+    try:
+        logger.info("Fetching Nasdaq-100 company info from Wikipedia...")
+        ndx_url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+        ndx_response = requests.get(
+            ndx_url,
+            headers={"User-Agent": "stock-recommendation-engine/1.3b"},
+            timeout=15,
+        )
+        ndx_response.raise_for_status()
+        ndx_tables = pd.read_html(StringIO(ndx_response.text))
+        ndx_table = None
+        for t in ndx_tables:
+            if "Ticker" in t.columns:
+                ndx_table = t
+                break
+        if ndx_table is not None:
+            for _, row in ndx_table.iterrows():
+                ticker = str(row["Ticker"]).strip().upper().replace(".", "-")
+                if ticker in BLACKLIST or ticker in sp500_set:
+                    continue
+                tickers.append(ticker)
+                company_names[ticker] = str(row.get("Company", ticker)).strip()
+                industries[ticker] = str(row.get("GICS Sector", "Unknown")).strip()
+                ndx_unique_count += 1
+            logger.info(f"Nasdaq-100: added {ndx_unique_count} non-overlapping tickers.")
+        else:
+            logger.warning("Nasdaq-100 Wikipedia table not found (no 'Ticker' column).")
+    except Exception as e:
+        logger.warning(f"Nasdaq-100 Wikipedia fetch failed: {e}.")
+
+    total = len(tickers)
+    logger.info(
+        f"Universe: {sp500_count} S&P 500 + {ndx_unique_count} Nasdaq-100 non-overlapping = {total} total tickers"
+    )
+    return tickers, company_names, industries
 
 
 def main():
-    logger.info("Starting Strategy 1.1 Beta metrics seeding...")
+    parser = argparse.ArgumentParser(description="Seed Ticker Metrics")
+    parser.add_argument("--force-refresh", action="store_true", help="Re-process all tickers even if they exist")
+    parser.add_argument("--tickers", type=str, help="Comma-separated list of specific tickers to seed")
+    args = parser.parse_args()
 
-    # Load industries
-    industry_map = load_industries()
-
-    # Find cached parquet files
-    cache_path = os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")
-    parquet_files = sorted(glob.glob(cache_path))
-    total_files = len(parquet_files)
-    logger.info(f"Found {total_files} cached tickers in {os.path.join(PROJECT_ROOT, 'data', 'cache')}")
-
-    if total_files == 0:
-        logger.error("No cached Parquet files found. Please ensure the cache exists in data/cache/.")
-        sys.exit(1)
+    logger.info("Starting Strategy 1.3 metrics seeding...")
 
     # Initialize Supabase client
     try:
@@ -281,60 +312,146 @@ def main():
         logger.error(f"Failed to initialize Supabase client: {e}")
         sys.exit(1)
 
-    all_metrics = []
-    success_count = 0
+    # Fetch existing metrics from Supabase
+    existing_map = {}
+    try:
+        logger.info("Fetching existing metrics from Supabase...")
+        res = supabase.table("ticker_metrics").select("ticker, total_signals, win_rate").execute()
+        for row in res.data:
+            ticker = row["ticker"].upper()
+            existing_map[ticker] = {
+                "total_signals": int(row.get("total_signals") or 0),
+                "win_rate": float(row.get("win_rate") or 0.0),
+            }
+        logger.info(f"Loaded {len(existing_map)} existing rows from database.")
+    except Exception as e:
+        logger.warning(f"Failed to fetch existing metrics: {e}")
+
+    # Fetch full S&P 500 + NDX universe
+    tickers_all, company_names, industries = fetch_sp500_tickers_all()
+    total_universe = len(tickers_all)
+
+    # Decide targets based on CLI arguments and idempotency
+    target_tickers = []
+    skipped_count = 0
+
+    if args.tickers:
+        cli_list = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        for t in cli_list:
+            target_tickers.append(t)
+            if t not in company_names:
+                company_names[t] = t
+                industries[t] = "Unknown"
+        logger.info(f"Using CLI specific tickers: {target_tickers}")
+    else:
+        for ticker in tickers_all:
+            exist = existing_map.get(ticker)
+            if exist and not args.force_refresh:
+                # If it exists AND has total_trades >= 10, skip it
+                if exist["total_signals"] >= 10:
+                    skipped_count += 1
+                    continue
+            target_tickers.append(ticker)
+        logger.info(f"Idempotency Filter: skipped {skipped_count} already satisfied tickers. Tickers to process: {len(target_tickers)}")
+
+    # Telemetry tracking
+    processed_count = 0
+    seeded_new = 0
+    updated_existing = 0
     failure_count = 0
+    failed_tickers = []
+    batch_metrics = []
+    total_upserted = 0
 
-    # Process tickers one by one
-    for idx, fpath in enumerate(parquet_files, 1):
-        ticker = os.path.basename(fpath).replace(".parquet", "").upper()
-        logger.info(f"[{idx}/{total_files}] Processing {ticker}...")
-
+    # Seeding loop
+    for idx, ticker in enumerate(target_tickers, 1):
         try:
-            raw = pd.read_parquet(fpath, engine="pyarrow")
+            # Download 2 years of daily data (about 500 trading bars)
+            raw = yf.download(ticker, period="2y", progress=False, timeout=15)
+            if raw.empty:
+                logger.warning(f"  [{idx}/{len(target_tickers)}] {ticker}: yfinance returned no data. Skipping.")
+                failed_tickers.append(ticker)
+                failure_count += 1
+                continue
+
+            # Normalize column names
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            raw.columns = raw.columns.str.upper()
+
+            # Ensure required columns
+            required_cols = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
+            if not all(col in raw.columns for col in required_cols):
+                logger.warning(f"  [{idx}/{len(target_tickers)}] {ticker}: Missing columns. Have: {list(raw.columns)}. Skipping.")
+                failed_tickers.append(ticker)
+                failure_count += 1
+                continue
+
+            # Calculate technical indicators and run backtest
             df = calculate_indicators(raw).sort_index()
-            industry = industry_map.get(ticker, "Unknown")
+            industry = industries.get(ticker, "Unknown")
             
             ticker_metrics = backtest_ticker_metrics(ticker, df, industry)
-            all_metrics.append(ticker_metrics)
+            batch_metrics.append(ticker_metrics)
+
+            # Track seeded vs updated
+            if ticker in existing_map:
+                updated_existing += 1
+            else:
+                seeded_new += 1
             
-            logger.info(
-                f"  -> Signals: {ticker_metrics['total_signals']} | "
-                f"Completed: {ticker_metrics['wins'] + ticker_metrics['losses']} | "
-                f"Win Rate: {ticker_metrics['win_rate']:.2f}% | "
-                f"Expectancy: {ticker_metrics['expectancy_pct']:+.4f}%"
-            )
-            success_count += 1
+            processed_count += 1
 
         except Exception as e:
-            logger.error(f"  -> FAILED to process {ticker}: {e}")
+            logger.error(f"  [{idx}/{len(target_tickers)}] FAILED to process {ticker}: {e}")
+            failed_tickers.append(ticker)
             failure_count += 1
 
-    logger.info(f"Processing complete. Success: {success_count}, Failures: {failure_count}")
-
-    # Upsert in batches of 20
-    batch_size = 20
-    upserted_count = 0
-    logger.info(f"Upserting {len(all_metrics)} ticker metrics into Supabase in batches of {batch_size}...")
-
-    for i in range(0, len(all_metrics), batch_size):
-        batch = all_metrics[i : i + batch_size]
-        try:
-            response = supabase.table("ticker_metrics").upsert(batch, on_conflict="ticker").execute()
-            upserted_count += len(batch)
-            logger.info(f"Successfully upserted batch {i//batch_size + 1} ({len(batch)} rows). Total upserted: {upserted_count}")
-        except Exception as e:
-            logger.error(f"Failed to upsert batch {i//batch_size + 1}: {e}")
-            # If batch fails, log and try row by row so we don't lose the whole batch
-            logger.info("Attempting row-by-row fallback for failed batch...")
-            for row in batch:
+        # Batch upsert every 20 processed tickers to keep DB writes safe and efficient
+        if len(batch_metrics) >= 20 or idx == len(target_tickers):
+            if batch_metrics:
                 try:
-                    supabase.table("ticker_metrics").upsert(row, on_conflict="ticker").execute()
-                    upserted_count += 1
-                except Exception as row_err:
-                    logger.error(f"Failed to upsert row for {row['ticker']}: {row_err}")
+                    supabase.table("ticker_metrics").upsert(batch_metrics, on_conflict="ticker").execute()
+                    total_upserted += len(batch_metrics)
+                except Exception as upsert_err:
+                    logger.error(f"Batch upsert failed: {upsert_err}. Attempting row-by-row fallback...")
+                    for row in batch_metrics:
+                        try:
+                            supabase.table("ticker_metrics").upsert(row, on_conflict="ticker").execute()
+                            total_upserted += 1
+                        except Exception as row_err:
+                            logger.error(f"Row upsert failed for {row['ticker']}: {row_err}")
+                batch_metrics = []
 
-    logger.info(f"Seeding completed. Total rows successfully upserted: {upserted_count}/{len(all_metrics)}")
+        # Print progress every 50 tickers processed
+        if idx % 50 == 0 or idx == len(target_tickers):
+            print(f"Processed {idx}/{len(target_tickers)} tickers. Seeded {seeded_new} new. Updated {updated_existing} existing. Skipped {skipped_count}.")
+
+    print("\n" + "=" * 80)
+    print("  SEEDING RUN COMPLETE SUMMARY")
+    print("=" * 80)
+
+    # Fetch final summary statistics directly from Supabase
+    try:
+        final_res = supabase.table("ticker_metrics").select("ticker, total_signals").execute()
+        final_rows = final_res.data or []
+        total_seeded = len(final_rows)
+        total_gt_10 = sum(1 for r in final_rows if int(r.get("total_signals") or 0) >= 10)
+        total_lt_10 = sum(1 for r in final_rows if int(r.get("total_signals") or 0) < 10)
+    except Exception as e:
+        logger.error(f"Failed to fetch final summary stats: {e}")
+        total_seeded = total_universe - skipped_count + processed_count
+        total_gt_10 = "N/A"
+        total_lt_10 = "N/A"
+
+    print(f"Total tickers in universe                 : {total_universe}")
+    print(f"Total seeded in ticker_metrics            : {total_seeded}")
+    print(f"Total with total_trades >= 10             : {total_gt_10}")
+    print(f"Total with total_trades < 10 (insufficient): {total_lt_10}")
+    print(f"Total downloads/runs failed               : {failure_count}")
+    if failed_tickers:
+        print(f"Failed Tickers List                       : {', '.join(failed_tickers)}")
+    print("=" * 80 + "\n")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,10 @@ class SignalRanker:
         self.min_expectancy = min_expectancy
         self.min_win_rate = min_win_rate
         self.min_trades = min_trades
+        self.signals_strong_buy = 0
+        self.signals_buy = 0
+        self.signals_watch = 0
+        self.signals_speculative = 0
 
     def normalize_percentile(self, series: pd.Series) -> pd.Series:
         """Convert a numeric Series to percentile ranks in [0, 100]."""
@@ -99,8 +103,8 @@ class SignalRanker:
         # (caps it at Watch or Speculative tier, never Buy or Strong Buy)
         expectancy_pct = row.get("expectancy_pct", 0.0)
         win_rate = row.get("win_rate", 0.0)
-        if expectancy_pct < 0.0 and win_rate < 30.0:
-            total = min(total, 45.0)
+        if expectancy_pct < 0.0 and win_rate < 25.0:
+            total = min(total, 40.0)
         
         return {
             "total": round(total, 4),
@@ -191,10 +195,10 @@ class SignalRanker:
         df_filtered["score_breakdown"] = score_breakdowns
 
         # 6. Assign Tier Labels
-        # Tier 1 "Strong Buy": score >= 70, expectancy_pct > 0.0, win_rate >= 35.0, total_trades >= 10
-        # Tier 2 "Buy": score >= 58, expectancy_pct >= 0.0, win_rate >= 30.0, total_trades >= 10
-        # Tier 3 "Watch": score >= 45, expectancy_pct >= -1.0
-        # Tier 4 "Speculative": score < 45 or doesn't meet Watch
+        # Tier 1 "Strong Buy": score >= 65, expectancy_pct > 0.0, win_rate >= 35.0, total_trades >= 10
+        # Tier 2 "Buy": score >= 50, expectancy_pct >= 0.0, win_rate >= 25.0, total_trades >= 10
+        # Tier 3 "Watch": score >= 40, expectancy_pct >= -2.0
+        # Tier 4 "Speculative": score < 40 or doesn't meet Watch
         tiers = []
         for _, row in df_filtered.iterrows():
             score = row["composite_score"]
@@ -202,9 +206,9 @@ class SignalRanker:
             wr = row["win_rate"]
             trades = row.get("total_trades", 0)
 
-            is_t1 = (score >= 70) and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
-            is_t2 = (score >= 58) and (exp >= 0.0) and (wr >= 30.0) and (trades >= 10)
-            is_t3 = (score >= 45) and (exp >= -1.0)
+            is_t1 = (score >= 65.0) and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
+            is_t2 = (score >= 50.0) and (exp >= 0.0) and (wr >= 25.0) and (trades >= 10)
+            is_t3 = (score >= 40.0) and (exp >= -2.0)
 
             if is_t1:
                 tiers.append(1)
@@ -217,9 +221,19 @@ class SignalRanker:
 
         df_filtered["temp_tier"] = tiers
 
+        # Save tier counts for scan_log tracking
+        self.signals_strong_buy = int(sum(df_filtered["temp_tier"] == 1))
+        self.signals_buy = int(sum(df_filtered["temp_tier"] == 2))
+        self.signals_watch = int(sum(df_filtered["temp_tier"] == 3))
+        self.signals_speculative = int(sum(df_filtered["temp_tier"] == 4))
+
         # Map temp_tier to tier_label
         tier_map = {1: "Strong Buy", 2: "Buy", 3: "Watch", 4: "Speculative"}
         df_filtered["tier_label"] = df_filtered["temp_tier"].map(tier_map)
+
+        # Log all composite scores for debugging
+        for _, r in df_filtered.iterrows():
+            logger.info(f"[RANKER DEBUG] {r['ticker']}: Score={r['composite_score']:.1f}, Tier={r['tier_label']}, exp={r['expectancy_pct']:.2f}%, win={r['win_rate']:.1f}%, trades={r['total_trades']}")
 
         # Split by tier (only Tier 1 and Tier 2 are kept)
         t1_eligible = df_filtered[df_filtered["temp_tier"] == 1]
@@ -228,7 +242,17 @@ class SignalRanker:
         t1_sorted = t1_eligible.sort_values("composite_score", ascending=False)
         t2_sorted = t2_eligible.sort_values("composite_score", ascending=False)
 
-        # Auto-relax selection: ONLY relax Tier 1 -> Tier 2. Never relax to Watch or Speculative.
+        # Auto-relax selection:
+        # If < 3 Strong Buy candidates: relax to include Buy candidates
+        # If < 3 total (Strong Buy + Buy): return empty list
+        total_eligible_count = len(t1_eligible) + len(t2_eligible)
+        if total_eligible_count < 3:
+            logger.info("No high-confidence setups tonight. Cash is a position.")
+            result = pd.DataFrame(columns=df_filtered.columns)
+            if "temp_tier" in result.columns:
+                result = result.drop(columns=["temp_tier"])
+            return result.reset_index(drop=True)
+
         if len(t1_eligible) >= 3:
             selected = pd.concat([t1_sorted, t2_sorted])
         else:
@@ -261,17 +285,17 @@ if __name__ == "__main__":
     # Test data mimicking actual conditions
     test_data = pd.DataFrame(
         {
-            "ticker": ["ABNB", "AEE", "BALL", "TSLA", "NVDA", "INVALID"],
-            "win_rate": [20.0, 18.5, 24.1, 45.0, 38.0, 10.0],
-            "expectancy_pct": [-3.41, -0.59, -0.60, 5.1, 4.2, -5.0],
-            "upside_pct": [32.5, 6.9, 33.2, 8.0, 15.0, 2.0],
-            "price": [140.0, 80.0, 60.0, 250.0, 120.0, 10.0],
-            "dma_50": [135.0, 82.0, 58.0, 240.0, 110.0, 15.0],
-            "current_rsi": [56.1, 53.9, 60.3, 52.0, 68.0, 30.0],
-            "volume_ratio": [1.10, 1.17, 2.33, 1.5, 2.0, 0.5],
-            "macd_histogram": [0.12, -0.05, 0.22, 0.45, 0.35, -0.20],
-            "total_trades": [15, 12, 10, 22, 30, 2],
-            "industry": ["Hotels, Resorts & Cruise Lines", "Multi-Utilities", "Metal, Glass & Plastic Containers", "Automobile Manufacturers", "Semiconductors", "Unknown"],
+            "ticker": ["ABNB", "AEE", "BALL", "TSLA", "NVDA", "INVALID", "XYZ"],
+            "win_rate": [20.0, 18.5, 24.1, 45.0, 38.0, 10.0, 40.0],
+            "expectancy_pct": [-3.41, -0.59, -0.60, 5.1, 4.2, -5.0, 3.5],
+            "upside_pct": [32.5, 6.9, 33.2, 8.0, 15.0, 2.0, 10.0],
+            "price": [140.0, 80.0, 60.0, 250.0, 120.0, 10.0, 100.0],
+            "dma_50": [135.0, 82.0, 58.0, 240.0, 110.0, 15.0, 95.0],
+            "current_rsi": [56.1, 53.9, 60.3, 52.0, 68.0, 30.0, 55.0],
+            "volume_ratio": [1.10, 1.17, 2.33, 1.5, 2.0, 0.5, 1.2],
+            "macd_histogram": [0.12, -0.05, 0.22, 0.45, 0.35, -0.20, 0.20],
+            "total_trades": [15, 12, 10, 22, 30, 2, 15],
+            "industry": ["Hotels, Resorts & Cruise Lines", "Multi-Utilities", "Metal, Glass & Plastic Containers", "Automobile Manufacturers", "Semiconductors", "Unknown", "Semiconductors"],
         }
     )
 
@@ -290,7 +314,7 @@ if __name__ == "__main__":
 
     # Assertions
     tickers_ranked = result_bull["ticker"].tolist()
-    assert len(tickers_ranked) == 2, f"Expected 2 ranked signals, got {len(tickers_ranked)}"
+    assert len(tickers_ranked) == 3, f"Expected 3 ranked signals, got {len(tickers_ranked)}"
     
     # TSLA should be Tier 1 (Strong Buy) because scores are high and expectancy/winrate positive
     tsla_row = result_bull[result_bull["ticker"] == "TSLA"].iloc[0]

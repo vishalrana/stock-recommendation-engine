@@ -719,6 +719,10 @@ def main():
     signals_recommended = 0
     ranked_signals = []
     error_msg = None
+    signals_strong_buy = 0
+    signals_buy = 0
+    signals_watch = 0
+    signals_speculative = 0
 
     if raw_signals and trade_allowed:
         # Build DataFrame with metrics columns for the ranker
@@ -736,6 +740,16 @@ def main():
         logger.info("Applying composite ranking (Strategy 1.3 Rev B)...")
         ranker = SignalRanker()
         scored_df = ranker.composite_rank(signals_df, regime_str, top_n=len(signals_df))
+
+        signals_strong_buy = ranker.signals_strong_buy
+        signals_buy = ranker.signals_buy
+        signals_watch = ranker.signals_watch
+        signals_speculative = ranker.signals_speculative
+
+        logger.info(
+            f"Candidate pool tier counts: Strong Buy={signals_strong_buy}, Buy={signals_buy}, "
+            f"Watch={signals_watch} (debug only), Speculative={signals_speculative} (debug only)"
+        )
 
         if not scored_df.empty:
             # Log per-candidate
@@ -971,6 +985,8 @@ def main():
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
         "momentum_exceptions": gate_rejections["momentum_exceptions"],
         "rsi_breadth_pct": rsi_breadth_pct,
+        "signals_strong_buy": signals_strong_buy,
+        "signals_buy": signals_buy,
     }
 
     if not args.dry_run:

@@ -46,11 +46,12 @@ def run_diagnostics():
         f_trend = row.get("failed_trend_gate", 0)
         f_volume = row.get("failed_volume_gate", 0)
         f_rr = row.get("failed_rr_gate", 0)
+        f_maxrisk = row.get("failed_maxrisk_gate", 0)
         f_trades = row.get("failed_trades_gate", 0)
 
         print(f"Date: {date} | Regime: {str(regime).upper():<8} | Scanned: {scanned:<4} | "
               f"Qualified: {qualified:<3} | Recommended: {recommended:<3} | RSI Breadth: {rsi_breadth_str:<6}")
-        print(f"  Failed Gates: Trend={f_trend:<3} RSI={f_rsi:<3} ADX={f_adx:<3} MACD={f_macd:<3} Volume={f_volume:<3} RR={f_rr:<3} Trades={f_trades:<3}")
+        print(f"  Failed Gates: Trend={f_trend:<3} RSI={f_rsi:<3} ADX={f_adx:<3} MACD={f_macd:<3} Volume={f_volume:<3} RR={f_rr:<3} MaxRisk={f_maxrisk:<3} Trades={f_trades:<3}")
         if row.get("error_message"):
             print(f"  Note/Error: {row.get('error_message')}")
         print("-" * 80)
@@ -153,6 +154,7 @@ def run_diagnostics():
             ("MACD Momentum Gate", latest_scan.get("failed_macd_gate", 0)),
             ("Volume Confirmation Gate", latest_scan.get("failed_volume_gate", 0)),
             ("Risk/Reward Ratio Gate", latest_scan.get("failed_rr_gate", 0)),
+            ("Max Risk % Gate", latest_scan.get("failed_maxrisk_gate", 0)),
             ("Trades Floor Gate", latest_scan.get("failed_trades_gate", 0)),
         ]
 

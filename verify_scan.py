@@ -46,6 +46,7 @@ def main():
     print(f"  failed_macd_gate   : {log.get('failed_macd_gate', 0)}")
     print(f"  failed_volume_gate : {log.get('failed_volume_gate', 0)}")
     print(f"  failed_rr_gate     : {log.get('failed_rr_gate', 0)}")
+    print(f"  failed_maxrisk_gate: {log.get('failed_maxrisk_gate', 0)}")
     print(f"  failed_trades_gate : {log.get('failed_trades_gate', 0)}")
     if log.get("error_message"):
         print(f"Error Message/Warning: {log.get('error_message')}")
@@ -95,6 +96,7 @@ def main():
         print(f"  failed_macd_gate   : {log.get('failed_macd_gate', 0)} vs {prev.get('failed_macd_gate', 0)}")
         print(f"  failed_volume_gate : {log.get('failed_volume_gate', 0)} vs {prev.get('failed_volume_gate', 0)}")
         print(f"  failed_rr_gate     : {log.get('failed_rr_gate', 0)} vs {prev.get('failed_rr_gate', 0)}")
+        print(f"  failed_maxrisk_gate: {log.get('failed_maxrisk_gate', 0)} vs {prev.get('failed_maxrisk_gate', 0)}")
         print(f"  failed_trades_gate : {log.get('failed_trades_gate', 0)} vs {prev.get('failed_trades_gate', 0)}")
         
         # Checking trades gate drop

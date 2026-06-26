@@ -29,6 +29,9 @@ Database prerequisites (run once in Supabase SQL Editor):
 
   -- RSI breadth column on scan_log:
   ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS rsi_breadth_pct NUMERIC;
+
+  -- Max Risk Gate column on scan_log:
+  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_maxrisk_gate INT DEFAULT 0;
 """
 
 import os
@@ -287,25 +290,23 @@ def check_latest_signal(
     if not (volume_ratio >= VOLUME_MULTIPLIER):
         return None, "failed_volume_gate"
 
-    # 6. Swing Low Stop-loss
+    # 6. Swing Low Stop-loss & Max Risk % check (reject if stop-loss is missing/invalid or risk > 15% of entry price)
     stop_loss = find_swing_low(df)
     if stop_loss is None:
-        return None, "failed_rr_gate"
+        return None, "failed_maxrisk_gate"
 
     entry_price = round(highs[t] * 1.001, 2)
     if stop_loss >= entry_price:
-        return None, "failed_rr_gate"
+        return None, "failed_maxrisk_gate"
 
     risk = entry_price - stop_loss
     if risk <= 0:
-        return None, "failed_rr_gate"
-    
+        return None, "failed_maxrisk_gate"
+
+    if (entry_price - stop_loss) / entry_price > 0.15:
+        return None, "failed_maxrisk_gate"
+
     exit_price = round(entry_price + risk * TARGET_R_MULTIPLE, 2)
-    
-    # Risk/Reward check
-    rr = (exit_price - entry_price) / (entry_price - stop_loss)
-    if rr < 3.0:
-        return None, "failed_rr_gate"
 
     # 7. Historical data floor: total_trades >= 10 in ticker_metrics
     if total_trades < 10:
@@ -422,7 +423,7 @@ def main():
         "failed_adx_gate": 0,
         "failed_trend_gate": 0,
         "failed_volume_gate": 0,
-        "failed_rr_gate": 0,
+        "failed_maxrisk_gate": 0,
         "failed_trades_gate": 0,
     }
 
@@ -812,7 +813,7 @@ def main():
         "failed_adx_gate": gate_rejections["failed_adx_gate"],
         "failed_trend_gate": gate_rejections["failed_trend_gate"],
         "failed_volume_gate": gate_rejections["failed_volume_gate"],
-        "failed_rr_gate": gate_rejections["failed_rr_gate"],
+        "failed_maxrisk_gate": gate_rejections["failed_maxrisk_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
         "rsi_breadth_pct": rsi_breadth_pct,
     }

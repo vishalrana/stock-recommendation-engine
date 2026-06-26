@@ -35,6 +35,9 @@ Database prerequisites (run once in Supabase SQL Editor):
 
   -- Min Risk Gate column on scan_log:
   ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_minrisk_gate INT DEFAULT 0;
+
+  -- Max Gap Gate column on scan_log:
+  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_maxgap_gate INT DEFAULT 0;
 """
 
 import os
@@ -329,6 +332,13 @@ def check_latest_signal(
     if risk_pct < MIN_RISK_PCT:
         return None, "failed_minrisk_gate"
 
+    # Strategy 1.3 Rev B: Max Gap % gate (avoid flash crashes / dead cat bounces)
+    MAX_GAP_PCT = 5.0
+    daily_returns = df['CLOSE'].pct_change().iloc[-5:]
+    max_drop = daily_returns.min() * 100
+    if max_drop < -MAX_GAP_PCT:
+        return None, "failed_maxgap_gate"
+
     if median_win_return and median_win_return > 0:
         # 15% buffer above historical median winning return, min 5%, max 20%
         target_pct = min(max(median_win_return * 1.15, 5.0), 20.0)
@@ -457,6 +467,7 @@ def main():
         "failed_volume_gate": 0,
         "failed_maxrisk_gate": 0,
         "failed_minrisk_gate": 0,
+        "failed_maxgap_gate": 0,
         "failed_trades_gate": 0,
     }
 
@@ -858,6 +869,7 @@ def main():
         "failed_volume_gate": gate_rejections["failed_volume_gate"],
         "failed_maxrisk_gate": gate_rejections["failed_maxrisk_gate"],
         "failed_minrisk_gate": gate_rejections["failed_minrisk_gate"],
+        "failed_maxgap_gate": gate_rejections["failed_maxgap_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
         "rsi_breadth_pct": rsi_breadth_pct,
     }

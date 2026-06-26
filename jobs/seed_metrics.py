@@ -6,6 +6,9 @@ and seeds/updates them in the Supabase ticker_metrics table.
 
 Usage:
     python -m jobs.seed_metrics [--force-refresh] [--tickers AAPL,MSFT,TSLA]
+
+Database prerequisites:
+    ALTER TABLE ticker_metrics ADD COLUMN IF NOT EXISTS median_win_return FLOAT DEFAULT 0.0;
 """
 
 import os
@@ -148,6 +151,7 @@ def backtest_ticker_metrics(ticker: str, df: pd.DataFrame, industry: str) -> dic
             "win_rate": 0.0,
             "expectancy_pct": 0.0,
             "median_holding_days": 0.0,
+            "median_win_return": 0.0,
         }
 
     closes = df["CLOSE"].to_numpy(dtype=float)
@@ -213,6 +217,10 @@ def backtest_ticker_metrics(ticker: str, df: pd.DataFrame, industry: str) -> dic
     expectancy_pct = round(float(mean([t["return_pct"] for t in completed_trades])), 4) if completed > 0 else 0.0
     median_holding_days = round(float(median([t["holding_days"] for t in completed_trades])), 1) if completed > 0 else 0.0
 
+    # Median win return % (winning trades only)
+    winning_returns = [t["return_pct"] for t in completed_trades if t["outcome"] == "win"]
+    median_win_return = round(float(median(winning_returns)), 4) if winning_returns else 0.0
+
     return {
         "ticker": ticker,
         "industry": industry,
@@ -222,6 +230,7 @@ def backtest_ticker_metrics(ticker: str, df: pd.DataFrame, industry: str) -> dic
         "win_rate": win_rate,
         "expectancy_pct": expectancy_pct,
         "median_holding_days": median_holding_days,
+        "median_win_return": median_win_return,
         "updated_at": datetime.utcnow().isoformat(),
     }
 

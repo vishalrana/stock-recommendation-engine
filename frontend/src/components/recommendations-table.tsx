@@ -184,14 +184,52 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
         cell: (info) => tierBadge(info.getValue() as string, info.row.original.is_fallback),
       },
       {
-        accessorKey: 'adx_value',
-        header: 'ADX(14)',
-        cell: (info) => adxBadge(info.getValue() as number | null),
+        accessorKey: 'price',
+        header: 'Current Price',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
+        },
       },
       {
-        accessorKey: 'composite_score',
-        header: 'Composite Score',
-        cell: (info) => compositeScoreBar(info.getValue() as number, info.row.original.macd_histogram),
+        accessorKey: 'entry_price',
+        header: 'Entry Price',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
+        },
+      },
+      {
+        accessorKey: 'stop_loss',
+        header: 'Stop Loss',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
+        },
+      },
+      {
+        accessorKey: 'exit_price',
+        header: 'Target Price',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
+        },
+      },
+      {
+        accessorKey: 'upside_pct',
+        header: 'Upside',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? <span className="text-green-600 font-bold">+{val.toFixed(1)}%</span> : '-';
+        },
+      },
+      {
+        accessorKey: 'risk_reward',
+        header: 'R/R',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `${val.toFixed(1)}x` : '-';
+        },
       },
       {
         accessorKey: 'current_rsi',
@@ -208,7 +246,47 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
               {val.toFixed(1)}
             </span>
           );
-        }
+        },
+      },
+      {
+        accessorKey: 'adx_value',
+        header: 'ADX(14)',
+        cell: (info) => adxBadge(info.getValue() as number | null),
+      },
+      {
+        accessorKey: 'volume_ratio',
+        header: 'Vol Ratio',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `${val.toFixed(2)}x` : '-';
+        },
+      },
+      {
+        accessorKey: 'distance_from_high_pct',
+        header: 'Dist High',
+        cell: (info) => {
+          const val = info.getValue() as number | null | undefined;
+          return typeof val === 'number' ? `${val.toFixed(1)}%` : '-';
+        },
+      },
+      {
+        accessorKey: 'is_momentum_exception',
+        header: 'Momentum',
+        cell: (info) => {
+          const val = info.getValue() as boolean | null | undefined;
+          return val ? (
+            <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">
+              Breakout
+            </span>
+          ) : (
+            <span className="text-gray-400">—</span>
+          );
+        },
+      },
+      {
+        accessorKey: 'composite_score',
+        header: 'Composite Score',
+        cell: (info) => compositeScoreBar(info.getValue() as number, info.row.original.macd_histogram),
       },
       {
         accessorKey: 'industry',
@@ -244,54 +322,6 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
           const val = info.getValue() as number | null | undefined;
           if (typeof val !== 'number') return '-';
           return tradesBadge(val);
-        },
-      },
-      {
-        accessorKey: 'score',
-        header: 'Raw Score',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? <span className="font-mono text-gray-500">{val.toFixed(4)}</span> : '-';
-        },
-      },
-      {
-        accessorKey: 'entry_price',
-        header: 'Entry Price',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
-        },
-      },
-      {
-        accessorKey: 'exit_price',
-        header: 'Exit Price',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
-        },
-      },
-      {
-        accessorKey: 'stop_loss',
-        header: 'Stop Loss',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
-        },
-      },
-      {
-        accessorKey: 'upside_pct',
-        header: 'Upside',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? <span className="text-green-600 font-bold">+{val.toFixed(1)}%</span> : '-';
-        },
-      },
-      {
-        accessorKey: 'risk_reward',
-        header: 'Risk/Reward',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `${val.toFixed(1)}x` : '-';
         },
       },
       {

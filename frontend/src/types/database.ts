@@ -26,6 +26,8 @@ export interface Recommendation {
   rsi_min_10d: number | null;
   ema20: number | null;
   is_fallback: boolean | null;
+  is_momentum_exception: boolean | null;
+  distance_from_high_pct: number | null;
 }
 
 export interface ScanLog {

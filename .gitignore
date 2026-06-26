@@ -16,3 +16,14 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Project Cache & Output Data
+data/cache/
+*.parquet
+*.json
+outputs/
+*.log
+
+# Scratch scripts
+scratch/
+

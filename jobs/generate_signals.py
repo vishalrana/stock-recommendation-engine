@@ -10,10 +10,9 @@ Flow:
      - BULL regime: trend gate relaxed to price > 50 SMA only (Rev B)
   4. Merge with historical backtest metrics from ticker_metrics
   5. Apply gated percentile-normalized ranking (SignalRanker)
-  6. Extended Bull Fallback: if signals_recommended < 3 and rsi_breadth < 25%, re-scan with looser RSI/ADX
-  7. Archive previous signals to signals_history via upsert (duplicate-safe)
-  8. Clear and insert ranked signals (is_fallback tagged where applicable)
-  9. Log results with regime metadata and gate rejection breakdown
+  6. Archive previous signals to signals_history via upsert (duplicate-safe)
+  7. Clear and insert ranked signals
+  8. Log results with regime metadata and gate rejection breakdown
 
 Usage:
     python -m jobs.generate_signals [--dry-run]
@@ -94,11 +93,7 @@ TARGET_R_MULTIPLE = 3.0
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
 
-# Extended Bull Fallback parameters (triggered when primary scan yields < 3 signals in bull)
-FALLBACK_RSI_PULLBACK_THRESHOLD = 57.0
-FALLBACK_ADX_MIN = 15.0
-FALLBACK_TRIGGER_THRESHOLD = 3    # min recommended signals before fallback fires
-FALLBACK_RSI_BREADTH_MAX = 25.0   # only trigger fallback if RSI breadth is also low
+# Extended Bull Fallback parameters removed to restore original selectivity
 
 # Ranking
 TOP_N = 5
@@ -266,8 +261,6 @@ def check_latest_signal(
     industry: str,
     total_trades: int,
     regime_str: str = "neutral",
-    rsi_threshold_override: float | None = None,
-    adx_min_override: float | None = None,
     median_win_return: float = 0.0,
 ) -> tuple[dict, str]:
     """
@@ -275,18 +268,12 @@ def check_latest_signal(
 
     Args:
         regime_str: current market regime ("bull", "bear", "sideways").
-        rsi_threshold_override: if set, replaces RSI_PULLBACK_THRESHOLD (used in fallback scan).
-        adx_min_override: if set, replaces ADX_MIN (used in fallback scan).
 
     Returns a tuple (signal_data, failed_gate_name).
     If the stock passes all gates, failed_gate_name is None.
     """
-    effective_rsi_threshold = rsi_threshold_override if rsi_threshold_override is not None else RSI_PULLBACK_THRESHOLD
-    
-    if adx_min_override is not None:
-        effective_adx_min = adx_min_override
-    else:
-        effective_adx_min = 15.0 if regime_str.lower() == "bull" else 18.0
+    effective_rsi_threshold = RSI_PULLBACK_THRESHOLD
+    effective_adx_min = 15.0 if regime_str.lower() == "bull" else 18.0
 
     n_bars = len(df)
     if n_bars < 201:
@@ -430,14 +417,9 @@ def check_latest_signal(
         if 0 < days_to_earnings <= EARNINGS_BUFFER_DAYS:
             return None, "failed_earnings_gate"
 
-    # Strategy 1.3 Rev B: Distance from 20-Day High gate (avoid peak buying on pullbacks)
+    # Strategy 1.3 Rev B: Distance from 20-Day High (stored for display)
     high_20d = float(df['HIGH'].rolling(20).max().iloc[-1])
     distance_from_high_pct = (high_20d - c) / high_20d * 100
-    MAX_DISTANCE_FROM_HIGH_PCT = 5.0
-    
-    if not is_momentum_exception:
-        if distance_from_high_pct < MAX_DISTANCE_FROM_HIGH_PCT:
-            return None, "failed_extended_high_gate"
 
     latest_date = dates[t]
     if hasattr(latest_date, 'date'):
@@ -560,7 +542,6 @@ def main():
         "failed_minrisk_gate": 0,
         "failed_maxgap_gate": 0,
         "failed_earnings_gate": 0,
-        "failed_extended_high_gate": 0,
         "failed_trades_gate": 0,
         "momentum_exceptions": 0,
     }
@@ -813,121 +794,11 @@ def main():
     else:
         logger.info("No technically qualified signals found.")
 
-    # ── Step 6: Extended Bull Fallback ───────────────────────
-    # Trigger when: bull regime + low primary signals + low RSI breadth.
+    # ── Step 6: Final check ──────────────────────────────────
     rsi_breadth_pct_primary = round(100.0 * rsi_passed_count / scanned_count, 1) if scanned_count > 0 else 0.0
-    fallback_signals: list[dict] = []
-    fallback_triggered = False
-
-    if (
-        trade_allowed
-        and regime_str == "bull"
-        and signals_recommended < FALLBACK_TRIGGER_THRESHOLD
-        and rsi_breadth_pct_primary < FALLBACK_RSI_BREADTH_MAX
-    ):
-        fallback_triggered = True
-        logger.warning(
-            "Extended Bull Fallback triggered — primary scan yielded %d signals, "
-            "re-running with relaxed RSI=%.1f/ADX=%.1f",
-            signals_recommended, FALLBACK_RSI_PULLBACK_THRESHOLD, FALLBACK_ADX_MIN,
-        )
-
-        # Tickers already picked up by primary scan
-        primary_tickers = {s["ticker"] for s in ranked_signals}
-
-        for fpath in sorted(glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet"))):
-            f_ticker = os.path.basename(fpath).replace(".parquet", "").upper()
-            if tickers and f_ticker not in tickers:
-                continue
-            if f_ticker in primary_tickers:
-                continue  # primary result takes priority
-            try:
-                raw = pd.read_parquet(fpath, engine="pyarrow")
-                if len(raw) < 60:
-                    continue
-                df_f = calculate_indicators(raw).sort_index()
-                company_name = company_names.get(f_ticker, f_ticker)
-                industry = industries.get(f_ticker, "Unknown")
-                total_trades = metrics_map.get(f_ticker, {}).get("total_trades", 0)
-                median_win_return = metrics_map.get(f_ticker, {}).get("median_win_return", 0.0)
-                sig, _ = check_latest_signal(
-                    f_ticker, df_f, company_name, industry, total_trades,
-                    regime_str=regime_str,
-                    rsi_threshold_override=FALLBACK_RSI_PULLBACK_THRESHOLD,
-                    adx_min_override=FALLBACK_ADX_MIN,
-                    median_win_return=median_win_return,
-                )
-                if sig is not None:
-                    sig["is_fallback"] = True
-                    sig["tier_label"] = "Watch"  # fallback signals capped at Watch
-                    fallback_signals.append(sig)
-                    logger.info(
-                        f"[FALLBACK QUALIFIED] {f_ticker} | RSI: {sig['current_rsi']:.1f} | "
-                        f"ADX: {sig['adx_value']:.1f}"
-                    )
-            except Exception as e:
-                logger.error(f"Error in fallback scan for {f_ticker}: {e}")
-
-        logger.info("Fallback scan complete: %d additional candidates found.", len(fallback_signals))
-
-        # Merge fallback candidates: rank them and fill up to TOP_N
-        if fallback_signals:
-            fb_df = pd.DataFrame(fallback_signals)
-            fb_df["win_rate"] = fb_df["ticker"].apply(lambda t: metrics_map.get(t, {}).get("win_rate", 0.0))
-            fb_df["expectancy_pct"] = fb_df["ticker"].apply(lambda t: metrics_map.get(t, {}).get("expectancy_pct", 0.0))
-            fb_df["total_trades"] = fb_df["ticker"].apply(lambda t: metrics_map.get(t, {}).get("total_trades", 0))
-            ranker_fb = SignalRanker()
-            fb_scored = ranker_fb.composite_rank(fb_df, regime_str, top_n=len(fb_df))
-            slots_remaining = TOP_N - signals_recommended
-            for _, row in fb_scored.head(slots_remaining).iterrows():
-                ranked_signals.append({
-                    "scan_date": row["scan_date"],
-                    "ticker": row["ticker"],
-                    "company_name": row["company_name"],
-                    "industry": row["industry"],
-                    "price": row["price"],
-                    "entry_price": row["entry_price"],
-                    "stop_loss": row["stop_loss"],
-                    "exit_price": row["exit_price"],
-                    "upside_pct": row["upside_pct"],
-                    "risk_reward": row["risk_reward"],
-                    "current_rsi": row["current_rsi"],
-                    "rsi_min_10d": row["rsi_min_10d"],
-                    "volume_ratio": row["volume_ratio"],
-                    "adx_value": row["adx_value"],
-                    "macd_histogram": row["macd_histogram"],
-                    "ema20": row["ema20"],
-                    "score": round(float(row["composite_score"]), 4),
-                    "composite_score": round(float(row["composite_score"]), 4),
-                    "tier_label": "Watch",  # capped regardless of composite score
-                    "regime": regime_str,
-                    "is_fallback": True,
-                })
-            signals_recommended = len(ranked_signals)
-            logger.info(
-                "After fallback merge: %d total recommendations (%d primary + %d fallback).",
-                signals_recommended,
-                signals_recommended - len(fallback_signals[:slots_remaining]),
-                min(len(fallback_signals), slots_remaining),
-            )
-
-    # Final recommendations check
     signals_recommended = len(ranked_signals)
     if signals_recommended == 0:
         logger.info("No high-confidence setups tonight. Cash is a position.")
-
-    # Auto-relax warning check — dynamic message referencing current thresholds
-    if signals_recommended < 3 and trade_allowed:
-        next_threshold = RSI_PULLBACK_THRESHOLD + 2
-        warn_parts = [
-            f"WARN: Low signal count ({signals_recommended}) after",
-            "fallback scan" if fallback_triggered else "primary scan",
-            f"— RSI_PULLBACK_THRESHOLD={RSI_PULLBACK_THRESHOLD},",
-            f"consider raising to {next_threshold};",
-            f"ADX_MIN={15.0 if regime_str.lower() == 'bull' else 18.0}, RSI_RECOVERY_MAX={RSI_RECOVERY_MAX}",
-        ]
-        error_msg = " ".join(warn_parts)
-        logger.warning(error_msg)
 
     # ── Step 6: Archive and update signals ──────────────────
     duration = round(time.time() - start_time, 2)
@@ -981,7 +852,6 @@ def main():
         "failed_minrisk_gate": gate_rejections["failed_minrisk_gate"],
         "failed_maxgap_gate": gate_rejections["failed_maxgap_gate"],
         "failed_earnings_gate": gate_rejections["failed_earnings_gate"],
-        "failed_extended_high_gate": gate_rejections["failed_extended_high_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
         "momentum_exceptions": gate_rejections["momentum_exceptions"],
         "rsi_breadth_pct": rsi_breadth_pct,
@@ -1006,9 +876,8 @@ def main():
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B signal generation complete.")
     logger.info(
-        "Regime: %s | Scanned: %d | Qualified: %d | Recommended: %d | Fallback: %s | Duration: %.1fs",
-        regime_str.upper(), scanned_count, signals_qualified, signals_recommended,
-        "YES" if fallback_triggered else "NO", duration,
+        "Regime: %s | Scanned: %d | Qualified: %d | Recommended: %d | Duration: %.1fs",
+        regime_str.upper(), scanned_count, signals_qualified, signals_recommended, duration,
     )
     logger.info("="  * 60)
 

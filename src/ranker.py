@@ -244,9 +244,9 @@ class SignalRanker:
 
         # Auto-relax selection:
         # If < 3 Strong Buy candidates: relax to include Buy candidates
-        # If < 3 total (Strong Buy + Buy): return empty list
+        # If 0 total (Strong Buy + Buy): return empty list
         total_eligible_count = len(t1_eligible) + len(t2_eligible)
-        if total_eligible_count < 3:
+        if total_eligible_count == 0:
             logger.info("No high-confidence setups tonight. Cash is a position.")
             result = pd.DataFrame(columns=df_filtered.columns)
             if "temp_tier" in result.columns:

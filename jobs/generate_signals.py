@@ -41,6 +41,13 @@ Database prerequisites (run once in Supabase SQL Editor):
 
   -- Earnings Gate column on scan_log:
   ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_earnings_gate INT DEFAULT 0;
+
+  -- Momentum Exceptions column on scan_log:
+  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS momentum_exceptions INT DEFAULT 0;
+
+  -- is_momentum_exception column on signals and signals_history:
+  ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_momentum_exception BOOLEAN DEFAULT FALSE;
+  ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS is_momentum_exception BOOLEAN DEFAULT FALSE;
 """
 
 import os
@@ -319,7 +326,23 @@ def check_latest_signal(
         if not (c > d50 > d200):
             return None, "failed_trend_gate"
 
-    # 2. RSI pullback-recovery
+    # 2. RSI pullback-recovery (or momentum exception breakout)
+    # Compute momentum exception criteria
+    price_vs_50dma_pct = (c / d50 - 1) * 100 if d50 > 0 else 0.0
+    volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
+    
+    MOMENTUM_EXCEPTION = {
+        'min_price_vs_50dma_pct': 20.0,
+        'min_volume_ratio': 1.5,
+        'min_adx': 20.0,
+    }
+    
+    is_momentum_exception = (
+        price_vs_50dma_pct >= MOMENTUM_EXCEPTION['min_price_vs_50dma_pct'] and
+        volume_ratio >= MOMENTUM_EXCEPTION['min_volume_ratio'] and
+        adx_now >= MOMENTUM_EXCEPTION['min_adx']
+    )
+
     rsi_res = check_rsi_pullback_recovery(
         df["RSI_14"],
         lookback=LOOKBACK_RSI_DAYS,
@@ -327,9 +350,15 @@ def check_latest_signal(
         recovery_min=RSI_RECOVERY_MIN,
         recovery_max=RSI_RECOVERY_MAX
     )
-    if not rsi_res.get("passed"):
-        return None, "failed_rsi_gate"
-    rsi_min_10d = rsi_res.get("rsi_min_10d")
+    rsi_min_10d = rsi_res.get("rsi_min_10d") if rsi_res.get("rsi_min_10d") is not None else rsis[t]
+
+    if not is_momentum_exception:
+        if not rsi_res.get("passed"):
+            return None, "failed_rsi_gate"
+    else:
+        # Momentum exception: skip RSI pullback check but require current RSI is not overbought (> 75)
+        if rsi_now > 75:
+            return None, "failed_rsi_gate"
 
     # 3. ADX trend strength
     if np.isnan(adx_now) or not (adx_now >= effective_adx_min):
@@ -421,6 +450,7 @@ def check_latest_signal(
         "macd_histogram": round(float(macd_hist), 4),
         "ema20": round(float(ema20), 2),
         "earnings_date": earnings_date,
+        "is_momentum_exception": is_momentum_exception,
     }, None
 
 
@@ -463,6 +493,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "total_trades": m.get("total_trades", 0),
                 "regime": regime_str,
                 "earnings_date": sig.get("earnings_date"),
+                "is_momentum_exception": sig.get("is_momentum_exception", False),
             })
 
         # Upsert instead of insert to safely handle retries / duplicate archive calls.
@@ -512,6 +543,7 @@ def main():
         "failed_maxgap_gate": 0,
         "failed_earnings_gate": 0,
         "failed_trades_gate": 0,
+        "momentum_exceptions": 0,
     }
 
     # ── Step 1: Detect market regime ─────────────────────────
@@ -638,6 +670,8 @@ def main():
                 sig["is_fallback"] = False
                 raw_signals.append(sig)
                 rsi_passed_count += 1
+                if sig.get("is_momentum_exception"):
+                    gate_rejections["momentum_exceptions"] += 1
                 logger.info(
                     f"[QUALIFIED] {ticker} | Entry: ${sig['entry_price']:.2f} | "
                     f"Stop: ${sig['stop_loss']:.2f} | Exit: ${sig['exit_price']:.2f} | "
@@ -915,6 +949,7 @@ def main():
         "failed_maxgap_gate": gate_rejections["failed_maxgap_gate"],
         "failed_earnings_gate": gate_rejections["failed_earnings_gate"],
         "failed_trades_gate": gate_rejections["failed_trades_gate"],
+        "momentum_exceptions": gate_rejections["momentum_exceptions"],
         "rsi_breadth_pct": rsi_breadth_pct,
     }
 

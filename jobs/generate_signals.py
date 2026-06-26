@@ -282,10 +282,6 @@ def check_latest_signal(
     if np.isnan(adx_now) or not (adx_now >= effective_adx_min):
         return None, "failed_adx_gate"
 
-    # 4. MACD momentum: macd_line > signal_line
-    if not (macd_line > macd_sig):
-        return None, "failed_macd_gate"
-
     # 5. Volume confirmation: volume_ratio >= 1.0x
     volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
     if not (volume_ratio >= VOLUME_MULTIPLIER):
@@ -402,19 +398,28 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Generate Nightly Stock Signals")
     parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Delete all cached parquet files and re-download fresh data from yfinance for the full universe",
+    )
     args = parser.parse_args()
 
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
     if args.dry_run:
         logger.info("DRY RUN ACTIVE — database writes will be skipped")
+    if args.force_refresh:
+        logger.info("FORCE REFRESH ACTIVE — cache will be cleared and data re-downloaded")
     logger.info("=" * 60)
+
+    # scan_date is always today's date (not derived from stale cache)
+    scan_date_today = datetime.now().date().isoformat()
 
     # Initialize gate rejection counts
     gate_rejections = {
         "failed_rsi_gate": 0,
         "failed_adx_gate": 0,
-        "failed_macd_gate": 0,
         "failed_trend_gate": 0,
         "failed_volume_gate": 0,
         "failed_rr_gate": 0,
@@ -439,10 +444,22 @@ def main():
 
     os.makedirs(os.path.join(PROJECT_ROOT, "data", "cache"), exist_ok=True)
 
-    # ── Step 3: Download data if CI or cache empty ───────────
+    # ── Step 3: Download data if CI, force-refresh, env flag, or cache empty ─
     is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     force_download = os.environ.get("DOWNLOAD_DATA") == "true"
-    cache_empty = len(glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet"))) == 0
+    cache_dir = os.path.join(PROJECT_ROOT, "data", "cache")
+    cache_empty = len(glob.glob(os.path.join(cache_dir, "*.parquet"))) == 0
+
+    if args.force_refresh:
+        # Delete all stale parquet files so the scan uses only fresh data
+        stale_files = glob.glob(os.path.join(cache_dir, "*.parquet"))
+        logger.info("FORCE REFRESH: deleting %d stale parquet files...", len(stale_files))
+        for sf in stale_files:
+            try:
+                os.remove(sf)
+            except OSError as rm_err:
+                logger.warning("Could not delete %s: %s", sf, rm_err)
+        cache_empty = True  # trigger download below
 
     if is_ci or force_download or cache_empty:
         logger.info("Fetching fresh data from yfinance...")
@@ -495,7 +512,8 @@ def main():
     raw_signals = []
     scanned_count = 0
     rsi_passed_count = 0  # tracks how many tickers passed the RSI gate (for breadth monitoring)
-    signal_date = None
+    # scan_date is always today — not the latest parquet bar (which may be stale)
+    signal_date = scan_date_today
 
     for idx, fpath in enumerate(parquet_files, 1):
         ticker = os.path.basename(fpath).replace(".parquet", "").upper()
@@ -514,13 +532,6 @@ def main():
 
             df = calculate_indicators(raw).sort_index()
             scanned_count += 1
-
-            if signal_date is None and len(df) > 0:
-                latest_date = df.index[-1]
-                if hasattr(latest_date, 'date'):
-                    signal_date = latest_date.date().isoformat()
-                else:
-                    signal_date = str(latest_date)[:10]
 
             company_name = company_names.get(ticker, ticker)
             industry = industries.get(ticker, "Unknown")
@@ -555,6 +566,7 @@ def main():
     signals_qualified = len(raw_signals)
     logger.info(f"Technical scan complete. Scanned: {scanned_count}, Qualified: {signals_qualified}")
 
+    # signal_date is always set (scan_date_today), so this guard is a safety net only
     if signal_date is None:
         logger.error("No valid scan date could be determined.")
         sys.exit(1)
@@ -798,7 +810,6 @@ def main():
         "regime": regime_str,
         "failed_rsi_gate": gate_rejections["failed_rsi_gate"],
         "failed_adx_gate": gate_rejections["failed_adx_gate"],
-        "failed_macd_gate": gate_rejections["failed_macd_gate"],
         "failed_trend_gate": gate_rejections["failed_trend_gate"],
         "failed_volume_gate": gate_rejections["failed_volume_gate"],
         "failed_rr_gate": gate_rejections["failed_rr_gate"],

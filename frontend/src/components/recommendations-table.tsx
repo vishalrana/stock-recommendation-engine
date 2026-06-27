@@ -140,6 +140,12 @@ function ExpandableDetails({ row }: { row: any }) {
       </div>
 
       {/* Actions */}
+      {row.original.strategy === 'Trend Following' && (
+        <div className="mt-2 mb-4 text-xs text-purple-600 bg-purple-50 rounded p-2">
+          <strong>Trend Following:</strong> Hold until trailing stop (10-day low) hit. 
+          Targets are 20% / 35% / 50% — trends run further than pullbacks.
+        </div>
+      )}
       <div className="flex gap-2 mt-4 pt-2">
         <a
           href={`https://www.tradingview.com/chart/?symbol=${row.original.ticker}`}
@@ -193,8 +199,11 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
         header: 'Strategy',
         cell: ({ row }) => {
           const strategy = row.original.strategy || 'Pullback Recovery';
+          const isTrend = strategy === 'Trend Following';
           return (
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">
+            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+              isTrend ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-700'
+            }`}>
               {strategy}
             </span>
           );

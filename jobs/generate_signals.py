@@ -561,8 +561,18 @@ def main():
             supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
             logger.info("Scan log recorded successfully.")
         except Exception as e:
-            logger.error("Failed to record scan log: %s", e)
-            sys.exit(1)
+            if "strategy_breakdown" in scan_log_row:
+                logger.warning("Failed to record scan log with strategy_breakdown: %s. Retrying without it.", e)
+                del scan_log_row["strategy_breakdown"]
+                try:
+                    supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
+                    logger.info("Scan log recorded successfully (without strategy_breakdown).")
+                except Exception as retry_err:
+                    logger.error("Failed to record scan log on retry: %s", retry_err)
+                    sys.exit(1)
+            else:
+                logger.error("Failed to record scan log: %s", e)
+                sys.exit(1)
     else:
         logger.info("[DRY RUN] Skipped logging scan to scan_log. Row: %s", scan_log_row)
 

@@ -140,6 +140,36 @@ def load_etf_universe() -> list[str]:
     return list(SECTOR_ETFS.keys())
 
 
+def run_cross_sectional_screen(universe: list[str], parquet_files: list[str]) -> list[tuple]:
+    """Pre-screen: calculate 3-month returns for all tickers in universe, keep top 15%."""
+    returns = []
+    
+    ticker_to_fpath = {}
+    for fpath in parquet_files:
+        t = os.path.basename(fpath).replace(".parquet", "").upper()
+        ticker_to_fpath[t] = fpath
+
+    for ticker in universe:
+        fpath = ticker_to_fpath.get(ticker)
+        if not fpath:
+            continue
+        try:
+            raw = pd.read_parquet(fpath, engine="pyarrow")
+            if len(raw) < 63:
+                continue
+            close_col = "CLOSE" if "CLOSE" in raw.columns else "Close"
+            price = raw[close_col].iloc[-1]
+            price_63d = raw[close_col].iloc[-63]
+            ret = (price / price_63d - 1) * 100 if price_63d > 0 else 0
+            returns.append((ticker, ret))
+        except Exception:
+            continue
+    
+    returns.sort(key=lambda x: x[1], reverse=True)
+    top_15pct = max(1, int(len(returns) * 0.15))
+    return returns[:top_15pct]
+
+
 def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries: dict) -> dict:
     """Build per-ticker metrics dict for strategy scan."""
     m = metrics_map.get(ticker.upper(), {})
@@ -383,6 +413,9 @@ def main():
         # Determine universe based on strategy type
         if strategy.name == 'Sector Rotation':
             current_universe = load_etf_universe()
+        elif strategy.name == 'Cross-Sectional Momentum':
+            screened_info = run_cross_sectional_screen(tickers, parquet_files)
+            current_universe = [x[0] for x in screened_info]
         else:
             current_universe = tickers
 

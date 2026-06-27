@@ -163,6 +163,18 @@ function ExpandableDetails({ row }: { row: any }) {
           Hold 2-4 weeks for drift to continue. Exit if gap low breaks.
         </div>
       )}
+      {row.original.strategy === '52-Week High' && (
+        <div className="mt-2 mb-4 text-xs text-indigo-600 bg-indigo-50 rounded p-2">
+          <strong>52-Week High:</strong> Strength begets strength. Hold 3-6 weeks. 
+          Exit if falls below 50 DMA or 5% off 52-week high.
+        </div>
+      )}
+      {row.original.strategy === 'Cross-Sectional Momentum' && (
+        <div className="mt-2 mb-4 text-xs text-emerald-600 bg-emerald-50 rounded p-2">
+          <strong>Cross-Sectional Momentum:</strong> Top 15% performer over 3 months. 
+          Rebalance weekly. Exit if drops out of top 25%.
+        </div>
+      )}
       {(() => {
         const riskPct = row.original.risk_pct || 0;
         if (riskPct > 15) {
@@ -232,6 +244,8 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
               case 'Mean Reversion': return 'bg-amber-100 text-amber-700';
               case 'Sector Rotation': return 'bg-teal-100 text-teal-700';
               case 'Post-Earnings Drift': return 'bg-rose-100 text-rose-700';
+              case '52-Week High': return 'bg-indigo-100 text-indigo-700';
+              case 'Cross-Sectional Momentum': return 'bg-emerald-100 text-emerald-700';
               default: return 'bg-gray-100 text-gray-700'; // Pullback Recovery
             }
           };

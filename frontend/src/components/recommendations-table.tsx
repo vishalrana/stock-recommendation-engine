@@ -145,6 +145,12 @@ function ExpandableDetails({ row }: { row: any }) {
           Targets are 20% / 35% / 50% — trends run further than pullbacks.
         </div>
       )}
+      {row.original.strategy === 'Mean Reversion' && (
+        <div className="mt-2 mb-4 text-xs text-amber-600 bg-amber-50 rounded p-2">
+          <strong>Mean Reversion:</strong> Quick bounce play. Hold 1-3 weeks. 
+          Exit if bounce fails or 20-day low breaks.
+        </div>
+      )}
       {(() => {
         const riskPct = row.original.risk_pct || 0;
         if (riskPct > 15) {
@@ -208,11 +214,15 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
         header: 'Strategy',
         cell: ({ row }) => {
           const strategy = row.original.strategy || 'Pullback Recovery';
-          const isTrend = strategy === 'Trend Following';
+          const getStrategyColor = (strat: string) => {
+            switch (strat) {
+              case 'Trend Following': return 'bg-purple-100 text-purple-700';
+              case 'Mean Reversion': return 'bg-amber-100 text-amber-700';
+              default: return 'bg-gray-100 text-gray-700'; // Pullback Recovery
+            }
+          };
           return (
-            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-              isTrend ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-700'
-            }`}>
+            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getStrategyColor(strategy)}`}>
               {strategy}
             </span>
           );

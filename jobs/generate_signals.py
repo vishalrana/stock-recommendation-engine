@@ -315,6 +315,33 @@ def compute_weighted_rr(entry: float, stop: float, targets: dict) -> float:
     return round(weighted, 2)
 
 
+def generate_narrative(price, ema20, volume_ratio, current_rsi):
+    parts = []
+    if ema20 is not None:
+        if price > ema20 * 1.05:
+            parts.append("Strong uptrend")
+        elif price > ema20:
+            parts.append("Rising trend")
+        else:
+            parts.append("Pullback to support")
+    else:
+        parts.append("Trend alignment")
+    
+    if volume_ratio > 1.2:
+        parts.append("volume confirming")
+    elif volume_ratio < 0.8:
+        parts.append("light volume")
+    
+    if current_rsi < 40:
+        parts.append("oversold bounce")
+    elif current_rsi > 60:
+        parts.append("strong momentum")
+    else:
+        parts.append("neutral RSI")
+    
+    return ", ".join(parts) + "."
+
+
 def check_latest_signal(
     ticker: str,
     df: pd.DataFrame,
@@ -485,6 +512,8 @@ def check_latest_signal(
     else:
         signal_date = str(latest_date)[:10]
 
+    narrative = generate_narrative(c, ema20, volume_ratio, rsi_now)
+
     return {
         "scan_date": signal_date,
         "ticker": ticker,
@@ -514,6 +543,7 @@ def check_latest_signal(
         "target_3_pct": targets['target_3_pct'],
         "weighted_rr": weighted_rr,
         "position_sizing": '50/30/20',
+        "narrative": narrative,
     }, None
 
 
@@ -566,6 +596,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "target_3_pct": sig.get("target_3_pct"),
                 "weighted_rr": sig.get("weighted_rr"),
                 "position_sizing": sig.get("position_sizing", "50/30/20"),
+                "narrative": sig.get("narrative"),
             })
 
         # Upsert instead of insert to safely handle retries / duplicate archive calls.
@@ -864,6 +895,7 @@ def main():
                     "target_3_pct": row.get("target_3_pct"),
                     "weighted_rr": row.get("weighted_rr"),
                     "position_sizing": row.get("position_sizing", "50/30/20"),
+                    "narrative": row.get("narrative"),
                 })
         else:
             logger.warning("No signals survived gates. 0 recommendations this scan.")

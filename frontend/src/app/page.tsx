@@ -36,18 +36,36 @@ async function getLatestScanLog(): Promise<ScanLog | null> {
   }
 }
 
+function formatDateLong(val: string | null | undefined): string {
+  if (!val) return '-';
+  const parts = val.split('-');
+  if (parts.length !== 3) return val;
+  const year = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10) - 1;
+  const day = parseInt(parts[2], 10);
+  const date = new Date(year, month, day);
+  return date.toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC'
+  });
+}
+
 export default async function Page() {
   let data: Recommendation[] = [];
   let errorMsg = '';
   let regime: string | null = null;
+  let scanLog: ScanLog | null = null;
 
   try {
-    const [recommendations, scanLog] = await Promise.all([
+    const [recommendations, latestScanLog] = await Promise.all([
       getRecommendations(),
       getLatestScanLog(),
     ]);
 
     data = recommendations;
+    scanLog = latestScanLog;
     regime = scanLog?.regime || (data.length > 0 ? data[0].regime : null);
   } catch (e: any) {
     errorMsg = e.message || 'Failed to load recommendations';
@@ -56,22 +74,17 @@ export default async function Page() {
   return (
     <main className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
-        <header className="mb-10">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-              <h1 className="text-3xl font-extrabold text-gray-900 sm:text-4xl tracking-tight">
-                Stock Recommendation Engine
-              </h1>
-              <p className="mt-2 text-sm text-gray-600">
-                Strategy 1.3 &mdash; Regime-Aware Ranking. RSI Pullback+Recovery, ADX&ge;20, MACD Confirmed. Updated nightly.
-              </p>
-            </div>
-            {data.length > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800 self-start md:self-auto font-medium">
-                Latest Scan Date: <span className="font-bold">{data[0].scan_date}</span>
-              </div>
-            )}
+        <header className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-extrabold text-gray-900 sm:text-4xl tracking-tight">
+              Stock Recommendations
+            </h1>
           </div>
+          {scanLog?.scan_date && (
+            <div className="text-xs text-gray-500 font-medium sm:text-right">
+              Last scan date: <span className="font-semibold text-gray-800">{formatDateLong(scanLog.scan_date)}</span>
+            </div>
+          )}
         </header>
 
         {errorMsg ? (
@@ -92,7 +105,7 @@ export default async function Page() {
           </div>
         ) : (
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-            <RecommendationsTable data={data} regime={regime} />
+            <RecommendationsTable data={data} regime={regime} scanLog={scanLog} />
           </div>
         )}
       </div>

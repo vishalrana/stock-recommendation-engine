@@ -176,7 +176,9 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
           return (
             <div className="group relative">
               <div className="font-semibold text-gray-900">{ticker}</div>
-              <div className="text-xs text-gray-500 truncate max-w-[120px]" title={company || ''}>{company}</div>
+              <div className="text-xs text-gray-500 whitespace-normal break-words max-w-[140px] leading-tight" title={company || ''}>
+                {company}
+              </div>
               {/* Tooltip on hover */}
               <div className="absolute left-0 -top-10 hidden group-hover:block bg-gray-800 text-white text-xs rounded px-2.5 py-1 z-10 whitespace-nowrap shadow-md">
                 ${price?.toFixed(2)} | {industry || 'N/A'}

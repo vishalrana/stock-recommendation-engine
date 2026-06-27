@@ -28,6 +28,14 @@ export interface Recommendation {
   is_fallback: boolean | null;
   is_momentum_exception: boolean | null;
   distance_from_high_pct: number | null;
+  target_1?: number;
+  target_2?: number;
+  target_3?: number;
+  target_1_pct?: number;
+  target_2_pct?: number;
+  target_3_pct?: number;
+  weighted_rr?: number;
+  position_sizing?: string;
 }
 
 export interface ScanLog {

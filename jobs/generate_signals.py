@@ -254,6 +254,67 @@ def get_earnings_date(ticker: str) -> str | None:
     return None
 
 
+def compute_targets(df: pd.DataFrame, entry: float) -> dict:
+    """Find resistance levels (significant highs) from past 6 months."""
+    highs = df['HIGH'].rolling(5).max().iloc[-120:]  # 6 months
+    significant_highs = []
+    
+    for i in range(2, len(highs)-2):
+        if (highs.iloc[i] > highs.iloc[i-1] and 
+            highs.iloc[i] > highs.iloc[i-2] and
+            highs.iloc[i] > highs.iloc[i+1] and
+            highs.iloc[i] > highs.iloc[i+2]):
+            significant_highs.append(highs.iloc[i])
+    
+    # Sort and deduplicate (within 2% of each other)
+    sorted_highs = sorted(set([round(h, 2) for h in significant_highs]))
+    deduped_highs = []
+    for h in sorted_highs:
+        if not deduped_highs or (h - deduped_highs[-1]) / deduped_highs[-1] > 0.02:
+            deduped_highs.append(h)
+    significant_highs = deduped_highs
+    
+    resistance_levels = [h for h in significant_highs if h > entry * 1.01]
+    
+    # Assign targets
+    target_1 = resistance_levels[0] if resistance_levels else entry * 1.05
+    target_2 = resistance_levels[1] if len(resistance_levels) > 1 else target_1 * 1.05
+    target_3 = resistance_levels[2] if len(resistance_levels) > 2 else target_2 * 1.05
+    
+    # Cap at 20% above entry
+    max_target = entry * 1.20
+    target_1 = min(target_1, max_target)
+    target_2 = min(target_2, max_target)
+    target_3 = min(target_3, max_target)
+    
+    # Ensure progression
+    target_2 = max(target_2, target_1 * 1.02)
+    target_3 = max(target_3, target_2 * 1.02)
+    
+    return {
+        'target_1': round(target_1, 2),
+        'target_2': round(target_2, 2),
+        'target_3': round(target_3, 2),
+        'target_1_pct': round((target_1 / entry - 1) * 100, 2),
+        'target_2_pct': round((target_2 / entry - 1) * 100, 2),
+        'target_3_pct': round((target_3 / entry - 1) * 100, 2),
+    }
+
+
+def compute_weighted_rr(entry: float, stop: float, targets: dict) -> float:
+    """Compute weighted R/R using 50/30/20 position sizing."""
+    risk = entry - stop
+    if risk <= 0:
+        return 0.0
+    
+    t1_rr = (targets['target_1'] - entry) / risk
+    t2_rr = (targets['target_2'] - entry) / risk
+    t3_rr = (targets['target_3'] - entry) / risk
+    
+    weighted = 0.5 * t1_rr + 0.3 * t2_rr + 0.2 * t3_rr
+    return round(weighted, 2)
+
+
 def check_latest_signal(
     ticker: str,
     df: pd.DataFrame,
@@ -392,16 +453,13 @@ def check_latest_signal(
     if max_drop < -MAX_GAP_PCT:
         return None, "failed_maxgap_gate"
 
-    if median_win_return and median_win_return > 0:
-        # 15% buffer above historical median winning return, min 5%, max 20%
-        target_pct = min(max(median_win_return * 1.15, 5.0), 20.0)
-    else:
-        # ATR fallback for stocks with no winning trade history
-        atr14 = compute_atr14(df)
-        target_pct = min((2.5 * atr14 / c) * 100, 20.0)
+    # Multi-target system
+    targets = compute_targets(df, entry_price)
+    weighted_rr = compute_weighted_rr(entry_price, stop_loss, targets)
 
-    exit_price = round(entry_price * (1 + target_pct / 100), 2)
-    risk_reward = round(target_pct / ((entry_price - stop_loss) / entry_price * 100), 2)
+    exit_price = targets['target_3']
+    upside_pct = targets['target_3_pct']
+    risk_reward = weighted_rr
 
     # 7. Historical data floor: total_trades >= 10 in ticker_metrics
     if total_trades < 10:
@@ -427,8 +485,6 @@ def check_latest_signal(
     else:
         signal_date = str(latest_date)[:10]
 
-    upside_pct = round(((exit_price - entry_price) / entry_price) * 100.0, 2)
-
     return {
         "scan_date": signal_date,
         "ticker": ticker,
@@ -450,6 +506,14 @@ def check_latest_signal(
         "earnings_date": earnings_date,
         "is_momentum_exception": is_momentum_exception,
         "distance_from_high_pct": round(float(distance_from_high_pct), 2),
+        "target_1": targets['target_1'],
+        "target_2": targets['target_2'],
+        "target_3": targets['target_3'],
+        "target_1_pct": targets['target_1_pct'],
+        "target_2_pct": targets['target_2_pct'],
+        "target_3_pct": targets['target_3_pct'],
+        "weighted_rr": weighted_rr,
+        "position_sizing": '50/30/20',
     }, None
 
 
@@ -494,6 +558,14 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 "earnings_date": sig.get("earnings_date"),
                 "is_momentum_exception": sig.get("is_momentum_exception", False),
                 "distance_from_high_pct": sig.get("distance_from_high_pct"),
+                "target_1": sig.get("target_1"),
+                "target_2": sig.get("target_2"),
+                "target_3": sig.get("target_3"),
+                "target_1_pct": sig.get("target_1_pct"),
+                "target_2_pct": sig.get("target_2_pct"),
+                "target_3_pct": sig.get("target_3_pct"),
+                "weighted_rr": sig.get("weighted_rr"),
+                "position_sizing": sig.get("position_sizing", "50/30/20"),
             })
 
         # Upsert instead of insert to safely handle retries / duplicate archive calls.
@@ -784,6 +856,14 @@ def main():
                     "tier_label": row["tier_label"],
                     "regime": regime_str,
                     "is_fallback": bool(row.get("is_fallback", False)),
+                    "target_1": row.get("target_1"),
+                    "target_2": row.get("target_2"),
+                    "target_3": row.get("target_3"),
+                    "target_1_pct": row.get("target_1_pct"),
+                    "target_2_pct": row.get("target_2_pct"),
+                    "target_3_pct": row.get("target_3_pct"),
+                    "weighted_rr": row.get("weighted_rr"),
+                    "position_sizing": row.get("position_sizing", "50/30/20"),
                 })
         else:
             logger.warning("No signals survived gates. 0 recommendations this scan.")

@@ -231,28 +231,56 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
         },
       },
       {
-        accessorKey: 'exit_price',
-        header: 'Target Price',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `$${val.toFixed(2)}` : '-';
+        id: "risk",
+        header: 'Risk',
+        cell: ({ row }) => {
+          const entry = row.original.entry_price;
+          const stop = row.original.stop_loss;
+          const risk = entry - stop;
+          const riskPct = (risk / entry) * 100;
+          return (
+            <div className="text-xs">
+              <div className="text-red-600 font-medium">-${risk.toFixed(2)}</div>
+              <div className="text-gray-500">({riskPct.toFixed(1)}%)</div>
+            </div>
+          );
         },
+        size: 80,
       },
       {
-        accessorKey: 'upside_pct',
-        header: 'Upside',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? <span className="text-green-600 font-bold">+{val.toFixed(1)}%</span> : '-';
+        id: "targets",
+        header: 'Targets',
+        cell: ({ row }) => {
+          const t1 = row.original.target_1;
+          const t2 = row.original.target_2;
+          const t3 = row.original.target_3;
+          const t1pct = row.original.target_1_pct;
+          const t2pct = row.original.target_2_pct;
+          const t3pct = row.original.target_3_pct;
+          const rr = row.original.weighted_rr;
+
+          if (t1 === undefined || t1 === null) return '-';
+          
+          let rrColor = "text-gray-500";
+          let rrBg = "bg-gray-100";
+          if (rr !== undefined && rr !== null) {
+            if (rr >= 2.0) { rrColor = "text-green-700"; rrBg = "bg-green-50"; }
+            else if (rr >= 1.0) { rrColor = "text-yellow-700"; rrBg = "bg-yellow-50"; }
+            else { rrColor = "text-red-700"; rrBg = "bg-red-50"; }
+          }
+          
+          return (
+            <div className="space-y-1 min-w-[140px]">
+              <div className="text-xs text-gray-600">50% at <span className="font-medium">${t1}</span> <span className="text-green-600 font-medium">+{t1pct}%</span></div>
+              <div className="text-xs text-gray-600 hidden sm:block">30% at <span className="font-medium">${t2}</span> <span className="text-blue-600 font-medium">+{t2pct}%</span></div>
+              <div className="text-xs text-gray-600 hidden sm:block">20% at <span className="font-medium">${t3}</span> <span className="text-purple-600 font-medium">+{t3pct}%</span></div>
+              <div className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${rrBg} ${rrColor} inline-block mt-1 hidden sm:inline-block`}>
+                R/R: {rr}
+              </div>
+            </div>
+          );
         },
-      },
-      {
-        accessorKey: 'risk_reward',
-        header: 'R/R',
-        cell: (info) => {
-          const val = info.getValue() as number | null | undefined;
-          return typeof val === 'number' ? `${val.toFixed(1)}x` : '-';
-        },
+        size: 160,
       },
       {
         accessorKey: 'current_rsi',

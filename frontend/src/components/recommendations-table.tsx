@@ -184,6 +184,29 @@ export default function RecommendationsTable({ data, regime }: TableProps) {
         cell: (info) => tierBadge(info.getValue() as string, info.row.original.is_fallback),
       },
       {
+        id: "chart",
+        header: () => <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Chart</span>,
+        cell: ({ row }) => {
+          const ticker = row.original.ticker as string;
+          const tvUrl = `https://www.tradingview.com/chart/?symbol=${ticker}`;
+          return (
+            <a
+              href={tvUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center justify-center w-8 h-8 rounded-md bg-blue-600 hover:bg-blue-700 text-white transition-colors duration-200"
+              title={`Open ${ticker} on TradingView`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 3v18h18"/>
+                <path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/>
+              </svg>
+            </a>
+          );
+        },
+        size: 60,
+      },
+      {
         accessorKey: 'price',
         header: 'Current Price',
         cell: (info) => {

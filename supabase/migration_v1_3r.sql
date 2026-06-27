@@ -5,7 +5,14 @@ ALTER TABLE signals ADD COLUMN IF NOT EXISTS quality_score FLOAT;
 ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS strategy TEXT;
 ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS quality_score FLOAT;
 
--- Recreate recommendations view to include new fields
+-- Ensure ticker_metrics has wins/losses columns
+ALTER TABLE ticker_metrics ADD COLUMN IF NOT EXISTS wins INT DEFAULT 0;
+ALTER TABLE ticker_metrics ADD COLUMN IF NOT EXISTS losses INT DEFAULT 0;
+
+-- Track guardrail-blocked signals in scan_log
+ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS signals_blocked INT DEFAULT 0;
+
+-- Recreate recommendations view with correct track record columns
 DROP VIEW IF EXISTS recommendations;
 CREATE VIEW recommendations AS
 SELECT 
@@ -36,9 +43,13 @@ SELECT
   s.composite_score,
   s.quality_score,
   s.strategy,
-  COALESCE(m.win_rate, 0) as past_win_rate,
-  COALESCE(m.total_trades, 0) as total_trades,
-  COALESCE(m.expectancy_pct, 0) as expectancy_pct
+  COALESCE(m.win_rate, 0) AS past_win_rate,
+  COALESCE(m.wins + m.losses, 0) AS total_trades,
+  COALESCE(m.expectancy_pct, 0) AS expectancy_pct,
+  COALESCE(m.wins, 0) AS wins,
+  COALESCE(m.losses, 0) AS losses,
+  COALESCE(m.wins, 0) AS past_wins,
+  COALESCE(m.losses, 0) AS past_losses
 FROM signals s
 LEFT JOIN ticker_metrics m ON s.ticker = m.ticker
 WHERE s.tier_label IN ('Strong Buy', 'Buy');

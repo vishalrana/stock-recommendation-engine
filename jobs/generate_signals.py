@@ -137,10 +137,15 @@ def load_universe() -> tuple[list, dict, dict]:
 def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries: dict) -> dict:
     """Build per-ticker metrics dict for strategy scan."""
     m = metrics_map.get(ticker.upper(), {})
+    wins = m.get("wins", 0)
+    losses = m.get("losses", 0)
     return {
         "win_rate": m.get("win_rate", 0.0),
         "expectancy_pct": m.get("expectancy_pct", 0.0),
-        "total_trades": m.get("total_trades", 0),
+        "total_trades": m.get("total_signals", 0),
+        "wins": wins,
+        "losses": losses,
+        "completed_trades": wins + losses,
         "median_win_return": m.get("median_win_return", 0.0),
         "company_name": company_names.get(ticker, ticker),
         "industry": industries.get(ticker, "Unknown"),
@@ -308,14 +313,16 @@ def main():
     try:
         logger.info("Fetching historical metrics from Supabase ticker_metrics...")
         res = supabase.table("ticker_metrics").select(
-            "ticker, win_rate, expectancy_pct, total_signals, median_win_return"
+            "ticker, win_rate, expectancy_pct, total_signals, wins, losses, median_win_return"
         ).execute()
         for row in res.data:
             ticker = row["ticker"].upper()
             metrics_map[ticker] = {
                 "win_rate": float(row["win_rate"] or 0),
                 "expectancy_pct": float(row["expectancy_pct"] or 0),
-                "total_trades": int(row["total_signals"] or 0),
+                "total_signals": int(row["total_signals"] or 0),
+                "wins": int(row.get("wins") or 0),
+                "losses": int(row.get("losses") or 0),
                 "median_win_return": float(row.get("median_win_return") or 0.0),
             }
         logger.info("Loaded metrics for %d tickers.", len(metrics_map))
@@ -341,6 +348,7 @@ def main():
     rsi_passed_count = 0
     signals_strong_buy = 0
     signals_buy = 0
+    signals_blocked = 0
 
     for strategy in STRATEGIES:
         if hasattr(strategy, "reset_scan_stats"):
@@ -403,6 +411,8 @@ def main():
             strategy_counts[strategy.name] = len(buy_ranked)
             all_signals.extend(buy_ranked)
 
+            if hasattr(strategy, "signals_blocked"):
+                signals_blocked += strategy.signals_blocked
             if hasattr(strategy, "signals_strong_buy"):
                 signals_strong_buy += strategy.signals_strong_buy
             if hasattr(strategy, "signals_buy"):
@@ -541,6 +551,7 @@ def main():
         "rsi_breadth_pct": rsi_breadth_pct,
         "signals_strong_buy": signals_strong_buy,
         "signals_buy": signals_buy,
+        "signals_blocked": signals_blocked,
         "strategy_breakdown": strategy_counts,
     }
 

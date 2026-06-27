@@ -19,6 +19,37 @@ VOLUME_MULTIPLIER = 1.0
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
 
+MIN_WIN_RATE = 40.0
+MIN_EXPECTANCY = 1.0
+MIN_SAMPLE_SIZE = 10
+
+
+def apply_guardrails(signal: dict) -> dict:
+    """Override tier label if historical performance is below minimums."""
+    win_rate = signal.get("past_win_rate", 0)
+    expectancy = signal.get("expectancy_pct", 0)
+    sample = signal.get("total_trades", 0)
+
+    reasons = []
+
+    if win_rate < MIN_WIN_RATE:
+        reasons.append(f"Win rate {win_rate:.1f}% below {MIN_WIN_RATE}%")
+    if expectancy < MIN_EXPECTANCY:
+        reasons.append(f"Expectancy {expectancy:.2f}% below {MIN_EXPECTANCY}%")
+    if sample < MIN_SAMPLE_SIZE:
+        reasons.append(f"Sample size {sample} below {MIN_SAMPLE_SIZE} trades")
+
+    if reasons:
+        signal["tier_label"] = "Blocked"
+        signal["blocked_reason"] = "; ".join(reasons)
+        signal["is_blocked"] = True
+        signal["quality_score"] = signal.get("composite_score", 0) * 0.3
+    else:
+        signal["is_blocked"] = False
+        signal["blocked_reason"] = None
+
+    return signal
+
 
 def find_swing_low(df_slice: pd.DataFrame) -> float:
     """Find the most recent valid swing low in the last 20 trading days."""
@@ -183,6 +214,7 @@ class PullbackRecoveryStrategy(StrategyInterface):
         self.signals_buy = 0
         self.signals_watch = 0
         self.signals_speculative = 0
+        self.signals_blocked = 0
         self._last_failed_gate: str | None = None
 
     @property
@@ -243,6 +275,8 @@ class PullbackRecoveryStrategy(StrategyInterface):
             {
                 "past_win_rate": win_rate,
                 "total_trades": total_trades,
+                "wins": metrics.get("wins", 0),
+                "losses": metrics.get("losses", 0),
                 "expectancy_pct": expectancy_pct,
                 "risk_dollar": round(risk, 2),
                 "risk_pct": round(risk_pct, 2),
@@ -457,6 +491,14 @@ class PullbackRecoveryStrategy(StrategyInterface):
             signals_df["total_trades"] = signals_df.apply(
                 lambda row: row.get("total_trades", 0), axis=1
             )
+        if "wins" not in signals_df.columns:
+            signals_df["wins"] = signals_df.apply(
+                lambda row: row.get("wins", 0), axis=1
+            )
+        if "losses" not in signals_df.columns:
+            signals_df["losses"] = signals_df.apply(
+                lambda row: row.get("losses", 0), axis=1
+            )
 
         logger.info("Applying composite ranking (Strategy 1.3 Rev B)...")
         ranker = SignalRanker()
@@ -504,8 +546,7 @@ class PullbackRecoveryStrategy(StrategyInterface):
             )
 
             composite_score = round(float(row["composite_score"]), 4)
-            ranked.append(
-                {
+            candidate = {
                     "scan_date": row["scan_date"],
                     "ticker": row["ticker"],
                     "company_name": row["company_name"],
@@ -529,6 +570,8 @@ class PullbackRecoveryStrategy(StrategyInterface):
                     "past_win_rate": row.get("win_rate", row.get("past_win_rate", 0.0)),
                     "expectancy_pct": row["expectancy_pct"],
                     "total_trades": row["total_trades"],
+                    "wins": row.get("wins", 0),
+                    "losses": row.get("losses", 0),
                     "is_blocked": False,
                     "blocked_reason": None,
                     "strategy": self.name,
@@ -548,7 +591,16 @@ class PullbackRecoveryStrategy(StrategyInterface):
                         2,
                     ),
                 }
-            )
+            candidate = apply_guardrails(candidate)
+            if candidate.get("is_blocked"):
+                self.signals_blocked += 1
+                logger.info(
+                    "[BLOCKED] %s | %s",
+                    candidate["ticker"],
+                    candidate.get("blocked_reason", "Guardrail failure"),
+                )
+                continue
+            ranked.append(candidate)
 
         ranked.sort(key=lambda x: x["composite_score"], reverse=True)
         return ranked

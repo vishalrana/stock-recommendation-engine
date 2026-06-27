@@ -62,8 +62,8 @@ function CopyButton({ ticker }: { ticker: string }) {
 }
 
 function ExpandableDetails({ row }: { row: any }) {
-  const wins = row.original.past_wins || 0;
-  const losses = row.original.past_losses || 0;
+  const wins = row.original.wins ?? row.original.past_wins ?? 0;
+  const losses = row.original.losses ?? row.original.past_losses ?? 0;
   const winRate = Math.round(row.original.past_win_rate || 0);
 
   return (
@@ -189,6 +189,19 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
         size: 140,
       },
       {
+        id: 'strategy',
+        header: 'Strategy',
+        cell: ({ row }) => {
+          const strategy = row.original.strategy || 'Pullback Recovery';
+          return (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">
+              {strategy}
+            </span>
+          );
+        },
+        size: 120,
+      },
+      {
         id: 'verdict',
         header: 'Verdict',
         cell: ({ row }) => {
@@ -299,7 +312,10 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
         cell: ({ row }) => {
           const winRate = row.original.past_win_rate;
           const trades = row.original.total_trades;
-          if (winRate === undefined || winRate === null || !trades) {
+          const wins = row.original.wins ?? row.original.past_wins;
+          const losses = row.original.losses ?? row.original.past_losses;
+
+          if (!trades || trades === 0) {
             return <span className="text-xs text-gray-400">No data</span>;
           }
 
@@ -308,7 +324,10 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
           else if (winRate < 50) color = 'text-red-600 font-semibold';
 
           return (
-            <div className="text-xs cursor-help" title={`Based on ${trades} past similar setups`}>
+            <div
+              className="text-xs cursor-help"
+              title={`${wins ?? '?'} wins / ${losses ?? '?'} losses across ${trades} completed trades`}
+            >
               <div className={`font-medium ${color}`}>{winRate.toFixed(0)}% wins</div>
               <div className="text-gray-500">({trades} trades)</div>
             </div>

@@ -42,6 +42,8 @@ export interface Recommendation {
   past_losses?: number | null;
   strategy?: string | null;
   quality_score?: number | null;
+  wins?: number | null;
+  losses?: number | null;
 }
 
 export interface ScanLog {

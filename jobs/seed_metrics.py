@@ -357,7 +357,7 @@ def main():
             exist = existing_map.get(ticker)
             if exist and not args.force_refresh:
                 # If it exists AND has total_trades >= 10, skip it
-                if exist["total_signals"] >= 10:
+                if False:  # exist["total_signals"] >= 10
                     skipped_count += 1
                     continue
             target_tickers.append(ticker)
@@ -375,8 +375,8 @@ def main():
     # Seeding loop
     for idx, ticker in enumerate(target_tickers, 1):
         try:
-            # Download 2 years of daily data (about 500 trading bars)
-            raw = yf.download(ticker, period="2y", progress=False, timeout=15)
+            # Download 5 years of daily data (about 1260 trading bars)
+            raw = yf.download(ticker, period="5y", progress=False, timeout=15)
             if raw.empty:
                 logger.warning(f"  [{idx}/{len(target_tickers)}] {ticker}: yfinance returned no data. Skipping.")
                 failed_tickers.append(ticker)

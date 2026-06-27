@@ -134,6 +134,12 @@ def load_universe() -> tuple[list, dict, dict]:
     return tickers, company_names, industries
 
 
+def load_etf_universe() -> list[str]:
+    """Load sector ETF universe."""
+    from jobs.strategies.sector_rotation import SECTOR_ETFS
+    return list(SECTOR_ETFS.keys())
+
+
 def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries: dict) -> dict:
     """Build per-ticker metrics dict for strategy scan."""
     m = metrics_map.get(ticker.upper(), {})
@@ -282,17 +288,35 @@ def main():
                 logger.warning("Could not delete %s: %s", sf, rm_err)
         cache_empty = True
 
+    from jobs.strategies.sector_rotation import SECTOR_ETFS
+    etf_tickers = list(SECTOR_ETFS.keys())
+
     if is_ci or force_download or cache_empty:
         logger.info("Fetching fresh data from yfinance...")
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=500)
 
-        for i, ticker in enumerate(tickers, 1):
+        all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
+
+        for i, ticker in enumerate(all_download_tickers, 1):
             if ticker in BLACKLIST:
                 continue
-            logger.info("[%d/%d] Downloading %s...", i, len(tickers), ticker)
-            fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
+            logger.info("[%d/%d] Downloading %s...", i, len(all_download_tickers), ticker)
+            df = fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty:
+                df.to_parquet(os.path.join(cache_dir, f"{ticker}.parquet"), engine="pyarrow", index=True)
         logger.info("Finished downloading daily data.")
+
+    # Ensure all Sector ETFs are present in the cache
+    missing_etfs = [t for t in etf_tickers if not os.path.exists(os.path.join(cache_dir, f"{t}.parquet"))]
+    if missing_etfs:
+        logger.info("Downloading missing Sector ETFs: %s", missing_etfs)
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=500)
+        for t in missing_etfs:
+            df = fetch_ohlcv_data(t, start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty:
+                df.to_parquet(os.path.join(cache_dir, f"{t}.parquet"), engine="pyarrow", index=True)
 
     cache_path = os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")
     parquet_files = sorted(glob.glob(cache_path))
@@ -356,10 +380,16 @@ def main():
 
         strategy_signals: list[dict] = []
 
+        # Determine universe based on strategy type
+        if strategy.name == 'Sector Rotation':
+            current_universe = load_etf_universe()
+        else:
+            current_universe = tickers
+
         for idx, fpath in enumerate(parquet_files, 1):
             ticker = os.path.basename(fpath).replace(".parquet", "").upper()
 
-            if tickers and ticker not in tickers:
+            if current_universe and ticker not in current_universe:
                 continue
 
             try:

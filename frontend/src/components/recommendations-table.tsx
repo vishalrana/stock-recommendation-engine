@@ -151,6 +151,12 @@ function ExpandableDetails({ row }: { row: any }) {
           Exit if bounce fails or 20-day low breaks.
         </div>
       )}
+      {row.original.strategy === 'Sector Rotation' && (
+        <div className="mt-2 mb-4 text-xs text-teal-600 bg-teal-50 rounded p-2">
+          <strong>Sector Rotation:</strong> Macro play. Hold 2-6 weeks. 
+          Exit if sector falls below 50 DMA. Diversifies single-stock risk.
+        </div>
+      )}
       {(() => {
         const riskPct = row.original.risk_pct || 0;
         if (riskPct > 15) {
@@ -218,6 +224,7 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
             switch (strat) {
               case 'Trend Following': return 'bg-purple-100 text-purple-700';
               case 'Mean Reversion': return 'bg-amber-100 text-amber-700';
+              case 'Sector Rotation': return 'bg-teal-100 text-teal-700';
               default: return 'bg-gray-100 text-gray-700'; // Pullback Recovery
             }
           };

@@ -197,7 +197,7 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
               }`}>
                 {tier}
               </span>
-              <div className="text-xs text-gray-500 mt-1 max-w-[150px] truncate" title={narrative}>
+              <div className="text-xs text-gray-500 mt-1 max-w-[180px] whitespace-normal break-words" title={narrative}>
                 {narrative}
               </div>
             </div>
@@ -280,7 +280,7 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
           const maxShares = risk > 0 ? Math.floor(100 / risk) : 0;
           return (
             <div className="text-xs group relative cursor-help" title={`Risk per share. For $10K account at 1% risk = ${maxShares} shares`}>
-              <div className="text-red-600 font-semibold">-${risk.toFixed(2)}</div>
+              <div className="text-red-600 font-semibold">-${Math.round(risk)}</div>
               <div className="text-gray-500">({riskPct.toFixed(1)}%)</div>
             </div>
           );

@@ -27,6 +27,7 @@ ALTER TABLE signals ALTER COLUMN exit_price DROP NOT NULL;
 ALTER TABLE signals_history ALTER COLUMN exit_price DROP NOT NULL;
 
 -- Recreate recommendations view with new columns
+DROP VIEW IF EXISTS recommendations;
 CREATE OR REPLACE VIEW recommendations AS
 SELECT 
   s.scan_date,

@@ -667,8 +667,19 @@ def main():
                     supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
                     logger.info("Scan log recorded successfully (without strategy_breakdown).")
                 except Exception as retry_err:
-                    logger.error("Failed to record scan log on retry: %s", retry_err)
-                    sys.exit(1)
+                    logger.warning(
+                        "Failed to record scan log with optional regime activation fields: %s. "
+                        "Retrying without active_strategies/skipped_strategies.",
+                        retry_err,
+                    )
+                    scan_log_row.pop("active_strategies", None)
+                    scan_log_row.pop("skipped_strategies", None)
+                    try:
+                        supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
+                        logger.info("Scan log recorded successfully (without optional activation fields).")
+                    except Exception as final_retry_err:
+                        logger.error("Failed to record scan log on retry: %s", final_retry_err)
+                        sys.exit(1)
             else:
                 logger.error("Failed to record scan log: %s", e)
                 sys.exit(1)

@@ -157,6 +157,12 @@ function ExpandableDetails({ row }: { row: any }) {
           Exit if sector falls below 50 DMA. Diversifies single-stock risk.
         </div>
       )}
+      {row.original.strategy === 'Post-Earnings Drift' && (
+        <div className="mt-2 mb-4 text-xs text-rose-600 bg-rose-50 rounded p-2">
+          <strong>Post-Earnings Drift:</strong> Event-driven play. Earnings winner pulling back. 
+          Hold 2-4 weeks for drift to continue. Exit if gap low breaks.
+        </div>
+      )}
       {(() => {
         const riskPct = row.original.risk_pct || 0;
         if (riskPct > 15) {
@@ -225,6 +231,7 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
               case 'Trend Following': return 'bg-purple-100 text-purple-700';
               case 'Mean Reversion': return 'bg-amber-100 text-amber-700';
               case 'Sector Rotation': return 'bg-teal-100 text-teal-700';
+              case 'Post-Earnings Drift': return 'bg-rose-100 text-rose-700';
               default: return 'bg-gray-100 text-gray-700'; // Pullback Recovery
             }
           };

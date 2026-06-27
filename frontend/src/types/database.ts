@@ -56,4 +56,6 @@ export interface ScanLog {
   status: string;
   error_message: string | null;
   regime?: string;
+  active_strategies?: number;
+  skipped_strategies?: Record<string, string>;
 }

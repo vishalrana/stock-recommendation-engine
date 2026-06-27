@@ -68,6 +68,8 @@ CREATE TABLE scan_log (
     scan_duration_secs  NUMERIC(8,2),
     status              TEXT DEFAULT 'success',
     error_message       TEXT,
+    active_strategies   INTEGER DEFAULT 0,
+    skipped_strategies  JSONB DEFAULT '{}',
     created_at          TIMESTAMPTZ DEFAULT now()
 );
 

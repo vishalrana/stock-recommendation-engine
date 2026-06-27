@@ -24,17 +24,13 @@ interface TableProps {
 function RegimeBanner({ scanLog, count }: { scanLog: ScanLog | null; count: number }) {
   const regime = scanLog?.regime || 'bull';
   const regimeStr = regime === 'bull' ? 'Bull Market' : regime === 'bear' ? 'Bear Market' : 'Sideways Market';
+  const activeStrategies = scanLog?.active_strategies ?? 0;
 
   let bannerBg = 'bg-green-50 border-green-200 text-green-800';
   if (regime === 'bear') bannerBg = 'bg-red-50 border-red-200 text-red-800';
   else if (regime === 'sideways') bannerBg = 'bg-blue-50 border-blue-200 text-blue-800';
 
-  let text = '';
-  if (count === 0) {
-    text = `No signals — Cash is a position`;
-  } else {
-    text = `${regimeStr} — ${count} signal${count > 1 ? 's' : ''} tonight`;
-  }
+  const text = `${regimeStr} — ${activeStrategies} strategies active | ${count} signal${count === 1 ? '' : 's'} tonight`;
 
   return (
     <div className={`mb-6 rounded-lg border px-4 py-3 text-sm font-semibold text-center sm:text-left ${bannerBg}`}>

@@ -35,9 +35,33 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from indicators import calculate_indicators
 from downloader import fetch_ohlcv_data
-from regime import get_regime, should_trade
+from regime import get_regime
 from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
+
+# Strategy activation by market regime
+REGIME_STRATEGY_MAP = {
+    "bull": [
+        "Pullback Recovery",
+        "Trend Following",
+        "Sector Rotation",
+        "Post-Earnings Drift",
+        "52-Week High",
+        "Cross-Sectional Momentum",
+    ],
+    "sideways": [
+        "Pullback Recovery",
+        "Mean Reversion",
+        "Sector Rotation",
+        "Post-Earnings Drift",
+        "Cross-Sectional Momentum",
+    ],
+    "bear": [
+        "Mean Reversion",
+        "Post-Earnings Drift",
+        # Defensive only: no trend following, no 52-week high, no cross-sectional
+    ],
+}
 
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
 TOP_N = 5
@@ -289,15 +313,16 @@ def main():
 
     regime_info = get_regime()
     regime_str = regime_info["regime"]
-    trade_allowed = should_trade(regime_str, "swing_momentum")
+    allowed_strategies = REGIME_STRATEGY_MAP.get(regime_str, ["Pullback Recovery"])
 
     logger.info(
-        "REGIME: %s | SPY: $%.2f | 200 DMA: $%.2f | Trade allowed: %s",
+        "REGIME: %s | SPY: $%.2f | 200 DMA: $%.2f",
         regime_str.upper(),
         regime_info["spy_price"],
         regime_info["spy_200dma"],
-        trade_allowed,
     )
+    logger.info("Regime detected: %s", regime_str)
+    logger.info("Active strategies: %s", ", ".join(allowed_strategies))
 
     tickers, company_names, industries = load_universe()
 
@@ -385,6 +410,7 @@ def main():
 
     all_signals: list[dict] = []
     strategy_counts: dict[str, int] = {}
+    skipped_strategies: dict[str, str] = {}
     scanned_count = 0
     signals_qualified = 0
     gate_rejections = {
@@ -405,6 +431,16 @@ def main():
     signals_blocked = 0
 
     for strategy in STRATEGIES:
+        if strategy.name not in allowed_strategies:
+            skipped_strategies[strategy.name] = regime_str
+            strategy_counts[strategy.name] = 0
+            logger.info(
+                "[REGIME] Skipping %s — not active in %s regime",
+                strategy.name,
+                regime_str,
+            )
+            continue
+
         if hasattr(strategy, "reset_scan_stats"):
             strategy.reset_scan_stats()
 
@@ -468,7 +504,7 @@ def main():
         if hasattr(strategy, "rsi_passed_count"):
             rsi_passed_count += strategy.rsi_passed_count
 
-        if trade_allowed and strategy_signals:
+        if strategy_signals:
             ranked = strategy.rank_candidates(strategy_signals, regime_str)
             buy_ranked = [s for s in ranked if s["tier_label"] in ("Strong Buy", "Buy")]
             strategy_counts[strategy.name] = len(buy_ranked)
@@ -492,7 +528,7 @@ def main():
     ranked_signals: list[dict] = []
     error_msg = None
 
-    if all_signals and trade_allowed:
+    if all_signals:
         final_signals = deduplicate_by_ticker(all_signals)
         final_signals.sort(key=lambda x: x.get('quality_score', x['composite_score']), reverse=True)
         final_signals = final_signals[:TOP_N]
@@ -547,8 +583,6 @@ def main():
                     "narrative": sig.get("narrative"),
                 }
             )
-    elif not trade_allowed:
-        logger.warning("Bear market -- strategy inactive. No recommendations will be inserted.")
     else:
         logger.info("No technically qualified signals found.")
 
@@ -616,6 +650,8 @@ def main():
         "signals_buy": signals_buy,
         "signals_blocked": signals_blocked,
         "strategy_breakdown": strategy_counts,
+        "active_strategies": len(allowed_strategies),
+        "skipped_strategies": skipped_strategies,
     }
 
     if not args.dry_run:

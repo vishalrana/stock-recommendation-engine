@@ -317,27 +317,46 @@ def compute_weighted_rr(entry: float, stop: float, targets: dict) -> float:
 
 def generate_narrative(price, ema20, volume_ratio, current_rsi):
     parts = []
-    if ema20 is not None:
-        if price > ema20 * 1.05:
+    
+    # Trend with distance nuance
+    if ema20 and ema20 > 0:
+        pct_vs_ema = (price / ema20 - 1) * 100
+        if pct_vs_ema > 5:
             parts.append("Strong uptrend")
-        elif price > ema20:
+        elif pct_vs_ema > 2:
             parts.append("Rising trend")
+        elif pct_vs_ema > -1:
+            parts.append("At support")
         else:
             parts.append("Pullback to support")
     else:
-        parts.append("Trend alignment")
+        parts.append("Trend unclear")
     
-    if volume_ratio > 1.2:
+    # Volume with broader ranges
+    if volume_ratio > 1.3:
+        parts.append("strong volume")
+    elif volume_ratio > 1.05:
         parts.append("volume confirming")
-    elif volume_ratio < 0.8:
+    elif volume_ratio > 0.9:
+        parts.append("normal volume")
+    else:
         parts.append("light volume")
     
-    if current_rsi < 40:
+    # RSI with more granular bands
+    if current_rsi < 30:
+        parts.append("deeply oversold")
+    elif current_rsi < 40:
         parts.append("oversold bounce")
-    elif current_rsi > 60:
+    elif current_rsi < 48:
+        parts.append("recovering")
+    elif current_rsi < 55:
+        parts.append("neutral RSI")
+    elif current_rsi < 62:
+        parts.append("momentum building")
+    elif current_rsi < 70:
         parts.append("strong momentum")
     else:
-        parts.append("neutral RSI")
+        parts.append("overbought")
     
     return ", ".join(parts) + "."
 

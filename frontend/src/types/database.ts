@@ -38,6 +38,8 @@ export interface Recommendation {
   position_sizing?: string | null;
   narrative?: string | null;
   total_trades?: number | null;
+  past_wins?: number | null;
+  past_losses?: number | null;
 }
 
 export interface ScanLog {

@@ -62,10 +62,9 @@ function CopyButton({ ticker }: { ticker: string }) {
 }
 
 function ExpandableDetails({ row }: { row: any }) {
-  const winRate = row.original.past_win_rate || 0;
-  const trades = row.original.total_trades || 0;
-  const wins = Math.round(trades * (winRate / 100));
-  const losses = trades - wins;
+  const wins = row.original.past_wins || 0;
+  const losses = row.original.past_losses || 0;
+  const winRate = Math.round(row.original.past_win_rate || 0);
 
   return (
     <div className="p-4 bg-gray-50 border-t rounded-lg">
@@ -90,54 +89,58 @@ function ExpandableDetails({ row }: { row: any }) {
         </div>
       </div>
 
-      {/* Grid containing indicator values */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-4">
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">RSI</div>
-          <div className="text-gray-900 font-medium mt-0.5">{row.original.current_rsi?.toFixed(1) || '-'}</div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">ADX</div>
-          <div className="text-gray-900 font-medium mt-0.5">{row.original.adx_value?.toFixed(1) || '-'}</div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">Volume</div>
-          <div className="text-gray-900 font-medium mt-0.5">{row.original.volume_ratio?.toFixed(2) || '-'}x</div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">MACD</div>
-          <div className="text-gray-900 font-medium mt-0.5">{row.original.macd_histogram?.toFixed(4) || '-'}</div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">EMA20</div>
-          <div className="text-gray-900 font-medium mt-0.5">{row.original.ema20 ? `$${row.original.ema20.toFixed(2)}` : '-'}</div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">Composite Score</div>
-          <div className="text-gray-900 font-medium mt-0.5">{row.original.composite_score?.toFixed(1) || '-'}</div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">Expectancy</div>
-          <div className="text-gray-900 font-medium mt-0.5">
-            {row.original.expectancy_pct ? `${row.original.expectancy_pct > 0 ? '+' : ''}${row.original.expectancy_pct.toFixed(2)}%` : '-'}
+      {/* Technical Indicators */}
+      <div className="mb-4">
+        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">📊 Technical Indicators</h4>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm bg-white p-3 border border-gray-100 rounded-md shadow-sm">
+          <div>
+            <div className="text-gray-500 text-xs">RSI</div>
+            <div className="text-gray-900 font-semibold mt-0.5">{row.original.current_rsi?.toFixed(1) || '-'}</div>
           </div>
-        </div>
-        <div>
-          <div className="text-gray-500 text-xs font-semibold uppercase tracking-wider">Track Record</div>
-          <div className="text-gray-900 font-medium mt-0.5">
-            {trades > 0 ? `${wins} wins / ${losses} losses` : '-'}
+          <div>
+            <div className="text-gray-500 text-xs">ADX</div>
+            <div className="text-gray-900 font-semibold mt-0.5">{row.original.adx_value?.toFixed(1) || '-'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 text-xs">Volume</div>
+            <div className="text-gray-900 font-semibold mt-0.5">{row.original.volume_ratio?.toFixed(2) || '-'}x</div>
+          </div>
+          <div>
+            <div className="text-gray-500 text-xs">MACD</div>
+            <div className="text-gray-900 font-semibold mt-0.5">{row.original.macd_histogram?.toFixed(4) || '-'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 text-xs">EMA20</div>
+            <div className="text-gray-900 font-semibold mt-0.5">{row.original.ema20 ? `$${row.original.ema20.toFixed(2)}` : '-'}</div>
           </div>
         </div>
       </div>
 
-      {row.original.narrative && (
-        <div className="mb-4 text-xs text-gray-600 bg-white border border-gray-100 p-2.5 rounded-md max-w-2xl shadow-sm">
-          <span className="font-semibold text-gray-700 block mb-0.5">Narrative Story:</span>
-          {row.original.narrative}
+      {/* Performance Metrics */}
+      <div className="mb-4">
+        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">📈 Performance Metrics</h4>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm bg-white p-3 border border-gray-100 rounded-md shadow-sm">
+          <div>
+            <div className="text-gray-500 text-xs">Composite Score</div>
+            <div className="text-gray-900 font-semibold mt-0.5">{row.original.composite_score?.toFixed(1) || '-'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 text-xs">Expectancy</div>
+            <div className="text-gray-900 font-semibold mt-0.5">
+              {row.original.expectancy_pct ? `${row.original.expectancy_pct > 0 ? '+' : ''}${row.original.expectancy_pct.toFixed(2)}%` : '-'}
+            </div>
+          </div>
+          <div>
+            <div className="text-gray-500 text-xs">Track Record</div>
+            <div className="text-gray-900 font-semibold mt-0.5">
+              {wins} wins / {losses} losses ({winRate}%)
+            </div>
+          </div>
         </div>
-      )}
+      </div>
 
-      <div className="flex gap-2">
+      {/* Actions */}
+      <div className="flex gap-2 mt-4 pt-2">
         <a
           href={`https://www.tradingview.com/chart/?symbol=${row.original.ticker}`}
           target="_blank"

@@ -13,7 +13,6 @@ import pandas as pd
 import yfinance as yf
 from requests.exceptions import RequestException
 
-from cache import get_data
 from config import (
     TEST_MODE,
     TEST_TICKERS,
@@ -46,9 +45,9 @@ def fetch_sp500_tickers() -> List[str]:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         tables = pd.read_html(url, timeout=10)
         sp500_table = tables[0]
+        tickers = sp500_table["Symbol"].tolist()
         
         # Clean and validate
-        tickers = sp500_table["Symbol"].str.replace(".", "-", regex=False).tolist()
         tickers = [t.strip().upper() for t in tickers if isinstance(t, str)]
         
         logger.info(f"Successfully fetched {len(tickers)} tickers from Wikipedia")
@@ -81,53 +80,41 @@ def fetch_ohlcv_data(
         - Returns None on failure (no exception raised) to allow batch processing to continue
         - Automatically retries failed tickers
     """
-    def download() -> Optional[pd.DataFrame]:
-        try:
-            logger.debug(f"Downloading data for {ticker}...")
-
-            data = yf.download(
-                ticker,
-                start=start_date,
-                end=end_date,
-                progress=False,  # Suppress progress bar for cleaner output
-                timeout=timeout,
-            )
-
-            # Validate data
-            if data is None or data.empty:
-                logger.warning(f"{ticker}: No data returned")
-                return None
-
-            # Handle MultiIndex columns from yfinance (newer versions)
-            if isinstance(data.columns, pd.MultiIndex):
-                # MultiIndex structure is (OHLCV, Ticker) - get the OHLCV names
-                data.columns = data.columns.get_level_values(0)
-
-            # Normalize column names to uppercase
-            data.columns = data.columns.str.upper()
-
-            # Ensure required columns exist
-            required_cols = ["CLOSE", "VOLUME"]
-            if not all(col in data.columns for col in required_cols):
-                logger.warning(f"{ticker}: Missing required columns. Have: {list(data.columns)}")
-                return None
-
-            logger.debug(f"{ticker}: Downloaded {len(data)} rows")
-            return data
-
-        except Exception as e:
-            logger.warning(f"{ticker}: Download failed - {str(e)}")
-            return None
-
     try:
-        return get_data(
+        logger.debug(f"Downloading data for {ticker}...")
+        
+        data = yf.download(
             ticker,
-            download,
-            start_date=start_date,
-            end_date=end_date,
+            start=start_date,
+            end=end_date,
+            progress=False,  # Suppress progress bar for cleaner output
+            timeout=timeout,
         )
+        
+        # Validate data
+        if data is None or data.empty:
+            logger.warning(f"{ticker}: No data returned")
+            return None
+        
+        # Handle MultiIndex columns from yfinance (newer versions)
+        if isinstance(data.columns, pd.MultiIndex):
+            # MultiIndex structure is (OHLCV, Ticker) - get the OHLCV names
+            data.columns = data.columns.get_level_values(0)
+        
+        # Normalize column names to uppercase
+        data.columns = data.columns.str.upper()
+        
+        # Ensure required columns exist
+        required_cols = ["CLOSE", "VOLUME"]
+        if not all(col in data.columns for col in required_cols):
+            logger.warning(f"{ticker}: Missing required columns. Have: {list(data.columns)}")
+            return None
+        
+        logger.debug(f"{ticker}: Downloaded {len(data)} rows")
+        return data
+        
     except Exception as e:
-        logger.warning(f"{ticker}: Cache lookup failed - {str(e)}")
+        logger.warning(f"{ticker}: Download failed - {str(e)}")
         return None
 
 

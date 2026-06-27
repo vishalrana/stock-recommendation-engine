@@ -1,59 +1,20 @@
 """
-Generate Signals — Strategy 1.3 Rev B
-======================================
+Generate Signals — Strategy 1.3 Rev B (Modular Architecture)
+=============================================================
 Regime-aware, gated, percentile-normalized signal generator.
 
 Flow:
   1. Detect market regime (SPY vs 200 DMA)
   2. Fetch S&P 500 + Nasdaq-100 universe (deduplicated)
-  3. Scan tickers with technical filters (trend, RSI, ADX, MACD, volume, risk/reward, trades floor)
-     - BULL regime: trend gate relaxed to price > 50 SMA only (Rev B)
+  3. Scan tickers via registered strategies (Pullback Recovery)
   4. Merge with historical backtest metrics from ticker_metrics
-  5. Apply gated percentile-normalized ranking (SignalRanker)
+  5. Apply gated percentile-normalized ranking (SignalRanker per strategy)
   6. Archive previous signals to signals_history via upsert (duplicate-safe)
   7. Clear and insert ranked signals
   8. Log results with regime metadata and gate rejection breakdown
 
 Usage:
     python -m jobs.generate_signals [--dry-run]
-
-Database prerequisites (run once in Supabase SQL Editor):
-  -- Unique constraint to prevent duplicate archive rows:
-  ALTER TABLE signals_history
-    ADD CONSTRAINT signals_history_scan_date_ticker_key UNIQUE (scan_date, ticker);
-
-  -- is_fallback column on both tables:
-  ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_fallback BOOLEAN DEFAULT FALSE;
-  ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS is_fallback BOOLEAN DEFAULT FALSE;
-
-  -- RSI breadth column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS rsi_breadth_pct NUMERIC;
-
-  -- Max Risk Gate column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_maxrisk_gate INT DEFAULT 0;
-
-  -- Min Risk Gate column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_minrisk_gate INT DEFAULT 0;
-
-  -- Max Gap Gate column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_maxgap_gate INT DEFAULT 0;
-
-  -- Earnings Gate column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_earnings_gate INT DEFAULT 0;
-
-  -- Momentum Exceptions column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS momentum_exceptions INT DEFAULT 0;
-
-  -- is_momentum_exception column on signals and signals_history:
-  ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_momentum_exception BOOLEAN DEFAULT FALSE;
-  ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS is_momentum_exception BOOLEAN DEFAULT FALSE;
-
-  -- Distance from 20-Day High column on scan_log:
-  ALTER TABLE scan_log ADD COLUMN IF NOT EXISTS failed_extended_high_gate INT DEFAULT 0;
-
-  -- distance_from_high_pct column on signals and signals_history:
-  ALTER TABLE signals ADD COLUMN IF NOT EXISTS distance_from_high_pct DECIMAL(5,2);
-  ALTER TABLE signals_history ADD COLUMN IF NOT EXISTS distance_from_high_pct DECIMAL(5,2);
 """
 
 import os
@@ -65,79 +26,36 @@ import argparse
 from datetime import datetime, timedelta
 from io import StringIO
 
-import numpy as np
 import pandas as pd
 import requests
 
-# Add project root and src to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, PROJECT_ROOT)
 
-from indicators import calculate_indicators, check_rsi_pullback_recovery
+from indicators import calculate_indicators
 from downloader import fetch_ohlcv_data
 from regime import get_regime, should_trade
-from ranker import SignalRanker
 from jobs.supabase_client import get_client
+from jobs.strategies import STRATEGIES
 
-# Ticker Blacklist
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
-
-# Strategy parameters — Strategy 1.3 Rev B
-RSI_PULLBACK_THRESHOLD = 52.0  # Raised: 45→48→50→52 (extended bull, deep RSI dips are rare)
-RSI_RECOVERY_MIN = 45.0
-RSI_RECOVERY_MAX = 67.0        # Captures extended momentum in bull regime
-ADX_MIN = 18.0                 # Lowered from 20 — reduces ADX gate rejections
-VOLUME_MULTIPLIER = 1.0
-TARGET_R_MULTIPLE = 3.0
-LOOKBACK_RSI_DAYS = 10
-SWING_LOW_LOOKBACK = 20
-
-# Extended Bull Fallback parameters removed to restore original selectivity
-
-# Ranking
 TOP_N = 5
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 
-def find_swing_low(df_slice: pd.DataFrame) -> float:
-    """Find the most recent valid swing low in the last 20 trading days."""
-    if len(df_slice) < SWING_LOW_LOOKBACK:
-        return None
-    lookback = df_slice.tail(SWING_LOW_LOOKBACK)
-    if "LOW" not in lookback.columns or "CLOSE" not in lookback.columns:
-        return None
-    lows = lookback["LOW"].to_numpy(dtype=float)
-    current_price = float(lookback["CLOSE"].iloc[-1])
-    for i in range(len(lows) - 3, 1, -1):
-        c = lows[i]
-        if c >= current_price:
-            continue
-        if c < lows[i - 2] and c < lows[i - 1] and c < lows[i + 1] and c < lows[i + 2]:
-            return float(c)
-    return None
-
-
-def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
-    """Fetch S&P 500 + Nasdaq-100 universe from Wikipedia (deduplicated).
-
-    Returns:
-        tickers: ordered list of unique ticker symbols
-        company_names: ticker -> company name
-        industries: ticker -> GICS sub-industry
-    """
+def load_universe() -> tuple[list, dict, dict]:
+    """Load S&P 500 + Nasdaq-100 universe from Wikipedia (deduplicated)."""
     tickers: list[str] = []
     company_names: dict[str, str] = {}
     industries: dict[str, str] = {}
     sp500_set: set[str] = set()
 
-    # ── S&P 500 ──────────────────────────────────────────────
     try:
         logger.info("Fetching S&P 500 company info from Wikipedia...")
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -156,9 +74,9 @@ def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
             sp500_set.add(ticker)
             company_names[ticker] = str(row["Security"]).strip()
             industries[ticker] = str(row["GICS Sub-Industry"]).strip()
-        logger.info(f"S&P 500: loaded {len(sp500_set)} tickers from Wikipedia.")
+        logger.info("S&P 500: loaded %d tickers from Wikipedia.", len(sp500_set))
     except Exception as e:
-        logger.warning(f"S&P 500 Wikipedia fetch failed: {e}. Loading local fallback...")
+        logger.warning("S&P 500 Wikipedia fetch failed: %s. Loading local fallback...", e)
         csv_path = os.path.join(PROJECT_ROOT, "outputs", "backtest_summary.csv")
         if os.path.exists(csv_path):
             try:
@@ -171,13 +89,11 @@ def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
                     sp500_set.add(ticker)
                     industries[ticker] = str(row["industry"]).strip()
                     company_names[ticker] = ticker
-                logger.info(f"Loaded {len(tickers)} fallback tickers from local CSV.")
+                logger.info("Loaded %d fallback tickers from local CSV.", len(tickers))
             except Exception as csv_err:
-                logger.error(f"Could not load fallback CSV: {csv_err}")
+                logger.error("Could not load fallback CSV: %s", csv_err)
 
     sp500_count = len(sp500_set)
-
-    # ── Nasdaq-100 (non-overlapping with S&P 500) ─────────────
     ndx_unique_count = 0
     try:
         logger.info("Fetching Nasdaq-100 company info from Wikipedia...")
@@ -188,8 +104,6 @@ def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
             timeout=15,
         )
         ndx_response.raise_for_status()
-        # The Nasdaq-100 Wikipedia page has multiple tables; the components table
-        # contains a "Ticker" column. Try each table until one has that column.
         ndx_tables = pd.read_html(StringIO(ndx_response.text))
         ndx_table = None
         for t in ndx_tables:
@@ -200,370 +114,47 @@ def fetch_sp500_tickers_all() -> tuple[list, dict, dict]:
             for _, row in ndx_table.iterrows():
                 ticker = str(row["Ticker"]).strip().upper().replace(".", "-")
                 if ticker in BLACKLIST or ticker in sp500_set:
-                    continue  # skip duplicates already in S&P 500
+                    continue
                 tickers.append(ticker)
                 company_names[ticker] = str(row.get("Company", ticker)).strip()
                 industries[ticker] = str(row.get("GICS Sector", "Unknown")).strip()
                 ndx_unique_count += 1
-            logger.info(f"Nasdaq-100: added {ndx_unique_count} non-overlapping tickers.")
+            logger.info("Nasdaq-100: added %d non-overlapping tickers.", ndx_unique_count)
         else:
-            logger.warning("Nasdaq-100 Wikipedia table not found (no 'Ticker' column). Skipping NDX expansion.")
+            logger.warning("Nasdaq-100 Wikipedia table not found. Skipping NDX expansion.")
     except Exception as e:
-        logger.warning(f"Nasdaq-100 Wikipedia fetch failed: {e}. Skipping NDX expansion.")
+        logger.warning("Nasdaq-100 Wikipedia fetch failed: %s. Skipping NDX expansion.", e)
 
-    total = len(tickers)
     logger.info(
-        f"Universe: {sp500_count} S&P 500 + {ndx_unique_count} Nasdaq-100 non-overlapping = {total} total tickers"
+        "Universe: %d S&P 500 + %d Nasdaq-100 non-overlapping = %d total tickers",
+        sp500_count,
+        ndx_unique_count,
+        len(tickers),
     )
     return tickers, company_names, industries
 
 
-def compute_atr14(df: pd.DataFrame) -> float:
-    """Compute 14-day Average True Range."""
-    high_low = df['HIGH'] - df['LOW']
-    high_close = abs(df['HIGH'] - df['CLOSE'].shift())
-    low_close = abs(df['LOW'] - df['CLOSE'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return float(tr.rolling(14).mean().iloc[-1])
-
-
-def get_earnings_date(ticker: str) -> str | None:
-    """Fetch next earnings date from yfinance for a ticker, returning ISO string or None."""
-    try:
-        import yfinance as yf
-        stock = yf.Ticker(ticker)
-        calendar = stock.calendar
-        if calendar is None:
-            return None
-        
-        # If it is a dictionary
-        if isinstance(calendar, dict):
-            dates = calendar.get("Earnings Date")
-            if dates and isinstance(dates, list) and len(dates) > 0:
-                import pandas as pd
-                return pd.Timestamp(dates[0]).strftime("%Y-%m-%d")
-            return None
-            
-        # If it is a pandas DataFrame
-        if hasattr(calendar, "empty") and not calendar.empty:
-            if hasattr(calendar, "index") and len(calendar.index) > 0:
-                import pandas as pd
-                return pd.Timestamp(calendar.index[0]).strftime("%Y-%m-%d")
-    except Exception:
-        pass
-    return None
-
-
-def compute_targets(df: pd.DataFrame, entry: float) -> dict:
-    """Find resistance levels (significant highs) from past 6 months."""
-    highs = df['HIGH'].rolling(5).max().iloc[-120:]  # 6 months
-    significant_highs = []
-    
-    for i in range(2, len(highs)-2):
-        if (highs.iloc[i] > highs.iloc[i-1] and 
-            highs.iloc[i] > highs.iloc[i-2] and
-            highs.iloc[i] > highs.iloc[i+1] and
-            highs.iloc[i] > highs.iloc[i+2]):
-            significant_highs.append(highs.iloc[i])
-    
-    # Sort and deduplicate (within 2% of each other)
-    sorted_highs = sorted(set([round(h, 2) for h in significant_highs]))
-    deduped_highs = []
-    for h in sorted_highs:
-        if not deduped_highs or (h - deduped_highs[-1]) / deduped_highs[-1] > 0.02:
-            deduped_highs.append(h)
-    significant_highs = deduped_highs
-    
-    resistance_levels = [h for h in significant_highs if h > entry * 1.01]
-    
-    # Assign targets
-    target_1 = resistance_levels[0] if resistance_levels else entry * 1.05
-    target_2 = resistance_levels[1] if len(resistance_levels) > 1 else target_1 * 1.05
-    target_3 = resistance_levels[2] if len(resistance_levels) > 2 else target_2 * 1.05
-    
-    # Cap at 20% above entry
-    max_target = entry * 1.20
-    target_1 = min(target_1, max_target)
-    target_2 = min(target_2, max_target)
-    target_3 = min(target_3, max_target)
-    
-    # Ensure progression
-    target_2 = max(target_2, target_1 * 1.02)
-    target_3 = max(target_3, target_2 * 1.02)
-    
+def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries: dict) -> dict:
+    """Build per-ticker metrics dict for strategy scan."""
+    m = metrics_map.get(ticker.upper(), {})
     return {
-        'target_1': round(target_1, 2),
-        'target_2': round(target_2, 2),
-        'target_3': round(target_3, 2),
-        'target_1_pct': round((target_1 / entry - 1) * 100, 2),
-        'target_2_pct': round((target_2 / entry - 1) * 100, 2),
-        'target_3_pct': round((target_3 / entry - 1) * 100, 2),
+        "win_rate": m.get("win_rate", 0.0),
+        "expectancy_pct": m.get("expectancy_pct", 0.0),
+        "total_trades": m.get("total_trades", 0),
+        "median_win_return": m.get("median_win_return", 0.0),
+        "company_name": company_names.get(ticker, ticker),
+        "industry": industries.get(ticker, "Unknown"),
     }
 
 
-def compute_weighted_rr(entry: float, stop: float, targets: dict) -> float:
-    """Compute weighted R/R using 50/30/20 position sizing."""
-    risk = entry - stop
-    if risk <= 0:
-        return 0.0
-    
-    t1_rr = (targets['target_1'] - entry) / risk
-    t2_rr = (targets['target_2'] - entry) / risk
-    t3_rr = (targets['target_3'] - entry) / risk
-    
-    weighted = 0.5 * t1_rr + 0.3 * t2_rr + 0.2 * t3_rr
-    return round(weighted, 2)
-
-
-def generate_narrative(price, ema20, volume_ratio, current_rsi):
-    parts = []
-    
-    # Trend with distance nuance
-    if ema20 and ema20 > 0:
-        pct_vs_ema = (price / ema20 - 1) * 100
-        if pct_vs_ema > 5:
-            parts.append("Strong uptrend")
-        elif pct_vs_ema > 2:
-            parts.append("Rising trend")
-        elif pct_vs_ema > -1:
-            parts.append("At support")
-        else:
-            parts.append("Pullback to support")
-    else:
-        parts.append("Trend unclear")
-    
-    # Volume with broader ranges
-    if volume_ratio > 1.3:
-        parts.append("strong volume")
-    elif volume_ratio > 1.05:
-        parts.append("volume confirming")
-    elif volume_ratio > 0.9:
-        parts.append("normal volume")
-    else:
-        parts.append("light volume")
-    
-    # RSI with more granular bands
-    if current_rsi < 30:
-        parts.append("deeply oversold")
-    elif current_rsi < 40:
-        parts.append("oversold bounce")
-    elif current_rsi < 48:
-        parts.append("recovering")
-    elif current_rsi < 55:
-        parts.append("neutral RSI")
-    elif current_rsi < 62:
-        parts.append("momentum building")
-    elif current_rsi < 70:
-        parts.append("strong momentum")
-    else:
-        parts.append("overbought")
-    
-    return ", ".join(parts) + "."
-
-
-def check_latest_signal(
-    ticker: str,
-    df: pd.DataFrame,
-    company_name: str,
-    industry: str,
-    total_trades: int,
-    regime_str: str = "neutral",
-    median_win_return: float = 0.0,
-) -> tuple[dict, str]:
-    """
-    Evaluate Strategy 1.3 Rev B technical filters on the latest bar.
-
-    Args:
-        regime_str: current market regime ("bull", "bear", "sideways").
-
-    Returns a tuple (signal_data, failed_gate_name).
-    If the stock passes all gates, failed_gate_name is None.
-    """
-    effective_rsi_threshold = RSI_PULLBACK_THRESHOLD
-    effective_adx_min = 15.0 if regime_str.lower() == "bull" else 18.0
-
-    n_bars = len(df)
-    if n_bars < 201:
-        return None, "failed_trend_gate"
-
-    t = n_bars - 1
-
-    closes = df["CLOSE"].to_numpy(dtype=float)
-    dma50s = df["DMA_50"].to_numpy(dtype=float)
-    dma200s = df["DMA_200"].to_numpy(dtype=float)
-    rsis = df["RSI_14"].to_numpy(dtype=float)
-    volumes = df["VOLUME"].to_numpy(dtype=float)
-    vol_mas = df["VOLUME_MA_20"].to_numpy(dtype=float)
-    highs = df["HIGH"].to_numpy(dtype=float)
-    adxs = df["ADX_14"].to_numpy(dtype=float)
-    macd_lines = df["MACD_LINE"].to_numpy(dtype=float)
-    macd_sigs = df["MACD_SIGNAL"].to_numpy(dtype=float)
-    macd_hists = df["MACD_HIST"].to_numpy(dtype=float)
-    ema20s = df["EMA_20"].to_numpy(dtype=float)
-    dates = df.index
-
-    c = closes[t]
-    d50 = dma50s[t]
-    d200 = dma200s[t]
-    rsi_now = rsis[t]
-    vol = volumes[t]
-    vma = vol_mas[t]
-    adx_now = adxs[t]
-    macd_line = macd_lines[t]
-    macd_sig = macd_sigs[t]
-    macd_hist = macd_hists[t]
-    ema20 = ema20s[t]
-
-    if any(np.isnan(x) for x in (c, d50, d200, rsi_now, vol, vma, adx_now, macd_line, macd_sig, macd_hist, ema20)):
-        return None, "failed_trend_gate"
-
-    # 1. Trend alignment
-    # Strategy 1.3 Rev B: trend gate relaxed in BULL regime to 50 SMA only.
-    # In bear/sideways regimes the full 50 DMA > 200 DMA stack is still required.
-    if regime_str == "bull":
-        if not (c > d50):
-            return None, "failed_trend_gate"
-    else:
-        if not (c > d50 > d200):
-            return None, "failed_trend_gate"
-
-    # 2. RSI pullback-recovery (or momentum exception breakout)
-    # Compute momentum exception criteria
-    price_vs_50dma_pct = (c / d50 - 1) * 100 if d50 > 0 else 0.0
-    volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
-    
-    MOMENTUM_EXCEPTION = {
-        'min_price_vs_50dma_pct': 20.0,
-        'min_volume_ratio': 1.5,
-        'min_adx': 20.0,
-    }
-    
-    is_momentum_exception = (
-        price_vs_50dma_pct >= MOMENTUM_EXCEPTION['min_price_vs_50dma_pct'] and
-        volume_ratio >= MOMENTUM_EXCEPTION['min_volume_ratio'] and
-        adx_now >= MOMENTUM_EXCEPTION['min_adx']
-    )
-
-    rsi_res = check_rsi_pullback_recovery(
-        df["RSI_14"],
-        lookback=LOOKBACK_RSI_DAYS,
-        dip_threshold=effective_rsi_threshold,
-        recovery_min=RSI_RECOVERY_MIN,
-        recovery_max=RSI_RECOVERY_MAX
-    )
-    rsi_min_10d = rsi_res.get("rsi_min_10d") if rsi_res.get("rsi_min_10d") is not None else rsis[t]
-
-    if not is_momentum_exception:
-        if not rsi_res.get("passed"):
-            return None, "failed_rsi_gate"
-    else:
-        # Momentum exception: skip RSI pullback check but require current RSI is not overbought (> 75)
-        if rsi_now > 75:
-            return None, "failed_rsi_gate"
-
-    # 3. ADX trend strength
-    if np.isnan(adx_now) or not (adx_now >= effective_adx_min):
-        return None, "failed_adx_gate"
-
-    # 5. Volume confirmation: volume_ratio >= 1.0x
-    volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0
-    if not (volume_ratio >= VOLUME_MULTIPLIER):
-        return None, "failed_volume_gate"
-
-    # 6. Swing Low Stop-loss & Max Risk % check (reject if stop-loss is missing/invalid or risk > 15% of entry price)
-    stop_loss = find_swing_low(df)
-    if stop_loss is None:
-        return None, "failed_maxrisk_gate"
-
-    entry_price = round(highs[t] * 1.001, 2)
-    if stop_loss >= entry_price:
-        return None, "failed_maxrisk_gate"
-
-    risk = entry_price - stop_loss
-    if risk <= 0:
-        return None, "failed_maxrisk_gate"
-
-    if (entry_price - stop_loss) / entry_price > 0.15:
-        return None, "failed_maxrisk_gate"
-
-    # Strategy 1.3 Rev B: Min Risk % gate (avoid noise-level stops)
-    risk_pct = (entry_price - stop_loss) / entry_price * 100
-    MIN_RISK_PCT = 2.5
-    if risk_pct < MIN_RISK_PCT:
-        return None, "failed_minrisk_gate"
-
-    # Strategy 1.3 Rev B: Max Gap % gate (avoid flash crashes / dead cat bounces)
-    MAX_GAP_PCT = 5.0
-    daily_returns = df['CLOSE'].pct_change().iloc[-5:]
-    max_drop = daily_returns.min() * 100
-    if max_drop < -MAX_GAP_PCT:
-        return None, "failed_maxgap_gate"
-
-    # Multi-target system
-    targets = compute_targets(df, entry_price)
-    weighted_rr = compute_weighted_rr(entry_price, stop_loss, targets)
-
-    exit_price = targets['target_3']
-    upside_pct = targets['target_3_pct']
-    risk_reward = weighted_rr
-
-    # 7. Historical data floor: total_trades >= 10 in ticker_metrics
-    if total_trades < 10:
-        return None, "failed_trades_gate"
-
-    # Strategy 1.3 Rev B: Earnings Calendar filter (avoid reporting during expected hold)
-    EARNINGS_BUFFER_DAYS = 7
-    earnings_date = get_earnings_date(ticker)
-    if earnings_date:
-        ts_earnings = pd.Timestamp(earnings_date).normalize()
-        ts_now = pd.Timestamp.now().normalize()
-        days_to_earnings = (ts_earnings - ts_now).days
-        if 0 < days_to_earnings <= EARNINGS_BUFFER_DAYS:
-            return None, "failed_earnings_gate"
-
-    # Strategy 1.3 Rev B: Distance from 20-Day High (stored for display)
-    high_20d = float(df['HIGH'].rolling(20).max().iloc[-1])
-    distance_from_high_pct = (high_20d - c) / high_20d * 100
-
-    latest_date = dates[t]
-    if hasattr(latest_date, 'date'):
-        signal_date = latest_date.date().isoformat()
-    else:
-        signal_date = str(latest_date)[:10]
-
-    narrative = generate_narrative(c, ema20, volume_ratio, rsi_now)
-
-    return {
-        "scan_date": signal_date,
-        "ticker": ticker,
-        "company_name": company_name,
-        "industry": industry,
-        "price": round(c, 2),
-        "dma_50": round(d50, 2),
-        "entry_price": entry_price,
-        "stop_loss": stop_loss,
-        "exit_price": exit_price,
-        "upside_pct": upside_pct,
-        "risk_reward": risk_reward,
-        "current_rsi": round(rsi_now, 2),
-        "rsi_min_10d": round(float(rsi_min_10d), 2),
-        "volume_ratio": volume_ratio,
-        "adx_value": round(float(adx_now), 2),
-        "macd_histogram": round(float(macd_hist), 4),
-        "ema20": round(float(ema20), 2),
-        "earnings_date": earnings_date,
-        "is_momentum_exception": is_momentum_exception,
-        "distance_from_high_pct": round(float(distance_from_high_pct), 2),
-        "target_1": targets['target_1'],
-        "target_2": targets['target_2'],
-        "target_3": targets['target_3'],
-        "target_1_pct": targets['target_1_pct'],
-        "target_2_pct": targets['target_2_pct'],
-        "target_3_pct": targets['target_3_pct'],
-        "weighted_rr": weighted_rr,
-        "position_sizing": '50/30/20',
-        "narrative": narrative,
-    }, None
+def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
+    """Keep highest quality_score per ticker."""
+    best: dict[str, dict] = {}
+    for sig in signals:
+        ticker = sig["ticker"]
+        if ticker not in best or sig["quality_score"] > best[ticker]["quality_score"]:
+            best[ticker] = sig
+    return list(best.values())
 
 
 def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
@@ -580,49 +171,51 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
         for sig in current_signals:
             ticker = sig.get("ticker", "")
             m = metrics_map.get(ticker.upper(), {})
-            history_rows.append({
-                "scan_date": sig.get("scan_date"),
-                "ticker": ticker,
-                "company_name": sig.get("company_name"),
-                "industry": sig.get("industry"),
-                "price": sig.get("price"),
-                "entry_price": sig.get("entry_price"),
-                "stop_loss": sig.get("stop_loss"),
-                "exit_price": sig.get("exit_price"),
-                "upside_pct": sig.get("upside_pct"),
-                "risk_reward": sig.get("risk_reward"),
-                "current_rsi": sig.get("current_rsi"),
-                "rsi_min_10d": sig.get("rsi_min_10d"),
-                "volume_ratio": sig.get("volume_ratio"),
-                "adx_value": sig.get("adx_value"),
-                "macd_histogram": sig.get("macd_histogram"),
-                "ema20": sig.get("ema20"),
-                "score": sig.get("score"),
-                "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
-                "tier_label": sig.get("tier_label", "Speculative"),
-                "past_win_rate": m.get("win_rate", 0),
-                "expectancy_pct": m.get("expectancy_pct", 0),
-                "total_trades": m.get("total_trades", 0),
-                "regime": regime_str,
-                "earnings_date": sig.get("earnings_date"),
-                "is_momentum_exception": sig.get("is_momentum_exception", False),
-                "distance_from_high_pct": sig.get("distance_from_high_pct"),
-                "target_1": sig.get("target_1"),
-                "target_2": sig.get("target_2"),
-                "target_3": sig.get("target_3"),
-                "target_1_pct": sig.get("target_1_pct"),
-                "target_2_pct": sig.get("target_2_pct"),
-                "target_3_pct": sig.get("target_3_pct"),
-                "weighted_rr": sig.get("weighted_rr"),
-                "position_sizing": sig.get("position_sizing", "50/30/20"),
-                "narrative": sig.get("narrative"),
-            })
+            history_rows.append(
+                {
+                    "scan_date": sig.get("scan_date"),
+                    "ticker": ticker,
+                    "company_name": sig.get("company_name"),
+                    "industry": sig.get("industry"),
+                    "price": sig.get("price"),
+                    "entry_price": sig.get("entry_price"),
+                    "stop_loss": sig.get("stop_loss"),
+                    "exit_price": sig.get("exit_price"),
+                    "upside_pct": sig.get("upside_pct"),
+                    "risk_reward": sig.get("risk_reward"),
+                    "current_rsi": sig.get("current_rsi"),
+                    "rsi_min_10d": sig.get("rsi_min_10d"),
+                    "volume_ratio": sig.get("volume_ratio"),
+                    "adx_value": sig.get("adx_value"),
+                    "macd_histogram": sig.get("macd_histogram"),
+                    "ema20": sig.get("ema20"),
+                    "score": sig.get("score"),
+                    "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
+                    "quality_score": sig.get("quality_score", sig.get("composite_score", 0.0)),
+                    "tier_label": sig.get("tier_label", "Speculative"),
+                    "strategy": sig.get("strategy"),
+                    "past_win_rate": m.get("win_rate", 0),
+                    "expectancy_pct": m.get("expectancy_pct", 0),
+                    "total_trades": m.get("total_trades", 0),
+                    "regime": regime_str,
+                    "earnings_date": sig.get("earnings_date"),
+                    "is_momentum_exception": sig.get("is_momentum_exception", False),
+                    "distance_from_high_pct": sig.get("distance_from_high_pct"),
+                    "target_1": sig.get("target_1"),
+                    "target_2": sig.get("target_2"),
+                    "target_3": sig.get("target_3"),
+                    "target_1_pct": sig.get("target_1_pct"),
+                    "target_2_pct": sig.get("target_2_pct"),
+                    "target_3_pct": sig.get("target_3_pct"),
+                    "weighted_rr": sig.get("weighted_rr"),
+                    "position_sizing": sig.get("position_sizing", "50/30/20"),
+                    "narrative": sig.get("narrative"),
+                }
+            )
 
-        # Upsert instead of insert to safely handle retries / duplicate archive calls.
-        # Requires: ALTER TABLE signals_history ADD CONSTRAINT signals_history_scan_date_ticker_key UNIQUE (scan_date, ticker);
         supabase.table("signals_history").upsert(
             history_rows,
-            on_conflict="scan_date,ticker"
+            on_conflict="scan_date,ticker",
         ).execute()
         logger.info("Archived %d signals to signals_history (upsert, duplicates skipped).", len(history_rows))
 
@@ -632,8 +225,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
 
 def main():
     start_time = time.time()
-    
-    # Parse command line arguments
+
     parser = argparse.ArgumentParser(description="Generate Nightly Stock Signals")
     parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
     parser.add_argument(
@@ -651,24 +243,9 @@ def main():
         logger.info("FORCE REFRESH ACTIVE — cache will be cleared and data re-downloaded")
     logger.info("=" * 60)
 
-    # scan_date is always today's date (not derived from stale cache)
     scan_date_today = datetime.now().date().isoformat()
+    signal_date = scan_date_today
 
-    # Initialize gate rejection counts
-    gate_rejections = {
-        "failed_rsi_gate": 0,
-        "failed_adx_gate": 0,
-        "failed_trend_gate": 0,
-        "failed_volume_gate": 0,
-        "failed_maxrisk_gate": 0,
-        "failed_minrisk_gate": 0,
-        "failed_maxgap_gate": 0,
-        "failed_earnings_gate": 0,
-        "failed_trades_gate": 0,
-        "momentum_exceptions": 0,
-    }
-
-    # ── Step 1: Detect market regime ─────────────────────────
     regime_info = get_regime()
     regime_str = regime_info["regime"]
     trade_allowed = should_trade(regime_str, "swing_momentum")
@@ -681,19 +258,16 @@ def main():
         trade_allowed,
     )
 
-    # ── Step 2: Load S&P 500 + Nasdaq-100 universe ───────────
-    tickers, company_names, industries = fetch_sp500_tickers_all()
+    tickers, company_names, industries = load_universe()
 
     os.makedirs(os.path.join(PROJECT_ROOT, "data", "cache"), exist_ok=True)
 
-    # ── Step 3: Download data if CI, force-refresh, env flag, or cache empty ─
     is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     force_download = os.environ.get("DOWNLOAD_DATA") == "true"
     cache_dir = os.path.join(PROJECT_ROOT, "data", "cache")
     cache_empty = len(glob.glob(os.path.join(cache_dir, "*.parquet"))) == 0
 
     if args.force_refresh:
-        # Delete all stale parquet files so the scan uses only fresh data
         stale_files = glob.glob(os.path.join(cache_dir, "*.parquet"))
         logger.info("FORCE REFRESH: deleting %d stale parquet files...", len(stale_files))
         for sf in stale_files:
@@ -701,7 +275,7 @@ def main():
                 os.remove(sf)
             except OSError as rm_err:
                 logger.warning("Could not delete %s: %s", sf, rm_err)
-        cache_empty = True  # trigger download below
+        cache_empty = True
 
     if is_ci or force_download or cache_empty:
         logger.info("Fetching fresh data from yfinance...")
@@ -711,29 +285,26 @@ def main():
         for i, ticker in enumerate(tickers, 1):
             if ticker in BLACKLIST:
                 continue
-            logger.info(f"[{i}/{len(tickers)}] Downloading {ticker}...")
+            logger.info("[%d/%d] Downloading %s...", i, len(tickers), ticker)
             fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
         logger.info("Finished downloading daily data.")
 
-    # ── Step 4: Scan tickers with technical filters ──────────
     cache_path = os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")
     parquet_files = sorted(glob.glob(cache_path))
     total_files = len(parquet_files)
-    logger.info(f"Found {total_files} cached files in data/cache/")
+    logger.info("Found %d cached files in data/cache/", total_files)
 
     if total_files == 0:
         logger.error("No cached files found. Cannot generate signals.")
         sys.exit(1)
 
-    # Initialize Supabase client
     try:
         supabase = get_client()
     except Exception as e:
-        logger.error(f"Failed to initialize Supabase client: {e}")
+        logger.error("Failed to initialize Supabase client: %s", e)
         sys.exit(1)
 
-    # Fetch historical metrics
-    metrics_map = {}
+    metrics_map: dict = {}
     try:
         logger.info("Fetching historical metrics from Supabase ticker_metrics...")
         res = supabase.table("ticker_metrics").select(
@@ -747,209 +318,188 @@ def main():
                 "total_trades": int(row["total_signals"] or 0),
                 "median_win_return": float(row.get("median_win_return") or 0.0),
             }
-        logger.info(f"Loaded metrics for {len(metrics_map)} tickers.")
+        logger.info("Loaded metrics for %d tickers.", len(metrics_map))
     except Exception as e:
-        logger.warning(f"Could not load ticker metrics: {e}. Using fallback values.")
+        logger.warning("Could not load ticker metrics: %s. Using fallback values.", e)
 
-    # Technical scan
-    raw_signals = []
+    all_signals: list[dict] = []
+    strategy_counts: dict[str, int] = {}
     scanned_count = 0
-    rsi_passed_count = 0  # tracks how many tickers passed the RSI gate (for breadth monitoring)
-    # scan_date is always today — not the latest parquet bar (which may be stale)
-    signal_date = scan_date_today
-
-    for idx, fpath in enumerate(parquet_files, 1):
-        ticker = os.path.basename(fpath).replace(".parquet", "").upper()
-
-        if tickers and ticker not in tickers:
-            continue
-
-        try:
-            raw = pd.read_parquet(fpath, engine="pyarrow")
-            
-            # Guard for short history (minimum 60 bars for stable ADX)
-            if len(raw) < 60:
-                logger.warning(f"{ticker}: not enough history ({len(raw)} bars) for stable ADX. Skipping.")
-                gate_rejections["failed_adx_gate"] += 1
-                continue
-
-            df = calculate_indicators(raw).sort_index()
-            scanned_count += 1
-
-            company_name = company_names.get(ticker, ticker)
-            industry = industries.get(ticker, "Unknown")
-            
-            # Fetch total trades for this ticker (historical_data_floor gate)
-            total_trades = metrics_map.get(ticker, {}).get("total_trades", 0)
-            median_win_return = metrics_map.get(ticker, {}).get("median_win_return", 0.0)
-
-            sig, failed_gate = check_latest_signal(
-                ticker, df, company_name, industry, total_trades,
-                regime_str=regime_str,
-                median_win_return=median_win_return
-            )
-            if sig is not None:
-                sig["is_fallback"] = False
-                raw_signals.append(sig)
-                rsi_passed_count += 1
-                if sig.get("is_momentum_exception"):
-                    gate_rejections["momentum_exceptions"] += 1
-                logger.info(
-                    f"[QUALIFIED] {ticker} | Entry: ${sig['entry_price']:.2f} | "
-                    f"Stop: ${sig['stop_loss']:.2f} | Exit: ${sig['exit_price']:.2f} | "
-                    f"RSI: {sig['current_rsi']:.1f} | Vol: {sig['volume_ratio']:.2f}x | "
-                    f"ADX: {sig['adx_value']:.1f} | MACD Hist: {sig['macd_histogram']:.4f}"
-                )
-            else:
-                if failed_gate in gate_rejections:
-                    gate_rejections[failed_gate] += 1
-                # Count RSI passes (tickers that passed trend gate but may have failed later)
-                if failed_gate not in ("failed_trend_gate", "failed_rsi_gate"):
-                    rsi_passed_count += 1
-
-        except Exception as e:
-            logger.error(f"Error scanning {ticker}: {e}")
-
-    signals_qualified = len(raw_signals)
-    logger.info(f"Technical scan complete. Scanned: {scanned_count}, Qualified: {signals_qualified}")
-
-    # signal_date is always set (scan_date_today), so this guard is a safety net only
-    if signal_date is None:
-        logger.error("No valid scan date could be determined.")
-        sys.exit(1)
-
-    # ── Step 5: Merge with metrics and apply ranking ─────────
-    signals_recommended = 0
-    ranked_signals = []
-    error_msg = None
+    signals_qualified = 0
+    gate_rejections = {
+        "failed_rsi_gate": 0,
+        "failed_adx_gate": 0,
+        "failed_trend_gate": 0,
+        "failed_volume_gate": 0,
+        "failed_maxrisk_gate": 0,
+        "failed_minrisk_gate": 0,
+        "failed_maxgap_gate": 0,
+        "failed_earnings_gate": 0,
+        "failed_trades_gate": 0,
+        "momentum_exceptions": 0,
+    }
+    rsi_passed_count = 0
     signals_strong_buy = 0
     signals_buy = 0
-    signals_watch = 0
-    signals_speculative = 0
 
-    if raw_signals and trade_allowed:
-        # Build DataFrame with metrics columns for the ranker
-        signals_df = pd.DataFrame(raw_signals)
-        signals_df["win_rate"] = signals_df["ticker"].apply(
-            lambda t: metrics_map.get(t, {}).get("win_rate", 0.0)
-        )
-        signals_df["expectancy_pct"] = signals_df["ticker"].apply(
-            lambda t: metrics_map.get(t, {}).get("expectancy_pct", 0.0)
-        )
-        signals_df["total_trades"] = signals_df["ticker"].apply(
-            lambda t: metrics_map.get(t, {}).get("total_trades", 0)
-        )
+    for strategy in STRATEGIES:
+        if hasattr(strategy, "reset_scan_stats"):
+            strategy.reset_scan_stats()
 
-        logger.info("Applying composite ranking (Strategy 1.3 Rev B)...")
-        ranker = SignalRanker()
-        scored_df = ranker.composite_rank(signals_df, regime_str, top_n=len(signals_df))
+        strategy_signals: list[dict] = []
 
-        signals_strong_buy = ranker.signals_strong_buy
-        signals_buy = ranker.signals_buy
-        signals_watch = ranker.signals_watch
-        signals_speculative = ranker.signals_speculative
+        for idx, fpath in enumerate(parquet_files, 1):
+            ticker = os.path.basename(fpath).replace(".parquet", "").upper()
 
-        logger.info(
-            f"Candidate pool tier counts: Strong Buy={signals_strong_buy}, Buy={signals_buy}, "
-            f"Watch={signals_watch} (debug only), Speculative={signals_speculative} (debug only)"
-        )
+            if tickers and ticker not in tickers:
+                continue
 
-        if not scored_df.empty:
-            # Log per-candidate
-            for idx, row in scored_df.iterrows():
-                breakdown = row["score_breakdown"]
-                a = 0.30 * breakdown["momentum"]
-                b = 0.40 * breakdown["expectancy"]
-                c = 0.20 * breakdown["winrate"]
-                d = 0.10 * breakdown["regime"]
-                
-                logger.info(
-                    f"{row['ticker']} | Composite: {row['composite_score']:.1f} | Tier: {row['tier_label']} | "
-                    f"Momentum: {a:.1f}/30, Expectancy: {b:.1f}/40, WinRate: {c:.1f}/20, Regime: {d:.1f}/10 | "
-                    f"Raw: exp={row['expectancy_pct']:.2f}%, win={row['win_rate']:.1f}%, trades={row['total_trades']}"
-                )
+            try:
+                raw = pd.read_parquet(fpath, engine="pyarrow")
 
-            # Select top recommendations
-            ranked_df = scored_df.head(TOP_N)
-            signals_recommended = len(ranked_df)
+                if len(raw) < 60:
+                    logger.warning(
+                        "%s: not enough history (%d bars) for stable ADX. Skipping.",
+                        ticker,
+                        len(raw),
+                    )
+                    gate_rejections["failed_adx_gate"] += 1
+                    continue
 
-            # Log summary
-            t1 = sum(ranked_df["tier_label"] == "Strong Buy")
-            t2 = sum(ranked_df["tier_label"] == "Buy")
-            t3 = sum(ranked_df["tier_label"] == "Watch")
-            t4 = sum(ranked_df["tier_label"] == "Speculative")
-            logger.info(
-                f"Final recommendations: {signals_recommended} signals "
-                f"(T1: {t1}, T2: {t2}, T3: {t3}, Speculative: {t4})"
-            )
+                df = calculate_indicators(raw).sort_index()
+                scanned_count += 1
 
-            for _, row in ranked_df.iterrows():
-                ranked_signals.append({
-                    "scan_date": row["scan_date"],
-                    "ticker": row["ticker"],
-                    "company_name": row["company_name"],
-                    "industry": row["industry"],
-                    "price": row["price"],
-                    "entry_price": row["entry_price"],
-                    "stop_loss": row["stop_loss"],
-                    "exit_price": row["exit_price"],
-                    "upside_pct": row["upside_pct"],
-                    "risk_reward": row["risk_reward"],
-                    "current_rsi": row["current_rsi"],
-                    "rsi_min_10d": row["rsi_min_10d"],
-                    "volume_ratio": row["volume_ratio"],
-                    "adx_value": row["adx_value"],
-                    "macd_histogram": row["macd_histogram"],
-                    "ema20": row["ema20"],
-                    "score": round(float(row["composite_score"]), 4),
-                    "composite_score": round(float(row["composite_score"]), 4),
-                    "tier_label": row["tier_label"],
-                    "regime": regime_str,
-                    "is_fallback": bool(row.get("is_fallback", False)),
-                    "target_1": row.get("target_1"),
-                    "target_2": row.get("target_2"),
-                    "target_3": row.get("target_3"),
-                    "target_1_pct": row.get("target_1_pct"),
-                    "target_2_pct": row.get("target_2_pct"),
-                    "target_3_pct": row.get("target_3_pct"),
-                    "weighted_rr": row.get("weighted_rr"),
-                    "position_sizing": row.get("position_sizing", "50/30/20"),
-                    "narrative": row.get("narrative"),
-                })
+                metrics = load_metrics(ticker, metrics_map, company_names, industries)
+                signal = strategy.scan(ticker, df, regime_str, metrics)
+
+                if signal is not None:
+                    signals_qualified += 1
+                    strategy_signals.append(signal)
+                    logger.info(
+                        "[QUALIFIED] %s | Entry: $%.2f | Stop: $%.2f | Exit: $%.2f | "
+                        "RSI: %.1f | Vol: %.2fx | ADX: %.1f | MACD Hist: %.4f",
+                        ticker,
+                        signal["entry_price"],
+                        signal["stop_loss"],
+                        signal["exit_price"],
+                        signal["current_rsi"],
+                        signal["volume_ratio"],
+                        signal["adx_value"],
+                        signal["macd_histogram"],
+                    )
+
+            except Exception as e:
+                logger.error("Error scanning %s: %s", ticker, e)
+
+        if hasattr(strategy, "gate_rejections"):
+            for key, count in strategy.gate_rejections.items():
+                gate_rejections[key] = gate_rejections.get(key, 0) + count
+        if hasattr(strategy, "rsi_passed_count"):
+            rsi_passed_count += strategy.rsi_passed_count
+
+        if trade_allowed and strategy_signals:
+            ranked = strategy.rank_candidates(strategy_signals, regime_str)
+            buy_ranked = [s for s in ranked if s["tier_label"] in ("Strong Buy", "Buy")]
+            strategy_counts[strategy.name] = len(buy_ranked)
+            all_signals.extend(buy_ranked)
+
+            if hasattr(strategy, "signals_strong_buy"):
+                signals_strong_buy += strategy.signals_strong_buy
+            if hasattr(strategy, "signals_buy"):
+                signals_buy += strategy.signals_buy
         else:
-            logger.warning("No signals survived gates. 0 recommendations this scan.")
-    elif not trade_allowed:
-        logger.warning(
-            "Bear market -- strategy inactive. No recommendations will be inserted."
+            strategy_counts[strategy.name] = 0
+
+    logger.info(
+        "Technical scan complete. Scanned: %d, Qualified: %d",
+        scanned_count,
+        signals_qualified,
+    )
+
+    ranked_signals: list[dict] = []
+    error_msg = None
+
+    if all_signals and trade_allowed:
+        final_signals = deduplicate_by_ticker(all_signals)
+        final_signals.sort(key=lambda x: x["quality_score"], reverse=True)
+        final_signals = final_signals[:TOP_N]
+
+        t1 = sum(1 for s in final_signals if s["tier_label"] == "Strong Buy")
+        t2 = sum(1 for s in final_signals if s["tier_label"] == "Buy")
+        t3 = sum(1 for s in final_signals if s["tier_label"] == "Watch")
+        t4 = sum(1 for s in final_signals if s["tier_label"] == "Speculative")
+        logger.info(
+            "Final recommendations: %d signals (T1: %d, T2: %d, T3: %d, Speculative: %d)",
+            len(final_signals),
+            t1,
+            t2,
+            t3,
+            t4,
         )
+
+        for sig in final_signals:
+            ranked_signals.append(
+                {
+                    "scan_date": sig["scan_date"],
+                    "ticker": sig["ticker"],
+                    "company_name": sig["company_name"],
+                    "industry": sig["industry"],
+                    "price": sig["price"],
+                    "entry_price": sig["entry_price"],
+                    "stop_loss": sig["stop_loss"],
+                    "exit_price": sig["exit_price"],
+                    "upside_pct": sig["upside_pct"],
+                    "risk_reward": sig["risk_reward"],
+                    "current_rsi": sig["current_rsi"],
+                    "rsi_min_10d": sig.get("rsi_min_10d"),
+                    "volume_ratio": sig["volume_ratio"],
+                    "adx_value": sig["adx_value"],
+                    "macd_histogram": sig["macd_histogram"],
+                    "ema20": sig["ema20"],
+                    "score": sig["composite_score"],
+                    "composite_score": sig["composite_score"],
+                    "quality_score": sig["quality_score"],
+                    "tier_label": sig["tier_label"],
+                    "strategy": sig["strategy"],
+                    "regime": regime_str,
+                    "is_fallback": bool(sig.get("is_fallback", False)),
+                    "target_1": sig.get("target_1"),
+                    "target_2": sig.get("target_2"),
+                    "target_3": sig.get("target_3"),
+                    "target_1_pct": sig.get("target_1_pct"),
+                    "target_2_pct": sig.get("target_2_pct"),
+                    "target_3_pct": sig.get("target_3_pct"),
+                    "weighted_rr": sig.get("weighted_rr"),
+                    "position_sizing": sig.get("position_sizing", "50/30/20"),
+                    "narrative": sig.get("narrative"),
+                }
+            )
+    elif not trade_allowed:
+        logger.warning("Bear market -- strategy inactive. No recommendations will be inserted.")
     else:
         logger.info("No technically qualified signals found.")
 
-    # ── Step 6: Final check ──────────────────────────────────
-    rsi_breadth_pct_primary = round(100.0 * rsi_passed_count / scanned_count, 1) if scanned_count > 0 else 0.0
+    rsi_breadth_pct = round(100.0 * rsi_passed_count / scanned_count, 1) if scanned_count > 0 else 0.0
     signals_recommended = len(ranked_signals)
     if signals_recommended == 0:
         logger.info("No high-confidence setups tonight. Cash is a position.")
 
-    # ── Step 6: Archive and update signals ──────────────────
     duration = round(time.time() - start_time, 2)
     status = "success"
 
     if not args.dry_run:
-        # Separate archiving and clearing from insertion to prevent silent swallowing or orphaned deletes
         try:
             archive_current_signals(supabase, regime_str, metrics_map)
             logger.info("Clearing previous signals from Supabase...")
             supabase.table("signals").delete().neq("ticker", "").execute()
             logger.info("Previous signals cleared.")
         except Exception as e:
-            logger.error(f"Failed to clear/archive signals: {e}")
+            logger.error("Failed to clear/archive signals: %s", e)
             error_msg = f"Archive/Clear failed: {e}"
 
         try:
-            # Insert ranked signals
             if ranked_signals:
-                logger.info(f"Inserting {len(ranked_signals)} ranked signals...")
+                logger.info("Inserting %d ranked signals...", len(ranked_signals))
                 supabase.table("signals").insert(ranked_signals).execute()
                 logger.info("Signals inserted successfully.")
             else:
@@ -957,13 +507,16 @@ def main():
         except Exception as e:
             status = "failed"
             error_msg = str(e)
-            logger.error(f"Database insertion failed: {e}")
+            logger.error("Database insertion failed: %s", e)
     else:
         logger.info("[DRY RUN] Skipped archiving, clearing, and inserting signals.")
 
-    # ── Step 7: Log to scan_log ──────────────────────────────
-    rsi_breadth_pct = rsi_breadth_pct_primary  # already computed above
-    logger.info(f"RSI breadth: {rsi_passed_count}/{scanned_count} tickers passed RSI gate ({rsi_breadth_pct}%)")
+    logger.info(
+        "RSI breadth: %d/%d tickers passed RSI gate (%.1f%%)",
+        rsi_passed_count,
+        scanned_count,
+        rsi_breadth_pct,
+    )
 
     scan_log_row = {
         "scan_date": signal_date,
@@ -988,18 +541,19 @@ def main():
         "rsi_breadth_pct": rsi_breadth_pct,
         "signals_strong_buy": signals_strong_buy,
         "signals_buy": signals_buy,
+        "strategy_breakdown": strategy_counts,
     }
 
     if not args.dry_run:
         try:
-            logger.info(f"Logging scan to scan_log: {scan_log_row}")
+            logger.info("Logging scan to scan_log: %s", scan_log_row)
             supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
             logger.info("Scan log recorded successfully.")
         except Exception as e:
-            logger.error(f"Failed to record scan log: {e}")
+            logger.error("Failed to record scan log: %s", e)
             sys.exit(1)
     else:
-        logger.info(f"[DRY RUN] Skipped logging scan to scan_log. Row: {scan_log_row}")
+        logger.info("[DRY RUN] Skipped logging scan to scan_log. Row: %s", scan_log_row)
 
     if status == "failed":
         sys.exit(1)
@@ -1008,9 +562,13 @@ def main():
     logger.info("Strategy 1.3 Rev B signal generation complete.")
     logger.info(
         "Regime: %s | Scanned: %d | Qualified: %d | Recommended: %d | Duration: %.1fs",
-        regime_str.upper(), scanned_count, signals_qualified, signals_recommended, duration,
+        regime_str.upper(),
+        scanned_count,
+        signals_qualified,
+        signals_recommended,
+        duration,
     )
-    logger.info("="  * 60)
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

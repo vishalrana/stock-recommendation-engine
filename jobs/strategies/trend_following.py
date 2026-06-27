@@ -166,7 +166,7 @@ class TrendFollowingStrategy(StrategyInterface):
             tier_label = 'Speculative'
 
         # === GUARDRAILS ===
-        MIN_WIN_RATE = 40.0
+        MIN_WIN_RATE = 50.0
         MIN_EXPECTANCY = 1.0
         MIN_SAMPLE = 10
 

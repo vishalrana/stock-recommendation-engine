@@ -431,7 +431,7 @@ def main():
 
     if all_signals and trade_allowed:
         final_signals = deduplicate_by_ticker(all_signals)
-        final_signals.sort(key=lambda x: x["quality_score"], reverse=True)
+        final_signals.sort(key=lambda x: x.get('quality_score', x['composite_score']), reverse=True)
         final_signals = final_signals[:TOP_N]
 
         t1 = sum(1 for s in final_signals if s["tier_label"] == "Strong Buy")

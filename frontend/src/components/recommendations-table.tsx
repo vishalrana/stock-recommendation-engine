@@ -139,13 +139,24 @@ function ExpandableDetails({ row }: { row: any }) {
         </div>
       </div>
 
-      {/* Actions */}
       {row.original.strategy === 'Trend Following' && (
         <div className="mt-2 mb-4 text-xs text-purple-600 bg-purple-50 rounded p-2">
           <strong>Trend Following:</strong> Hold until trailing stop (10-day low) hit. 
           Targets are 20% / 35% / 50% — trends run further than pullbacks.
         </div>
       )}
+      {(() => {
+        const riskPct = row.original.risk_pct || 0;
+        if (riskPct > 15) {
+          return (
+            <div className="mt-3 mb-4 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-700">
+              <strong>⚠️ High Risk:</strong> {riskPct.toFixed(1)}% stop distance. 
+              Consider a smaller position size or wider stop if volatility is expected.
+            </div>
+          );
+        }
+        return null;
+      })()}
       <div className="flex gap-2 mt-4 pt-2">
         <a
           href={`https://www.tradingview.com/chart/?symbol=${row.original.ticker}`}
@@ -163,9 +174,7 @@ function ExpandableDetails({ row }: { row: any }) {
 }
 
 export default function RecommendationsTable({ data, regime, scanLog }: TableProps) {
-  const [sorting, setSorting] = useState<SortingState>([
-    { id: 'ticker', desc: false }
-  ]);
+  const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [expanded, setExpanded] = useState<ExpandedState>({});
 
@@ -304,11 +313,15 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
           const stop = row.original.stop_loss;
           const risk = entry && stop ? entry - stop : 0;
           const riskPct = entry && risk ? (risk / entry) * 100 : 0;
+          const isHighRisk = riskPct > 15;
           const maxShares = risk > 0 ? Math.floor(100 / risk) : 0;
           return (
             <div className="text-xs group relative cursor-help" title={`Risk per share. For $10K account at 1% risk = ${maxShares} shares`}>
-              <div className="text-red-600 font-semibold">-${Math.round(risk)}</div>
-              <div className="text-gray-500">({riskPct.toFixed(1)}%)</div>
+              <div className={`font-medium ${isHighRisk ? 'text-orange-600 font-semibold' : 'text-red-600'}`}>-${Math.round(risk)}</div>
+              <div className={`${isHighRisk ? 'text-orange-500 font-semibold' : 'text-gray-500'}`}>
+                ({riskPct.toFixed(1)}%)
+                {isHighRisk && ' ⚠️'}
+              </div>
             </div>
           );
         },

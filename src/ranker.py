@@ -201,21 +201,21 @@ class SignalRanker:
             
             prelim = 0.30 * m + 0.40 * e + 0.20 * w + 0.10 * reg_score
             
-            # Apply absolute composite floor
-            expectancy_pct = row.get("expectancy_pct", 0.0)
-            win_rate = row.get("win_rate", 0.0)
-            if expectancy_pct < 0.0 and win_rate < 25.0:
-                prelim = min(prelim, 40.0)
+            # Apply absolute composite floor (commented out per filter relaxation)
+            # expectancy_pct = row.get("expectancy_pct", 0.0)
+            # win_rate = row.get("win_rate", 0.0)
+            # if expectancy_pct < 0.0 and win_rate < 25.0:
+            #     prelim = min(prelim, 40.0)
                 
             preliminary_scores.append(prelim)
 
         df_filtered["regime_score"] = regime_scores
         df_filtered["preliminary_score"] = preliminary_scores
 
-        # Sort candidates by preliminary score to pick top 12
+        # Sort candidates by preliminary score to pick top 30 (expanded from 12)
         df_sorted_prelim = df_filtered.sort_values("preliminary_score", ascending=False)
-        top_12_tickers = set(df_sorted_prelim.head(12)["ticker"].tolist())
-        logger.info("Selected top 12 candidates for Context/NLP scoring: %s", list(top_12_tickers))
+        top_30_tickers = set(df_sorted_prelim.head(30)["ticker"].tolist())
+        logger.info("Selected top 30 candidates for Context/NLP scoring: %s", list(top_30_tickers))
 
         # 6. Context Scoring & Final Composite Score
         context_scores = []
@@ -225,7 +225,7 @@ class SignalRanker:
         for _, row in df_filtered.iterrows():
             ticker = row["ticker"]
             c_score = 0.0
-            if ticker in top_12_tickers:
+            if ticker in top_30_tickers:
                 try:
                     price_df = self._fetch_price_history(ticker)
                     if price_df is not None and not price_df.empty:
@@ -238,24 +238,14 @@ class SignalRanker:
             
             context_scores.append(c_score)
             
-            # Compute final composite score using new weights (top 12) or keep prelim
+            # Compute final composite score using shifted weights (25/35/15/10/15) for all candidates
             row_dict = row.to_dict()
             row_dict["context_score"] = c_score
             row_dict["regime_score"] = row["regime_score"]
             
-            if ticker in top_12_tickers:
-                res = self.compute_composite_score(row_dict, regime)
-                final_score = res["total"]
-                breakdown = res["breakdown"]
-            else:
-                final_score = row["preliminary_score"]
-                breakdown = {
-                    "momentum": round(row.get("momentum_score", 50.0), 4),
-                    "expectancy": round(row.get("expectancy_score", 50.0), 4),
-                    "winrate": round(row.get("winrate_score", 50.0), 4),
-                    "regime": round(row["regime_score"], 4),
-                    "context": 0.0,
-                }
+            res = self.compute_composite_score(row_dict, regime)
+            final_score = res["total"]
+            breakdown = res["breakdown"]
                 
             composite_scores.append(final_score)
             score_breakdowns.append(breakdown)
@@ -263,6 +253,12 @@ class SignalRanker:
         df_filtered["context_score"] = context_scores
         df_filtered["composite_score"] = composite_scores
         df_filtered["score_breakdown"] = score_breakdowns
+
+        # Log context scores for all evaluated candidates in top 30
+        computed_scores_log = [
+            f"{t}: {s:.1f}" for t, s in zip(df_filtered["ticker"], df_filtered["context_score"]) if t in top_30_tickers
+        ]
+        logger.info("Context scores computed for top candidates: %s", ", ".join(computed_scores_log))
 
         # 6. Assign Tier Labels
         # Tier 1 "Strong Buy": score >= 65, expectancy_pct > 0.0, win_rate >= 35.0, total_trades >= 10
@@ -329,6 +325,38 @@ class SignalRanker:
             selected = pd.concat([t1_eligible, t2_eligible]).sort_values("composite_score", ascending=False)
 
         result = selected.head(top_n).copy()
+
+        # On-the-fly fallback context scoring for candidates in final recommendations that missed top 30
+        fallback_happened = False
+        for idx, row in result.iterrows():
+            ticker = row["ticker"]
+            if row.get("context_score", 0.0) == 0.0 and ticker not in top_30_tickers:
+                logger.info("Triggering fallback on-the-fly context scoring for final recommended setup: %s", ticker)
+                c_score = 0.0
+                try:
+                    price_df = self._fetch_price_history(ticker)
+                    if price_df is not None and not price_df.empty:
+                        ctx = self.context_aggregator.get_aggregated(ticker, price_df)
+                        current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
+                        c_score = self.context_scorer.calculate(ctx, float(current_price))
+                except Exception as e:
+                    logger.warning("Failed context aggregation for fallback ticker %s: %s", ticker, e)
+                    c_score = 0.0
+
+                result.at[idx, "context_score"] = c_score
+                
+                # Recompute composite score
+                row_dict = result.loc[idx].to_dict()
+                row_dict["context_score"] = c_score
+                row_dict["regime_score"] = row["regime_score"]
+                res = self.compute_composite_score(row_dict, regime)
+                result.at[idx, "composite_score"] = res["total"]
+                result.at[idx, "score_breakdown"] = res["breakdown"]
+                fallback_happened = True
+
+        if fallback_happened:
+            result = result.sort_values("composite_score", ascending=False)
+
         result = result.drop(columns=["temp_tier"])
         return result.reset_index(drop=True)
 

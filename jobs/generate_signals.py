@@ -276,9 +276,6 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                     "position_sizing": sig.get("position_sizing", "50/30/20"),
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig.get("strategy_name"),
-                    "target_1_price": sig.get("target_1_price"),
-                    "target_2_price": sig.get("target_2_price"),
-                    "target_3_price": sig.get("target_3_price"),
                     "outcome": "open",
                     "context_score": sig.get("context_score", 0.0),
                 }
@@ -301,6 +298,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
     parser.add_argument(
         "--force-refresh",
+        "--force",
+        dest="force_refresh",
         action="store_true",
         help="Delete all cached parquet files and re-download fresh data from yfinance for the full universe",
     )
@@ -559,9 +558,9 @@ def main():
             t2_pct = float(sig.get("target_2_pct") or 0.0)
             t3_pct = float(sig.get("target_3_pct") or 0.0)
 
-            target_1_price = round(entry_price * (1 + t1_pct / 100), 2) if t1_pct else None
-            target_2_price = round(entry_price * (1 + t2_pct / 100), 2) if t2_pct else None
-            target_3_price = round(entry_price * (1 + t3_pct / 100), 2) if t3_pct else None
+            target_1 = round(entry_price * (1 + t1_pct / 100), 2) if t1_pct else None
+            target_2 = round(entry_price * (1 + t2_pct / 100), 2) if t2_pct else None
+            target_3 = round(entry_price * (1 + t3_pct / 100), 2) if t3_pct else None
 
             ranked_signals.append(
                 {
@@ -588,9 +587,9 @@ def main():
                     "strategy": sig["strategy"],
                     "regime": regime_str,
                     "is_fallback": bool(sig.get("is_fallback", False)),
-                    "target_1": sig.get("target_1"),
-                    "target_2": sig.get("target_2"),
-                    "target_3": sig.get("target_3"),
+                    "target_1": target_1,
+                    "target_2": target_2,
+                    "target_3": target_3,
                     "target_1_pct": sig.get("target_1_pct"),
                     "target_2_pct": sig.get("target_2_pct"),
                     "target_3_pct": sig.get("target_3_pct"),
@@ -598,9 +597,6 @@ def main():
                     "position_sizing": sig.get("position_sizing", "50/30/20"),
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig["strategy"],
-                    "target_1_price": target_1_price,
-                    "target_2_price": target_2_price,
-                    "target_3_price": target_3_price,
                     "context_score": sig.get("context_score", 0.0),
                 }
             )

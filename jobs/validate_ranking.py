@@ -36,9 +36,9 @@ def evaluate_signal(row: dict) -> dict | None:
     scan_date = pd.Timestamp(row['scan_date']).date()
     entry_price = float(row['entry_price'])
     stop_loss = float(row['stop_loss'])
-    target_1 = float(row['target_1_price']) if row.get('target_1_price') else None
-    target_2 = float(row['target_2_price']) if row.get('target_2_price') else None
-    target_3 = float(row['target_3_price']) if row.get('target_3_price') else None
+    target_1 = float(row['target_1']) if row.get('target_1') else None
+    target_2 = float(row['target_2']) if row.get('target_2') else None
+    target_3 = float(row['target_3']) if row.get('target_3') else None
 
     if not target_1:
         return None
@@ -121,7 +121,7 @@ def run_validation():
 
     # Fetch all open signals old enough to evaluate
     response = supabase.table('signals_history') \
-        .select('id, ticker, scan_date, entry_price, stop_loss, target_1_price, target_2_price, target_3_price') \
+        .select('id, ticker, scan_date, entry_price, stop_loss, target_1, target_2, target_3') \
         .eq('outcome', 'open') \
         .lte('scan_date', str(cutoff_date)) \
         .execute()

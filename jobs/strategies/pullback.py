@@ -584,6 +584,7 @@ class PullbackRecoveryStrategy(StrategyInterface):
                     "weighted_rr": row.get("weighted_rr"),
                     "position_sizing": row.get("position_sizing", "50/30/20"),
                     "narrative": row.get("narrative"),
+                    "context_score": float(row["context_score"]) if "context_score" in row and pd.notna(row["context_score"]) else 0.0,
                     "risk_dollar": round(float(row["entry_price"] - row["stop_loss"]), 2),
                     "risk_pct": round(
                         float((row["entry_price"] - row["stop_loss"]) / row["entry_price"] * 100),

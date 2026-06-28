@@ -552,6 +552,34 @@ def main():
             t4,
         )
 
+        # === Post-Ranking Context Safety Net ===
+        # Ensure no final signals slip through without context_score
+        from src.providers.context.aggregator import ContextAggregator
+        from src.scorers.context_scorer import ContextScorer
+        from src.ranker import SignalRanker
+        
+        context_aggregator = ContextAggregator()
+        context_scorer = ContextScorer()
+        ranker = SignalRanker()
+        
+        for sig in final_signals:
+            if sig.get("context_score", 0.0) == 0.0 or sig.get("context_score") is None:
+                logger.info(f"[CONTEXT FALLBACK] Computing context on-the-fly for {sig['ticker']}")
+                try:
+                    price_df = ranker._fetch_price_history(sig["ticker"])
+                    if price_df is not None and not price_df.empty:
+                        ctx = context_aggregator.get_aggregated(sig["ticker"], price_df)
+                        tech_data = {
+                            'rsi': sig.get("current_rsi", 50),
+                            'adx': sig.get("adx_value", 20),
+                            'volume_ratio': sig.get("volume_ratio", 1.0),
+                        }
+                        sig["context_score"] = context_scorer.calculate(ctx, float(sig["entry_price"]), tech_data)
+                        logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']}")
+                except Exception as e:
+                    logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
+                    sig["context_score"] = 0.0
+
         for sig in final_signals:
             entry_price = float(sig["entry_price"])
             t1_pct = float(sig.get("target_1_pct") or 0.0)

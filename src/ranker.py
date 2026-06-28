@@ -215,16 +215,16 @@ class SignalRanker:
         df_filtered["regime_score"] = regime_scores
         df_filtered["preliminary_score"] = preliminary_scores
 
-        # Sort candidates by preliminary score to pick top 30 (expanded from 12)
+        # Sort candidates by preliminary score to pick top 50 (expanded from 30)
         df_sorted_prelim = df_filtered.sort_values("preliminary_score", ascending=False)
-        top_30_tickers = set(df_sorted_prelim.head(30)["ticker"].tolist())
-        logger.info("Selected top 30 candidates for Context/NLP scoring: %s", list(top_30_tickers))
+        top_50_tickers = set(df_sorted_prelim.head(50)["ticker"].tolist())
+        logger.info("Selected top 50 candidates for Context/NLP scoring: %s", list(top_50_tickers))
 
         # Check if NLP should be skipped (for debugging)
         skip_nlp = os.getenv("SKIP_NLP", "false").lower() == "true"
         if skip_nlp:
             logger.info("SKIP_NLP=true - skipping context scoring")
-            top_30_tickers = set()
+            top_50_tickers = set()
 
         # 6. Context Scoring & Final Composite Score (Parallelized)
         def compute_context_score(ticker: str, row: dict) -> tuple:
@@ -241,15 +241,15 @@ class SignalRanker:
                 c_score = 0.0
             return ticker, c_score
 
-        # Parallel context scoring for top 30 candidates
+        # Parallel context scoring for top 50 candidates
         context_score_map = {}
-        if top_30_tickers and not skip_nlp:
-            logger.info("Starting parallel context scoring for %d candidates", len(top_30_tickers))
+        if top_50_tickers and not skip_nlp:
+            logger.info("Starting parallel context scoring for %d candidates", len(top_50_tickers))
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {
                     executor.submit(compute_context_score, ticker, row.to_dict()): ticker
                     for _, row in df_filtered.iterrows()
-                    if row["ticker"] in top_30_tickers
+                    if row["ticker"] in top_50_tickers
                 }
                 
                 for future in as_completed(futures):
@@ -284,9 +284,9 @@ class SignalRanker:
         df_filtered["composite_score"] = composite_scores
         df_filtered["score_breakdown"] = score_breakdowns
 
-        # Log context scores for all evaluated candidates in top 30
+        # Log context scores for all evaluated candidates in top 50
         computed_scores_log = [
-            f"{t}: {s:.1f}" for t, s in zip(df_filtered["ticker"], df_filtered["context_score"]) if t in top_30_tickers
+            f"{t}: {s:.1f}" for t, s in zip(df_filtered["ticker"], df_filtered["context_score"]) if t in top_50_tickers
         ]
         logger.info("Context scores computed for top candidates: %s", ", ".join(computed_scores_log))
 
@@ -360,7 +360,7 @@ class SignalRanker:
         fallback_happened = False
         for idx, row in result.iterrows():
             ticker = row["ticker"]
-            if row.get("context_score", 0.0) == 0.0 and ticker not in top_30_tickers:
+            if row.get("context_score", 0.0) == 0.0 and ticker not in top_50_tickers:
                 logger.info("Triggering fallback on-the-fly context scoring for final recommended setup: %s", ticker)
                 c_score = 0.0
                 try:

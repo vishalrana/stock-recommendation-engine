@@ -20,7 +20,7 @@ class ContextScorer:
             'global_multiplier': 0.15
         }
     
-    def calculate(self, ctx: AggregatedContext, current_price: float) -> float:
+    def calculate(self, ctx: AggregatedContext, current_price: float, tech_data=None) -> float:
         score = 0.0
         
         # 1. Analyst Alignment (Max 30)
@@ -58,6 +58,20 @@ class ContextScorer:
         # 5. Price/Volume Event (Max 15)
         if ctx.price_volume_signal > 0:
             score += min(15, ctx.price_volume_signal * 10)
+        
+        # Fallback: If raw score is still 0 and tech_data provided, use technical heuristic
+        if score == 0 and tech_data:
+            rsi = tech_data.get('rsi', 50)
+            adx = tech_data.get('adx', 20)
+            vol_ratio = tech_data.get('volume_ratio', 1.0)
+            
+            # Simple heuristic to give a small meaningful score (0-15 points)
+            fallback = (
+                max(0, (rsi - 30) / 70) * 5 +   # 0-5 points for RSI momentum
+                max(0, (adx - 10) / 40) * 5 +   # 0-5 points for trend strength
+                max(0, (vol_ratio - 0.5) * 10)  # 0-5 points for volume confirmation
+            )
+            score = max(score, min(15, fallback))
         
         # Clamp to [0, 100] and apply global weight (15%)
         raw_score = max(0, min(100, score))

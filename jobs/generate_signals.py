@@ -275,6 +275,11 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                     "weighted_rr": sig.get("weighted_rr"),
                     "position_sizing": sig.get("position_sizing", "50/30/20"),
                     "narrative": sig.get("narrative"),
+                    "strategy_name": sig.get("strategy_name"),
+                    "target_1_price": sig.get("target_1_price"),
+                    "target_2_price": sig.get("target_2_price"),
+                    "target_3_price": sig.get("target_3_price"),
+                    "outcome": "open",
                 }
             )
 
@@ -547,6 +552,15 @@ def main():
         )
 
         for sig in final_signals:
+            entry_price = float(sig["entry_price"])
+            t1_pct = float(sig.get("target_1_pct") or 0.0)
+            t2_pct = float(sig.get("target_2_pct") or 0.0)
+            t3_pct = float(sig.get("target_3_pct") or 0.0)
+
+            target_1_price = round(entry_price * (1 + t1_pct / 100), 2) if t1_pct else None
+            target_2_price = round(entry_price * (1 + t2_pct / 100), 2) if t2_pct else None
+            target_3_price = round(entry_price * (1 + t3_pct / 100), 2) if t3_pct else None
+
             ranked_signals.append(
                 {
                     "scan_date": sig["scan_date"],
@@ -581,6 +595,10 @@ def main():
                     "weighted_rr": sig.get("weighted_rr"),
                     "position_sizing": sig.get("position_sizing", "50/30/20"),
                     "narrative": sig.get("narrative"),
+                    "strategy_name": sig["strategy"],
+                    "target_1_price": target_1_price,
+                    "target_2_price": target_2_price,
+                    "target_3_price": target_3_price,
                 }
             )
     else:

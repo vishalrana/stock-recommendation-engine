@@ -100,9 +100,11 @@ jobs:
           pip install -r requirements.txt
           pip install -r jobs/requirements.txt
           echo "✅ Dependencies installed."
-      - name: Validate 20-day-old signals
+      - name: Run outcome validation
         env:
           PYTHONPATH: .
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m jobs.validate_ranking --auto
+        run: |
+          python -m jobs.validate_ranking
+          echo "✅ Outcome validation complete."

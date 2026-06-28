@@ -51,3 +51,9 @@ def get_client() -> Client:
         sys.exit(1)
 
     return create_client(url, key)
+
+# Convenience instance for direct import
+try:
+    supabase = get_client()
+except Exception:
+    supabase = None

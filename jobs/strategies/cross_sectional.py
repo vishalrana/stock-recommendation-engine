@@ -83,28 +83,25 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         position_sizing = "50/30/20"
 
         # Narrative
-        def generate_xsm_narrative(returns_3m, volume_ratio, adx_value):
-            parts = []
-            if returns_3m > 30:
-                parts.append(f"Top performer +{returns_3m:.0f}% in 3M")
-            elif returns_3m > 20:
-                parts.append(f"Strong performer +{returns_3m:.0f}% in 3M")
-            else:
-                parts.append(f"Outperforming +{returns_3m:.0f}% in 3M")
+        parts = []
+        if returns_3m > 30:
+            parts.append(f"Top performer +{returns_3m:.0f}% in 3M")
+        elif returns_3m > 20:
+            parts.append(f"Strong performer +{returns_3m:.0f}% in 3M")
+        else:
+            parts.append(f"Outperforming +{returns_3m:.0f}% in 3M")
 
-            if volume_ratio > 1.5:
-                parts.append("volume confirming")
-            else:
-                parts.append("normal volume")
+        if volume_ratio > 1.5:
+            parts.append("volume confirming")
+        else:
+            parts.append("normal volume")
 
-            if adx_value > 25:
-                parts.append("powerful trend")
-            else:
-                parts.append("trend intact")
+        if adx_value > 25:
+            parts.append("powerful trend")
+        else:
+            parts.append("trend intact")
 
-            return ", ".join(parts) + "."
-
-        narrative = generate_xsm_narrative(returns_3m, volume_ratio, adx_value)
+        narrative = ", ".join(parts) + "."
 
         # Scoring: rank by 3-month return primarily
         past_win_rate = metrics.get('win_rate', 55.0) if metrics else 55.0

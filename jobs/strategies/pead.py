@@ -138,26 +138,23 @@ class PEADStrategy(StrategyInterface):
         position_sizing = "50/30/20"
 
         # === NARRATIVE ===
-        def generate_pead_narrative(days_since_earnings, gap_pct, hold_pct, earnings_volume, volume_avg):
-            parts = []
-            parts.append(f"Earnings gap +{gap_pct:.1f}% {days_since_earnings}d ago")
+        parts = []
+        parts.append(f"Earnings gap +{gap_pct:.1f}% {days_since_earnings}d ago")
 
-            if hold_pct > 0.8:
-                parts.append("holding strong")
-            elif hold_pct > 0.6:
-                parts.append("holding most gains")
-            else:
-                parts.append("pulling back to support")
+        if hold_pct > 0.8:
+            parts.append("holding strong")
+        elif hold_pct > 0.6:
+            parts.append("holding most gains")
+        else:
+            parts.append("pulling back to support")
 
-            vol_ratio = earnings_volume / volume_avg if volume_avg > 0 else 0
-            if vol_ratio > 3:
-                parts.append("massive volume")
-            elif vol_ratio > 2:
-                parts.append("strong volume")
+        vol_ratio = earnings_volume / volume_avg if volume_avg > 0 else 0
+        if vol_ratio > 3:
+            parts.append("massive volume")
+        elif vol_ratio > 2:
+            parts.append("strong volume")
 
-            return ", ".join(parts) + "."
-
-        narrative = generate_pead_narrative(days_since_earnings, gap_pct, hold_pct, earnings_volume, volume_avg)
+        narrative = ", ".join(parts) + "."
 
         # === COMPOSITE SCORING ===
         past_win_rate = metrics.get('win_rate', 55.0) if metrics else 55.0

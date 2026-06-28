@@ -85,28 +85,25 @@ class Week52HighStrategy(StrategyInterface):
         position_sizing = "50/30/20"
 
         # Narrative
-        def generate_52w_narrative(pct_vs_52w, volume_ratio, adx_value):
-            parts = []
-            if pct_vs_52w > -0.5:
-                parts.append("At 52-week high")
-            else:
-                parts.append("Near 52-week high")
+        parts = []
+        if pct_vs_52w > -0.5:
+            parts.append("At 52-week high")
+        else:
+            parts.append("Near 52-week high")
 
-            if volume_ratio > 2:
-                parts.append("massive breakout volume")
-            elif volume_ratio > 1.5:
-                parts.append("strong breakout volume")
-            else:
-                parts.append("volume confirming")
+        if volume_ratio > 2:
+            parts.append("massive breakout volume")
+        elif volume_ratio > 1.5:
+            parts.append("strong breakout volume")
+        else:
+            parts.append("volume confirming")
 
-            if adx_value > 25:
-                parts.append("powerful trend")
-            else:
-                parts.append("trend intact")
+        if adx_value > 25:
+            parts.append("powerful trend")
+        else:
+            parts.append("trend intact")
 
-            return ", ".join(parts) + "."
-
-        narrative = generate_52w_narrative(pct_vs_52w, volume_ratio, adx_value)
+        narrative = ", ".join(parts) + "."
 
         # Scoring
         past_win_rate = metrics.get('win_rate', 55.0) if metrics else 55.0

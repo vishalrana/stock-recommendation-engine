@@ -13,7 +13,7 @@ import {
   ExpandedState,
 } from '@tanstack/react-table';
 import { Recommendation, ScanLog } from '../types/database';
-import { ArrowUpDown, ArrowUp, ArrowDown, Search } from 'lucide-react';
+import { ArrowUpDown, ArrowUp, ArrowDown, Search, HelpCircle } from 'lucide-react';
 
 interface TableProps {
   data: Recommendation[];
@@ -115,10 +115,18 @@ function ExpandableDetails({ row }: { row: any }) {
       {/* Performance Metrics */}
       <div className="mb-4">
         <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">📈 Performance Metrics</h4>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm bg-white p-3 border border-gray-100 rounded-md shadow-sm">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm bg-white p-3 border border-gray-100 rounded-md shadow-sm">
           <div>
             <div className="text-gray-500 text-xs">Composite Score</div>
             <div className="text-gray-900 font-semibold mt-0.5">{row.original.composite_score?.toFixed(1) || '-'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 text-xs">Context Score</div>
+            <div className="text-gray-900 font-semibold mt-0.5">
+              {row.original.context_score !== undefined && row.original.context_score !== null 
+                ? `${row.original.context_score.toFixed(1)} / 15.0` 
+                : '-'}
+            </div>
           </div>
           <div>
             <div className="text-gray-500 text-xs">Expectancy</div>
@@ -390,6 +398,60 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
           );
         },
         size: 100,
+      },
+      {
+        id: 'context_score',
+        accessorKey: 'context_score',
+        header: () => (
+          <div className="group relative flex items-center gap-1 cursor-help justify-center sm:justify-start">
+            <span>Context</span>
+            <HelpCircle className="h-3.5 w-3.5 text-gray-400 hover:text-gray-600 transition-colors" />
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs rounded-lg p-2.5 z-30 w-48 shadow-xl leading-relaxed pointer-events-none border border-gray-800 font-normal normal-case">
+              Analyst ratings + Earnings surprises + News sentiment + Fundamentals
+            </div>
+          </div>
+        ),
+        cell: ({ row }) => {
+          const score = row.original.context_score;
+          if (score === undefined || score === null || score === 0) {
+            return <span className="text-gray-300 text-xs">—</span>;
+          }
+
+          let bgColor, textColor, label;
+          if (score > 10) {
+            bgColor = 'bg-emerald-100 border border-emerald-200';
+            textColor = 'text-emerald-700';
+            label = 'Strong Positive';
+          } else if (score > 7) {
+            bgColor = 'bg-blue-100 border border-blue-200';
+            textColor = 'text-blue-700';
+            label = 'Positive';
+          } else if (score > 4) {
+            bgColor = 'bg-yellow-100 border border-yellow-200';
+            textColor = 'text-yellow-700';
+            label = 'Neutral';
+          } else {
+            bgColor = 'bg-gray-100 border border-gray-200';
+            textColor = 'text-gray-500';
+            label = 'Cautious';
+          }
+
+          return (
+            <div className="group relative inline-block cursor-help">
+              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${bgColor} ${textColor}`}>
+                {score.toFixed(1)}
+              </span>
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs rounded-lg p-3 z-30 w-56 shadow-xl leading-relaxed whitespace-pre-line pointer-events-none border border-gray-800">
+                <div className="font-bold text-gray-200 border-b border-gray-700 pb-1 mb-1">Context Score: {score.toFixed(1)}/15</div>
+                <div className="text-gray-300">Verdict: <span className="font-semibold text-white">{label}</span></div>
+                <div className="text-gray-400 mt-2 text-[10px] pt-1.5 border-t border-gray-805">
+                  Calculated from analyst consensus estimates, quarterly earnings surprise surprise, Google News FinBERT sentiment, and balance sheet safety.
+                </div>
+              </div>
+            </div>
+          );
+        },
+        size: 90,
       },
       {
         id: 'chart',

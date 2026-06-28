@@ -44,6 +44,7 @@ export interface Recommendation {
   quality_score?: number | null;
   wins?: number | null;
   losses?: number | null;
+  context_score?: number | null;
 }
 
 export interface ScanLog {

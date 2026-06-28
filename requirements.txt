@@ -7,10 +7,3 @@ requests>=2.31
 beautifulsoup4>=4.12
 lxml>=4.9
 python-dateutil>=2.8
-
-transformers>=4.30.0
-torch>=2.0.0
-feedparser>=6.0.0
-beautifulsoup4>=4.12.0
-pyyaml>=6.0
-requests>=2.31.0

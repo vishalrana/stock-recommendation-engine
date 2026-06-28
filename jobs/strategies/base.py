@@ -31,7 +31,7 @@ class StrategyInterface(ABC):
         weighted_rr, position_sizing, risk_dollar, risk_pct, composite_score,
         tier_label, quality_score, narrative, past_win_rate, total_trades,
         expectancy_pct, current_rsi, adx_value, volume_ratio, macd_histogram,
-        ema20, is_blocked, blocked_reason, strategy.
+        ema20, is_blocked, blocked_reason, strategy, context_score.
         """
         pass
 

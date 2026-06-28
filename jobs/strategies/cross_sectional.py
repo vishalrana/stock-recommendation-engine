@@ -2,6 +2,7 @@ import logging
 from typing import Optional, List
 import pandas as pd
 from jobs.strategies.base import StrategyInterface
+from src.utils.candidate_builder import build_candidate_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,7 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Cross-Sectional Momentum',
+            'context_score': 0.0,  # This strategy doesn't use context scoring yet
             'returns_3m': round(returns_3m, 1),  # For ranking
         }
 

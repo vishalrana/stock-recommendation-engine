@@ -4,6 +4,7 @@ from typing import Optional, List
 import pandas as pd
 import yfinance as yf
 from jobs.strategies.base import StrategyInterface
+from src.utils.candidate_builder import build_candidate_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,7 @@ class PEADStrategy(StrategyInterface):
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Post-Earnings Drift',
+            'context_score': 0.0,  # This strategy doesn't use context scoring yet
             'days_since_earnings': days_since_earnings,
         }
 

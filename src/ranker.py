@@ -16,9 +16,12 @@ import os
 from typing import Optional
 import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 from src.providers.context.aggregator import ContextAggregator
 from src.scorers.context_scorer import ContextScorer
+from src.data.cache_manager_v2 import get_cache_manager
 
 logger = logging.getLogger(__name__)
 
@@ -217,24 +220,51 @@ class SignalRanker:
         top_30_tickers = set(df_sorted_prelim.head(30)["ticker"].tolist())
         logger.info("Selected top 30 candidates for Context/NLP scoring: %s", list(top_30_tickers))
 
-        # 6. Context Scoring & Final Composite Score
+        # Check if NLP should be skipped (for debugging)
+        skip_nlp = os.getenv("SKIP_NLP", "false").lower() == "true"
+        if skip_nlp:
+            logger.info("SKIP_NLP=true - skipping context scoring")
+            top_30_tickers = set()
+
+        # 6. Context Scoring & Final Composite Score (Parallelized)
+        def compute_context_score(ticker: str, row: dict) -> tuple:
+            """Compute context score for a single ticker."""
+            c_score = 0.0
+            try:
+                price_df = self._fetch_price_history(ticker)
+                if price_df is not None and not price_df.empty:
+                    ctx = self.context_aggregator.get_aggregated(ticker, price_df)
+                    current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
+                    c_score = self.context_scorer.calculate(ctx, float(current_price))
+            except Exception as e:
+                logger.warning("Failed context aggregation for %s: %s", ticker, e)
+                c_score = 0.0
+            return ticker, c_score
+
+        # Parallel context scoring for top 30 candidates
+        context_score_map = {}
+        if top_30_tickers and not skip_nlp:
+            logger.info("Starting parallel context scoring for %d candidates", len(top_30_tickers))
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {
+                    executor.submit(compute_context_score, ticker, row.to_dict()): ticker
+                    for _, row in df_filtered.iterrows()
+                    if row["ticker"] in top_30_tickers
+                }
+                
+                for future in as_completed(futures):
+                    ticker, c_score = future.result()
+                    context_score_map[ticker] = c_score
+                    logger.info(f"Context score computed for {ticker}: {c_score:.2f}")
+
+        # Build final scores
         context_scores = []
         composite_scores = []
         score_breakdowns = []
 
         for _, row in df_filtered.iterrows():
             ticker = row["ticker"]
-            c_score = 0.0
-            if ticker in top_30_tickers:
-                try:
-                    price_df = self._fetch_price_history(ticker)
-                    if price_df is not None and not price_df.empty:
-                        ctx = self.context_aggregator.get_aggregated(ticker, price_df)
-                        current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
-                        c_score = self.context_scorer.calculate(ctx, float(current_price))
-                except Exception as e:
-                    logger.warning("Failed context aggregation for %s: %s", ticker, e)
-                    c_score = 0.0
+            c_score = context_score_map.get(ticker, 0.0)
             
             context_scores.append(c_score)
             
@@ -361,7 +391,14 @@ class SignalRanker:
         return result.reset_index(drop=True)
 
     def _fetch_price_history(self, ticker: str) -> Optional[pd.DataFrame]:
-        # Try local parquet cache first
+        # Try new date-partitioned cache first
+        cache_manager = get_cache_manager()
+        today = datetime.date.today().isoformat()
+        ticker_data = cache_manager.get_ticker_data(ticker, today)
+        if ticker_data is not None and not ticker_data.empty:
+            return ticker_data
+        
+        # Fallback to old per-ticker cache
         cache_path = os.path.join("data", "cache", f"{ticker.upper()}.parquet")
         if os.path.exists(cache_path):
             try:

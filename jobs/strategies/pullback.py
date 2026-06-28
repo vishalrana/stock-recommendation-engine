@@ -7,6 +7,7 @@ import pandas as pd
 from indicators import check_rsi_pullback_recovery
 from ranker import SignalRanker
 from jobs.strategies.base import StrategyInterface
+from src.utils.candidate_builder import build_candidate_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -544,53 +545,19 @@ class PullbackRecoveryStrategy(StrategyInterface):
                 row["total_trades"],
             )
 
-            composite_score = round(float(row["composite_score"]), 4)
-            candidate = {
-                    "scan_date": row["scan_date"],
-                    "ticker": row["ticker"],
-                    "company_name": row["company_name"],
-                    "industry": row["industry"],
-                    "price": row["price"],
-                    "entry_price": row["entry_price"],
-                    "stop_loss": row["stop_loss"],
-                    "exit_price": row["exit_price"],
-                    "upside_pct": row["upside_pct"],
-                    "risk_reward": row["risk_reward"],
-                    "current_rsi": row["current_rsi"],
-                    "rsi_min_10d": row["rsi_min_10d"],
-                    "volume_ratio": row["volume_ratio"],
-                    "adx_value": row["adx_value"],
-                    "macd_histogram": row["macd_histogram"],
-                    "ema20": row["ema20"],
-                    "score": composite_score,
-                    "composite_score": composite_score,
-                    "quality_score": composite_score,
-                    "tier_label": row["tier_label"],
-                    "past_win_rate": row.get("win_rate", row.get("past_win_rate", 0.0)),
-                    "expectancy_pct": row["expectancy_pct"],
-                    "total_trades": row["total_trades"],
-                    "wins": row.get("wins", 0),
-                    "losses": row.get("losses", 0),
-                    "is_blocked": False,
-                    "blocked_reason": None,
-                    "strategy": self.name,
-                    "is_fallback": bool(row.get("is_fallback", False)),
-                    "target_1": row.get("target_1"),
-                    "target_2": row.get("target_2"),
-                    "target_3": row.get("target_3"),
-                    "target_1_pct": row.get("target_1_pct"),
-                    "target_2_pct": row.get("target_2_pct"),
-                    "target_3_pct": row.get("target_3_pct"),
-                    "weighted_rr": row.get("weighted_rr"),
-                    "position_sizing": row.get("position_sizing", "50/30/20"),
-                    "narrative": row.get("narrative"),
-                    "context_score": float(row["context_score"]) if "context_score" in row and pd.notna(row["context_score"]) else 0.0,
-                    "risk_dollar": round(float(row["entry_price"] - row["stop_loss"]), 2),
-                    "risk_pct": round(
-                        float((row["entry_price"] - row["stop_loss"]) / row["entry_price"] * 100),
-                        2,
-                    ),
-                }
+            # Use unified candidate builder
+            candidate = build_candidate_from_row(row)
+            
+            # Override strategy name
+            candidate["strategy"] = self.name
+            
+            # Calculate risk metrics
+            candidate["risk_dollar"] = round(float(row["entry_price"] - row["stop_loss"]), 2)
+            candidate["risk_pct"] = round(
+                float((row["entry_price"] - row["stop_loss"]) / row["entry_price"] * 100),
+                2,
+            )
+            
             candidate = apply_guardrails(candidate)
             if candidate.get("is_blocked"):
                 self.signals_blocked += 1

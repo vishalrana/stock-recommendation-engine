@@ -11,7 +11,7 @@ from jobs.strategies.base import StrategyInterface
 logger = logging.getLogger(__name__)
 
 # Strategy parameters — Strategy 1.3 Rev B
-RSI_PULLBACK_THRESHOLD = 52.0
+RSI_PULLBACK_THRESHOLD = 50.0  # Rev B patch: relaxed pullback threshold from 45 to 50 to admit shallower pullbacks in strong bull markets
 RSI_RECOVERY_MIN = 45.0
 RSI_RECOVERY_MAX = 67.0
 ADX_MIN = 18.0

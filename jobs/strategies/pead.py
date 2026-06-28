@@ -10,21 +10,15 @@ logger = logging.getLogger(__name__)
 
 
 def get_last_earnings_date(ticker: str) -> Optional[datetime.date]:
-    """Fetch last earnings date from yfinance. Returns datetime.date or None."""
-    try:
-        t = yf.Ticker(ticker)
-        dates = t.earnings_dates
-        if dates is None or len(dates) == 0:
-            return None
-        # Get most recent past earnings
-        current_date = datetime.now().date()
-        past_dates = [d for d in dates.index if d.date() <= current_date]
-        if not past_dates:
-            return None
-        return max(past_dates).date()
-    except Exception as e:
-        logger.debug("Failed to get earnings date for %s: %s", ticker, e)
-        return None
+    """Fetch last earnings date from local cache or yfinance. Returns datetime.date or None."""
+    from src.utils.earnings_cache import get_ticker_earnings
+    last_e_str, _ = get_ticker_earnings(ticker)
+    if last_e_str:
+        try:
+            return datetime.strptime(last_e_str, "%Y-%m-%d").date()
+        except Exception:
+            pass
+    return None
 
 
 class PEADStrategy(StrategyInterface):

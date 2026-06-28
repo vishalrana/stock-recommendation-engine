@@ -70,27 +70,10 @@ def find_swing_low(df_slice: pd.DataFrame) -> float:
 
 
 def get_earnings_date(ticker: str) -> str | None:
-    """Fetch next earnings date from yfinance for a ticker, returning ISO string or None."""
-    try:
-        import yfinance as yf
-
-        stock = yf.Ticker(ticker)
-        calendar = stock.calendar
-        if calendar is None:
-            return None
-
-        if isinstance(calendar, dict):
-            dates = calendar.get("Earnings Date")
-            if dates and isinstance(dates, list) and len(dates) > 0:
-                return pd.Timestamp(dates[0]).strftime("%Y-%m-%d")
-            return None
-
-        if hasattr(calendar, "empty") and not calendar.empty:
-            if hasattr(calendar, "index") and len(calendar.index) > 0:
-                return pd.Timestamp(calendar.index[0]).strftime("%Y-%m-%d")
-    except Exception:
-        pass
-    return None
+    """Fetch next earnings date from local cache or yfinance for a ticker, returning ISO string or None."""
+    from src.utils.earnings_cache import get_ticker_earnings
+    _, next_e_str = get_ticker_earnings(ticker)
+    return next_e_str
 
 
 def compute_targets(df: pd.DataFrame, entry: float) -> dict:

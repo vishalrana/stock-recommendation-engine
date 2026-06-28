@@ -21,6 +21,9 @@ class ContextScorer:
         }
     
     def calculate(self, ctx: AggregatedContext, current_price: float, tech_data=None) -> float:
+        if ctx.cached_score is not None:
+            return ctx.cached_score
+
         score = 0.0
         
         # 1. Analyst Alignment (Max 30)

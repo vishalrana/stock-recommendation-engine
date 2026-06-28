@@ -21,7 +21,7 @@ import datetime
 
 from src.providers.context.aggregator import ContextAggregator
 from src.scorers.context_scorer import ContextScorer
-from src.data.cache_manager_v2 import get_cache_manager
+from src.data.cache_manager import get_cache_manager
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +236,11 @@ class SignalRanker:
                     ctx = self.context_aggregator.get_aggregated(ticker, price_df)
                     current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
                     c_score = self.context_scorer.calculate(ctx, float(current_price))
+                    
+                    # If it was a cache miss, save the computed score to cache
+                    if ctx.cached_score is None:
+                        from src.providers.context.aggregator import save_context_to_cache
+                        save_context_to_cache(ticker, c_score, ctx)
             except Exception as e:
                 logger.warning("Failed context aggregation for %s: %s", ticker, e)
                 c_score = 0.0
@@ -391,20 +396,24 @@ class SignalRanker:
         return result.reset_index(drop=True)
 
     def _fetch_price_history(self, ticker: str) -> Optional[pd.DataFrame]:
-        # Try old per-ticker cache first for full history
+        # Try new date-partitioned cache first (supports preloaded memory lookups)
+        try:
+            cache_manager = get_cache_manager()
+            end_date = datetime.date.today()
+            start_date = end_date - datetime.timedelta(days=120)
+            ticker_data = cache_manager.get_ticker_history(ticker, start_date.isoformat(), end_date.isoformat())
+            if ticker_data is not None and not ticker_data.empty:
+                return ticker_data
+        except Exception as e:
+            logger.warning(f"Failed to fetch price history from date-partitioned cache for {ticker}: {e}")
+
+        # Fallback to old per-ticker cache
         cache_path = os.path.join("data", "cache", f"{ticker.upper()}.parquet")
         if os.path.exists(cache_path):
             try:
                 return pd.read_parquet(cache_path, engine="pyarrow")
             except Exception:
                 pass
-
-        # Try new date-partitioned cache next
-        cache_manager = get_cache_manager()
-        today = datetime.date.today().isoformat()
-        ticker_data = cache_manager.get_ticker_data(ticker, today)
-        if ticker_data is not None and not ticker_data.empty:
-            return ticker_data
         
         # Fallback: Download via YahooProvider
         try:

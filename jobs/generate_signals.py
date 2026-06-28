@@ -38,6 +38,7 @@ from downloader import fetch_ohlcv_data
 from regime import get_regime
 from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
+from src.data.cache_manager import get_cache_manager
 
 # Strategy activation by market regime
 REGIME_STRATEGY_MAP = {
@@ -164,22 +165,18 @@ def load_etf_universe() -> list[str]:
     return list(SECTOR_ETFS.keys())
 
 
-def run_cross_sectional_screen(universe: list[str], parquet_files: list[str]) -> list[tuple]:
+def run_cross_sectional_screen(universe: list[str], cache_manager) -> list[tuple]:
     """Pre-screen: calculate 3-month returns for all tickers in universe, keep top 15%."""
     returns = []
     
-    ticker_to_fpath = {}
-    for fpath in parquet_files:
-        t = os.path.basename(fpath).replace(".parquet", "").upper()
-        ticker_to_fpath[t] = fpath
+    # Calculate returns over last 120 days to ensure 63 trading days are covered
+    end_date_str = datetime.now().date().isoformat()
+    start_date_str = (datetime.now().date() - timedelta(days=120)).isoformat()
 
     for ticker in universe:
-        fpath = ticker_to_fpath.get(ticker)
-        if not fpath:
-            continue
         try:
-            raw = pd.read_parquet(fpath, engine="pyarrow")
-            if len(raw) < 63:
+            raw = cache_manager.get_ticker_history(ticker, start_date_str, end_date_str)
+            if raw is None or len(raw) < 63:
                 continue
             close_col = "CLOSE" if "CLOSE" in raw.columns else "Close"
             price = raw[close_col].iloc[-1]
@@ -305,6 +302,10 @@ def main():
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
+    
+    # If dry-run is requested, set SKIP_NLP=true to bypass model loading entirely
+    if args.dry_run:
+        os.environ["SKIP_NLP"] = "true"
 
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
@@ -332,60 +333,52 @@ def main():
 
     tickers, company_names, industries = load_universe()
 
-    os.makedirs(os.path.join(PROJECT_ROOT, "data", "cache"), exist_ok=True)
-
+    # Initialize date-partitioned CacheManager
+    cache_manager = get_cache_manager()
+    by_date_dir = os.path.join(PROJECT_ROOT, "data", "cache", "by_date")
+    
     is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     force_download = os.environ.get("DOWNLOAD_DATA") == "true"
-    cache_dir = os.path.join(PROJECT_ROOT, "data", "cache")
-    cache_empty = len(glob.glob(os.path.join(cache_dir, "*.parquet"))) == 0
+    cache_empty = len(glob.glob(os.path.join(by_date_dir, "*.parquet"))) == 0
 
     if args.force_refresh:
-        stale_files = glob.glob(os.path.join(cache_dir, "*.parquet"))
-        logger.info("FORCE REFRESH: deleting %d stale parquet files...", len(stale_files))
-        for sf in stale_files:
+        logger.info("FORCE REFRESH: clearing cache and deleting old parquet files...")
+        cache_manager.clear_all()
+        # Delete old legacy files
+        legacy_files = glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet"))
+        for lf in legacy_files:
             try:
-                os.remove(sf)
-            except OSError as rm_err:
-                logger.warning("Could not delete %s: %s", sf, rm_err)
+                os.remove(lf)
+            except Exception as e:
+                logger.warning(f"Failed to delete old legacy file {lf}: {e}")
         cache_empty = True
 
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     etf_tickers = list(SECTOR_ETFS.keys())
+    all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
+    all_download_tickers = [t for t in all_download_tickers if t not in BLACKLIST]
 
+    t_download_start = time.time()
     if is_ci or force_download or cache_empty:
-        logger.info("Fetching fresh data from yfinance...")
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=500)
+        logger.info("Performing full bulk data cache refresh...")
+        end_date_dt = datetime.now().date()
+        start_date_dt = end_date_dt - timedelta(days=500)
+        cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+        logger.info(f"Full bulk data cache refresh completed in {time.time() - t_download_start:.2f}s")
+    else:
+        logger.info("Performing incremental daily update...")
+        end_date_dt = datetime.now().date()
+        # Grab last 5 days to cover weekend gaps
+        start_date_dt = end_date_dt - timedelta(days=5)
+        cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+        logger.info(f"Incremental daily update completed in {time.time() - t_download_start:.2f}s")
 
-        all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
-
-        for i, ticker in enumerate(all_download_tickers, 1):
-            if ticker in BLACKLIST:
-                continue
-            logger.info("[%d/%d] Downloading %s...", i, len(all_download_tickers), ticker)
-            df = fetch_ohlcv_data(ticker, start_date=start_date, end_date=end_date)
-            if df is not None and not df.empty:
-                df.to_parquet(os.path.join(cache_dir, f"{ticker}.parquet"), engine="pyarrow", index=True)
-        logger.info("Finished downloading daily data.")
-
-    # Ensure all Sector ETFs are present in the cache
-    missing_etfs = [t for t in etf_tickers if not os.path.exists(os.path.join(cache_dir, f"{t}.parquet"))]
-    if missing_etfs:
-        logger.info("Downloading missing Sector ETFs: %s", missing_etfs)
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=500)
-        for t in missing_etfs:
-            df = fetch_ohlcv_data(t, start_date=start_date, end_date=end_date)
-            if df is not None and not df.empty:
-                df.to_parquet(os.path.join(cache_dir, f"{t}.parquet"), engine="pyarrow", index=True)
-
-    cache_path = os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")
-    parquet_files = sorted(glob.glob(cache_path))
-    total_files = len(parquet_files)
-    logger.info("Found %d cached files in data/cache/", total_files)
+    daily_files = glob.glob(os.path.join(by_date_dir, "*.parquet"))
+    total_files = len(daily_files)
+    logger.info("Found %d date-partitioned daily files in data/cache/by_date", total_files)
 
     if total_files == 0:
-        logger.error("No cached files found. Cannot generate signals.")
+        logger.error("No cached daily files found. Cannot generate signals.")
         sys.exit(1)
 
     try:
@@ -436,6 +429,11 @@ def main():
     signals_buy = 0
     signals_blocked = 0
 
+    # Preload the entire daily cache history into memory once for all tickers to maximize speed!
+    preload_end_str = datetime.now().date().isoformat()
+    preload_start_str = (datetime.now().date() - timedelta(days=500)).isoformat()
+    cache_manager.preload_history(preload_start_str, preload_end_str)
+
     for strategy in STRATEGIES:
         if strategy.name not in allowed_strategies:
             skipped_strategies[strategy.name] = regime_str
@@ -456,19 +454,21 @@ def main():
         if strategy.name == 'Sector Rotation':
             current_universe = load_etf_universe()
         elif strategy.name == 'Cross-Sectional Momentum':
-            screened_info = run_cross_sectional_screen(tickers, parquet_files)
+            screened_info = run_cross_sectional_screen(tickers, cache_manager)
             current_universe = [x[0] for x in screened_info]
         else:
             current_universe = tickers
 
-        for idx, fpath in enumerate(parquet_files, 1):
-            ticker = os.path.basename(fpath).replace(".parquet", "").upper()
-
-            if current_universe and ticker not in current_universe:
+        t_strat_start = time.time()
+        for idx, ticker in enumerate(current_universe, 1):
+            ticker = ticker.upper()
+            if ticker in BLACKLIST:
                 continue
 
             try:
-                raw = pd.read_parquet(fpath, engine="pyarrow")
+                raw = cache_manager.get_ticker_history(ticker, preload_start_str, preload_end_str)
+                if raw is None or raw.empty:
+                    continue
 
                 if len(raw) < 60:
                     logger.warning(
@@ -488,7 +488,7 @@ def main():
                 if signal is not None:
                     signals_qualified += 1
                     strategy_signals.append(signal)
-                    logger.info(
+                    logger.debug(
                         "[QUALIFIED] %s | Entry: $%.2f | Stop: $%.2f | Exit: $%.2f | "
                         "RSI: %.1f | Vol: %.2fx | ADX: %.1f | MACD Hist: %.4f",
                         ticker,
@@ -503,6 +503,14 @@ def main():
 
             except Exception as e:
                 logger.error("Error scanning %s: %s", ticker, e)
+
+        logger.info(
+            "%s: Scanned %d tickers, found %d qualified signals in %.2fs",
+            strategy.name,
+            len(current_universe),
+            len(strategy_signals),
+            time.time() - t_strat_start
+        )
 
         if hasattr(strategy, "gate_rejections"):
             for key, count in strategy.gate_rejections.items():
@@ -553,37 +561,44 @@ def main():
         )
 
         # === Post-Ranking Context Safety Net ===
-        # Ensure no final signals slip through without context_score
-        from src.providers.context.aggregator import ContextAggregator
-        from src.scorers.context_scorer import ContextScorer
-        from src.ranker import SignalRanker
-        
-        context_aggregator = ContextAggregator()
-        context_scorer = ContextScorer()
-        ranker = SignalRanker()
-        
-        for sig in final_signals:
-            if sig.get("context_score", 0.0) == 0.0 or sig.get("context_score") is None:
-                logger.info(f"[CONTEXT FALLBACK] Computing context on-the-fly for {sig['ticker']}")
-                try:
-                    price_df = ranker._fetch_price_history(sig["ticker"])
-                    if price_df is not None and not price_df.empty:
-                        ctx = context_aggregator.get_aggregated(sig["ticker"], price_df)
-                        tech_data = {
-                            'rsi': sig.get("current_rsi", 50),
-                            'adx': sig.get("adx_value", 20),
-                            'volume_ratio': sig.get("volume_ratio", 1.0),
-                        }
-                        sig["context_score"] = context_scorer.calculate(ctx, float(sig["entry_price"]), tech_data)
-                        
-                        # Recompute composite score using the ranker
-                        res = ranker.compute_composite_score(sig, regime_str)
-                        sig["composite_score"] = round(float(res["total"]), 4)
-                        sig["quality_score"] = round(float(res["total"]), 4)
-                        logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']} (new composite: {sig['composite_score']:.1f})")
-                except Exception as e:
-                    logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
-                    sig["context_score"] = 0.0
+        # Ensure no final signals slip through without context_score (skip if SKIP_NLP=true)
+        skip_nlp = os.getenv("SKIP_NLP", "false").lower() == "true"
+        if not skip_nlp:
+            from src.providers.context.aggregator import ContextAggregator
+            from src.scorers.context_scorer import ContextScorer
+            from src.ranker import SignalRanker
+            
+            context_aggregator = ContextAggregator()
+            context_scorer = ContextScorer()
+            ranker = SignalRanker()
+            
+            for sig in final_signals:
+                if sig.get("context_score", 0.0) == 0.0 or sig.get("context_score") is None:
+                    logger.info(f"[CONTEXT FALLBACK] Computing context on-the-fly for {sig['ticker']}")
+                    try:
+                        price_df = ranker._fetch_price_history(sig["ticker"])
+                        if price_df is not None and not price_df.empty:
+                            ctx = context_aggregator.get_aggregated(sig["ticker"], price_df)
+                            tech_data = {
+                                'rsi': sig.get("current_rsi", 50),
+                                'adx': sig.get("adx_value", 20),
+                                'volume_ratio': sig.get("volume_ratio", 1.0),
+                            }
+                            sig["context_score"] = context_scorer.calculate(ctx, float(sig["entry_price"]), tech_data)
+                            
+                            # Save to context_cache table on cache miss
+                            if ctx.cached_score is None:
+                                from src.providers.context.aggregator import save_context_to_cache
+                                save_context_to_cache(sig["ticker"], sig["context_score"], ctx)
+                                
+                            # Recompute composite score using the ranker
+                            res = ranker.compute_composite_score(sig, regime_str)
+                            sig["composite_score"] = round(float(res["total"]), 4)
+                            sig["quality_score"] = round(float(res["total"]), 4)
+                            logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']} (new composite: {sig['composite_score']:.1f})")
+                    except Exception as e:
+                        logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
+                        sig["context_score"] = 0.0
 
         for sig in final_signals:
             entry_price = float(sig["entry_price"])

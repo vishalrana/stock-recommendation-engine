@@ -51,6 +51,7 @@ class AggregatedContext:
     earnings: EarningsContext = field(default_factory=EarningsContext)
     news: NewsContext = field(default_factory=NewsContext)
     price_volume_signal: float = 0.0  # 0.0 to 1.0 proxy
+    cached_score: Optional[float] = None
 
 class ContextProvider(ABC):
     @abstractmethod

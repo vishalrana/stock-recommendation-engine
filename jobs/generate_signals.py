@@ -280,6 +280,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                     "target_2_price": sig.get("target_2_price"),
                     "target_3_price": sig.get("target_3_price"),
                     "outcome": "open",
+                    "context_score": sig.get("context_score", 0.0),
                 }
             )
 
@@ -599,6 +600,7 @@ def main():
                     "target_1_price": target_1_price,
                     "target_2_price": target_2_price,
                     "target_3_price": target_3_price,
+                    "context_score": sig.get("context_score", 0.0),
                 }
             )
     else:

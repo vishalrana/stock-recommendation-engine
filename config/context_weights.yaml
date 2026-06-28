@@ -1,0 +1,26 @@
+# Configuration for Context Scorer
+global_multiplier: 0.15  # Applies the 15% weight to the final raw score
+
+max_scores:
+  analyst: 30
+  earnings: 30
+  fundamental: 20
+  news: 20
+  pv_signal: 15
+
+analyst:
+  upside_threshold_bonus: 0.05
+  buy_bonus: 10
+
+earnings:
+  surprise_beat_big: 5.0
+  surprise_beat_small: 0.0
+  surprise_miss_big: -5.0
+
+fundamental:
+  debt_to_equity_max: 1.0
+  current_ratio_min: 1.5
+
+news:
+  sentiment_positive_threshold: 0.2
+  sentiment_negative_threshold: -0.2

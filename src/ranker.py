@@ -12,8 +12,13 @@ Weights:
 
 import logging
 import math
+import os
+from typing import Optional
 import numpy as np
 import pandas as pd
+
+from src.providers.context.aggregator import ContextAggregator
+from src.scorers.context_scorer import ContextScorer
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +28,11 @@ class SignalRanker:
     Composite-normalized ranking engine with tiered fallback.
     """
 
-    WEIGHT_MOMENTUM = 0.30
-    WEIGHT_EXPECTANCY = 0.40
-    WEIGHT_WIN_RATE = 0.20
+    WEIGHT_MOMENTUM = 0.25
+    WEIGHT_EXPECTANCY = 0.35
+    WEIGHT_WIN_RATE = 0.15
     WEIGHT_REGIME = 0.10
+    WEIGHT_CONTEXT = 0.15
 
     def __init__(self, min_expectancy: float = 0, min_win_rate: float = 25, min_trades: int = 5):
         # Kept for backward compatibility
@@ -37,6 +43,10 @@ class SignalRanker:
         self.signals_buy = 0
         self.signals_watch = 0
         self.signals_speculative = 0
+        
+        # Context Providers & Scorer
+        self.context_aggregator = ContextAggregator()
+        self.context_scorer = ContextScorer()
 
     def normalize_percentile(self, series: pd.Series) -> pd.Series:
         """Convert a numeric Series to percentile ranks in [0, 100]."""
@@ -88,6 +98,7 @@ class SignalRanker:
         momentum_score = row.get("momentum_score", 50.0)
         expectancy_score = row.get("expectancy_score", 50.0)
         winrate_score = row.get("winrate_score", 50.0)
+        context_score = row.get("context_score", 0.0)
         
         regime_score = self.regime_adjustment(momentum_score, regime, row)
         
@@ -96,6 +107,7 @@ class SignalRanker:
             + self.WEIGHT_EXPECTANCY * expectancy_score
             + self.WEIGHT_WIN_RATE * winrate_score
             + self.WEIGHT_REGIME * regime_score
+            + self.WEIGHT_CONTEXT * context_score
         )
         
         # Absolute Composite Floor:
@@ -113,6 +125,7 @@ class SignalRanker:
                 "expectancy": round(expectancy_score, 4),
                 "winrate": round(winrate_score, 4),
                 "regime": round(regime_score, 4),
+                "context": round(context_score, 4),
             }
         }
 
@@ -172,25 +185,83 @@ class SignalRanker:
         exp_score[neg_mask] = (exp_score[neg_mask] - 30.0).clip(lower=5.0)
         df_filtered["expectancy_score"] = exp_score
 
-        # 3. Historical Win Rate (20% weight)
+        # 3. Historical Win Rate (15% weight)
         df_filtered["winrate_score"] = self.normalize_percentile(df_filtered["win_rate"])
 
-        # 4. Regime Adjustment & 5. Composite Score
+        # 4. Regime Adjustment & 5. Preliminary Composite Score (using old weights)
         regime_scores = []
-        composite_scores = []
-        score_breakdowns = []
+        preliminary_scores = []
         for _, row in df_filtered.iterrows():
             reg_score = self.regime_adjustment(row["momentum_score"], regime, row)
             regime_scores.append(reg_score)
             
-            row_dict = row.to_dict()
-            row_dict["regime_score"] = reg_score
+            # Compute preliminary using old weights (30% momentum, 40% expectancy, 20% winrate, 10% regime)
+            m = row.get("momentum_score", 50.0)
+            e = row.get("expectancy_score", 50.0)
+            w = row.get("winrate_score", 50.0)
             
-            res = self.compute_composite_score(row_dict, regime)
-            composite_scores.append(res["total"])
-            score_breakdowns.append(res["breakdown"])
+            prelim = 0.30 * m + 0.40 * e + 0.20 * w + 0.10 * reg_score
+            
+            # Apply absolute composite floor
+            expectancy_pct = row.get("expectancy_pct", 0.0)
+            win_rate = row.get("win_rate", 0.0)
+            if expectancy_pct < 0.0 and win_rate < 25.0:
+                prelim = min(prelim, 40.0)
+                
+            preliminary_scores.append(prelim)
 
         df_filtered["regime_score"] = regime_scores
+        df_filtered["preliminary_score"] = preliminary_scores
+
+        # Sort candidates by preliminary score to pick top 12
+        df_sorted_prelim = df_filtered.sort_values("preliminary_score", ascending=False)
+        top_12_tickers = set(df_sorted_prelim.head(12)["ticker"].tolist())
+        logger.info("Selected top 12 candidates for Context/NLP scoring: %s", list(top_12_tickers))
+
+        # 6. Context Scoring & Final Composite Score
+        context_scores = []
+        composite_scores = []
+        score_breakdowns = []
+
+        for _, row in df_filtered.iterrows():
+            ticker = row["ticker"]
+            c_score = 0.0
+            if ticker in top_12_tickers:
+                try:
+                    price_df = self._fetch_price_history(ticker)
+                    if price_df is not None and not price_df.empty:
+                        ctx = self.context_aggregator.get_aggregated(ticker, price_df)
+                        current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
+                        c_score = self.context_scorer.calculate(ctx, float(current_price))
+                except Exception as e:
+                    logger.warning("Failed context aggregation for %s: %s", ticker, e)
+                    c_score = 0.0
+            
+            context_scores.append(c_score)
+            
+            # Compute final composite score using new weights (top 12) or keep prelim
+            row_dict = row.to_dict()
+            row_dict["context_score"] = c_score
+            row_dict["regime_score"] = row["regime_score"]
+            
+            if ticker in top_12_tickers:
+                res = self.compute_composite_score(row_dict, regime)
+                final_score = res["total"]
+                breakdown = res["breakdown"]
+            else:
+                final_score = row["preliminary_score"]
+                breakdown = {
+                    "momentum": round(row.get("momentum_score", 50.0), 4),
+                    "expectancy": round(row.get("expectancy_score", 50.0), 4),
+                    "winrate": round(row.get("winrate_score", 50.0), 4),
+                    "regime": round(row["regime_score"], 4),
+                    "context": 0.0,
+                }
+                
+            composite_scores.append(final_score)
+            score_breakdowns.append(breakdown)
+
+        df_filtered["context_score"] = context_scores
         df_filtered["composite_score"] = composite_scores
         df_filtered["score_breakdown"] = score_breakdowns
 
@@ -261,6 +332,26 @@ class SignalRanker:
         result = selected.head(top_n).copy()
         result = result.drop(columns=["temp_tier"])
         return result.reset_index(drop=True)
+
+    def _fetch_price_history(self, ticker: str) -> Optional[pd.DataFrame]:
+        # Try local parquet cache first
+        cache_path = os.path.join("data", "cache", f"{ticker.upper()}.parquet")
+        if os.path.exists(cache_path):
+            try:
+                return pd.read_parquet(cache_path, engine="pyarrow")
+            except Exception:
+                pass
+        # Fallback: Download via YahooProvider
+        try:
+            from src.providers.price.yahoo_provider import YahooProvider
+            import datetime
+            provider = YahooProvider()
+            end_date = datetime.date.today().isoformat()
+            start_date = (datetime.date.today() - datetime.timedelta(days=40)).isoformat()
+            return provider.get_historical([ticker], start=start_date, end=end_date)
+        except Exception as e:
+            logger.warning("Failed to fetch price history for %s: %s", ticker, e)
+            return None
 
     def rank(self, signals_df: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
         """Backward compatibility wrapper mapping to composite_rank with default bull regime."""

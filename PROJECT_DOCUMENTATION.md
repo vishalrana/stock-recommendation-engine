@@ -35,7 +35,7 @@ The engine implements a diverse registry of 7 trading strategies, covering trend
 *   **Core Hypothesis**: In an established primary uptrend, brief pullbacks driven by short-term profit-taking represent low-risk entry points. Once the pullback exhausts (marked by RSI recovery), the stock resumes its trend.
 *   **Entry Criteria**:
     *   `Price > 50 DMA > 200 DMA` (Trend stack)
-    *   `Min(RSI_14) in last 10 days < 45` (Pullback occurred)
+    *   `Min(RSI_14) in last 10 days < 50` (Pullback occurred - relaxed from 45 in Rev B patch)
     *   `45 <= Current RSI_14 <= 65` (RSI is recovering)
     *   `Volume > 20-day Average Volume` (Buying volume confirmation)
 *   **Exit Plan**:
@@ -229,7 +229,13 @@ graph TD
     2.  Pulls the stock constituent list (S&P 500 + Nasdaq-100) and Sector ETFs.
     3.  Checks the local Parquet cache (`data/cache/`) to download missing or stale price data from yfinance.
     4.  Runs active strategies according to the detected regime.
-    5.  Ranks the signals, filters top setups, archives old ones, and inserts new ones into Supabase.
+    5.  Ranks the signals and computes target prices (`target_1_price`, `target_2_price`, `target_3_price`) dynamically at insert time.
+    6.  Archives old recommendations to `signals_history` (carrying forward strategy name and target prices, setting `outcome = 'open'`), clears the active recommendations, and inserts new ones.
+*   **`validate_ranking.py`**: Runs automatically every night after signal generation. It evaluates open history rows where `scan_date` is $\ge 10$ business days ago, downloading subsequent OHLCV price history from yfinance to identify outcome resolutions:
+    *   `stopped`: Low price hits stop loss first (priority exit).
+    *   `hit_t3` / `hit_t2` / `hit_t1`: High price hits target price levels (T3 $\rightarrow$ T2 $\rightarrow$ T1 priority).
+    *   `expired`: Holds past 20 trading days without stop or target hits (closed at close price).
+    *   Updates the record in `signals_history` with outcome status, return percentage, outcome date, and holding days.
 *   **`seed_metrics.py`**: Runs a full 5-year historical backtest for all 514 tickers to calculate win rates, expectancy, trade count, and median holding days, then seeds them into the database.
 *   **`strategies/`**: Folder containing self-contained strategy classes implementing `StrategyInterface` (defining specific scan logic, entry/exit math, and custom narratives).
 

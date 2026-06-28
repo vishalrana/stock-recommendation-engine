@@ -35,32 +35,31 @@ class Week52HighStrategy(StrategyInterface):
         adx_value = df['ADX_14'].iloc[-1]
         macd_histogram = df['MACD_HIST'].iloc[-1]
 
-        # === GATES ===
-        # 1. Within 2% of 52-week high (George & Hwang anchoring anomaly)
+        # 1. Within 5% of 52-week high (relaxed from 2%)
         pct_vs_52w = (price / high_52w - 1) * 100
-        if pct_vs_52w < -2:
+        if pct_vs_52w < -5:
             return None
 
         # 2. Price > 50 DMA (trend alignment)
         if price <= sma50:
             return None
 
-        # 3. RSI 55-75 (strong but not overbought)
-        if current_rsi < 55 or current_rsi > 75:
+        # 3. RSI 45-80 (relaxed from 55-75)
+        if current_rsi < 45 or current_rsi > 80:
             return None
 
-        # 4. ADX >= 20 (strong trend)
-        if adx_value < 20:
+        # 4. ADX >= 15 (relaxed from 20)
+        if adx_value < 15:
             return None
 
-        # 5. Volume >= 1.2x average (breakout confirmation)
+        # 5. Volume >= 0.8x average (relaxed from 1.2x)
         volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0
-        if volume_ratio < 1.2:
+        if volume_ratio < 0.8:
             return None
 
-        # 6. New high gate: within 3% of 20-day high (recent momentum)
+        # 6. New high gate: within 5% of 20-day high (relaxed from 3%)
         pct_vs_20h = (price / high_20 - 1) * 100
-        if pct_vs_20h < -3:
+        if pct_vs_20h < -5:
             return None
 
         # === SIGNAL CONSTRUCTION ===

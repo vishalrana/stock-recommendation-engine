@@ -52,7 +52,7 @@ class PEADStrategy(StrategyInterface):
                 continue
             day_close = df['CLOSE'].iloc[-days_ago]
             prev_day_close = df['CLOSE'].iloc[-days_ago - 1]
-            if prev_day_close > 0 and (day_close / prev_day_close - 1) >= 0.05:
+            if prev_day_close > 0 and (day_close / prev_day_close - 1) >= 0.02:
                 has_recent_gap = True
                 break
 
@@ -77,24 +77,24 @@ class PEADStrategy(StrategyInterface):
         earnings_close = df['CLOSE'].iloc[-days_since_earnings]
         earnings_prev_close = df['CLOSE'].iloc[-days_since_earnings - 1]
         gap_pct = (earnings_close / earnings_prev_close - 1) * 100 if earnings_prev_close > 0 else 0
-        if gap_pct < 5:
+        if gap_pct < 2:  # Relaxed from 5
             return None
 
-        # Stock must still hold >= 50% of gap (not a fake-out)
+        # Stock must still hold >= 30% of gap (relaxed from 50%)
         gap_high = df['HIGH'].iloc[-days_since_earnings:].max()
         gap_low = df['LOW'].iloc[-days_since_earnings:].min()
         gap_range = gap_high - gap_low
         if gap_range > 0:
             hold_pct = (price - gap_low) / gap_range
-            if hold_pct < 0.5:
+            if hold_pct < 0.3:
                 return None
         else:
             hold_pct = 1.0
 
         # === PULLBACK GATE ===
-        # Price must be within 3% of the gap high (first pullback, not extended)
+        # Price must be within 5% of the gap high (relaxed from 3%)
         pct_vs_gap_high = (price / gap_high - 1) * 100
-        if pct_vs_gap_high < -3:  # Too far from gap high
+        if pct_vs_gap_high < -5:
             return None
 
         # === TREND GATE ===
@@ -104,16 +104,16 @@ class PEADStrategy(StrategyInterface):
             return None
 
         # === VOLUME GATE ===
-        # Volume on earnings day >= 2x average (institutional interest)
+        # Volume on earnings day >= 1.5x average (relaxed from 2x)
         volume_avg = df['VOLUME'].rolling(20).mean().iloc[-1]
         earnings_volume = df['VOLUME'].iloc[-days_since_earnings]
-        if earnings_volume < volume_avg * 2:
+        if earnings_volume < volume_avg * 1.5:
             return None
 
         # === ADX GATE ===
-        # ADX >= 15 (trend intact after earnings)
+        # ADX >= 10 (relaxed from 15)
         adx_value = df['ADX_14'].iloc[-1]
-        if adx_value < 15:
+        if adx_value < 10:
             return None
 
         # === SIGNAL CONSTRUCTION ===

@@ -110,14 +110,13 @@ class SignalRanker:
             + self.WEIGHT_CONTEXT * context_score
         )
         
-        # Absolute Composite Floor:
-        # A stock with negative expectancy AND win rate < 30% cannot score above 45
-        # (caps it at Watch or Speculative tier, never Buy or Strong Buy)
-        expectancy_pct = row.get("expectancy_pct", 0.0)
-        win_rate = row.get("win_rate", 0.0)
-        if expectancy_pct < 0.0 and win_rate < 25.0:
-            total = min(total, 40.0)
-        
+        # Quality floor disabled to see more signals
+        # expectancy_pct = row.get("expectancy_pct", 0.0)
+        # win_rate = row.get("win_rate", 0.0)
+        # if expectancy_pct < 0.0 and win_rate < 25.0:
+        #     total = min(total, 40.0)
+        pass
+
         return {
             "total": round(total, 4),
             "breakdown": {

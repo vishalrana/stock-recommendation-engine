@@ -10,18 +10,17 @@ from jobs.strategies.base import StrategyInterface
 
 logger = logging.getLogger(__name__)
 
-# Strategy parameters — Strategy 1.3 Rev B
-RSI_PULLBACK_THRESHOLD = 50.0  # Rev B patch: relaxed pullback threshold from 45 to 50 to admit shallower pullbacks in strong bull markets
-RSI_RECOVERY_MIN = 45.0
-RSI_RECOVERY_MAX = 67.0
-ADX_MIN = 18.0
-VOLUME_MULTIPLIER = 1.0
+RSI_PULLBACK_THRESHOLD = 55.0  # Relaxed from 50
+RSI_RECOVERY_MIN = 35.0        # Relaxed from 45
+RSI_RECOVERY_MAX = 70.0        # Relaxed from 67
+ADX_MIN = 12.0                 # Relaxed from 18
+VOLUME_MULTIPLIER = 0.8        # Relaxed from 1.0
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
 
-MIN_WIN_RATE = 50.0
-MIN_EXPECTANCY = 1.0
-MIN_SAMPLE_SIZE = 10
+MIN_WIN_RATE = 35.0            # Relaxed from 50.0
+MIN_EXPECTANCY = 0.0           # Relaxed from 1.0
+MIN_SAMPLE_SIZE = 5            # Relaxed from 10
 
 
 def apply_guardrails(signal: dict) -> dict:

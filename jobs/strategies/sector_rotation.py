@@ -63,22 +63,22 @@ class SectorRotationStrategy(StrategyInterface):
         if price <= sma200:
             return None
 
-        # 3. Momentum gate: RSI 55-75 (strong but not overbought)
-        if current_rsi < 55 or current_rsi > 75:
+        # 3. Momentum gate: RSI 45-80 (relaxed from 55-75)
+        if current_rsi < 45 or current_rsi > 80:
             return None
 
-        # 4. ADX gate: >= 18 (sector trending)
-        if adx_value < 18:
+        # 4. ADX gate: >= 12 (relaxed from 18)
+        if adx_value < 12:
             return None
 
-        # 5. Volume gate: >= 1.0x average (institutional interest)
+        # 5. Volume gate: >= 0.8x average (relaxed from 1.0x)
         volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0
-        if volume_ratio < 1.0:
+        if volume_ratio < 0.8:
             return None
 
-        # 6. Relative strength: Within 3% of 20-day high (leading)
+        # 6. Relative strength: Within 5% of 20-day high (relaxed from 3%)
         pct_vs_high = (price / high_20 - 1) * 100
-        if pct_vs_high < -3:
+        if pct_vs_high < -5:
             return None
 
         # === SIGNAL CONSTRUCTION ===

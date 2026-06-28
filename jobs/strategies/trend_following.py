@@ -45,17 +45,17 @@ class TrendFollowingStrategy(StrategyInterface):
         if price <= sma50:
             return None
 
-        # 3. ADX gate: Trend strength >= 20
-        if adx_value < 20:
+        # 3. ADX gate: Trend strength >= 15 (relaxed from 20)
+        if adx_value < 15:
             return None
 
-        # 4. Volume gate: >= 1.2x average (institutional participation)
+        # 4. Volume gate: >= 0.8x average (relaxed from 1.2x)
         volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0
-        if volume_ratio < 1.2:
+        if volume_ratio < 0.8:
             return None
 
-        # 5. RSI gate: Strong momentum (60-80), not overbought > 80
-        if current_rsi < 60 or current_rsi > 80:
+        # 5. RSI gate: Strong momentum (45-85) (relaxed from 60-80)
+        if current_rsi < 45 or current_rsi > 85:
             return None
 
         # 6. Breakout gate: Price within 5% of 20-day high (near breakout)

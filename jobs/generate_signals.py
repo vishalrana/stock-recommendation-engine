@@ -304,6 +304,7 @@ def main():
         action="store_true",
         help="Delete all cached parquet files and re-download fresh data from yfinance for the full universe",
     )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
     logger.info("=" * 60)

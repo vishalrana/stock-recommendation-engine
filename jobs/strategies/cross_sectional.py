@@ -44,17 +44,17 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         if price <= sma50:
             return None
 
-        # 3. RSI 50-70 (momentum but not overbought)
-        if current_rsi < 50 or current_rsi > 70:
+        # 3. RSI 40-75 (relaxed from 50-70)
+        if current_rsi < 40 or current_rsi > 75:
             return None
 
-        # 4. ADX >= 15 (trending)
-        if adx_value < 15:
+        # 4. ADX >= 10 (relaxed from 15)
+        if adx_value < 10:
             return None
 
-        # 5. Volume >= 1.0x average
+        # 5. Volume >= 0.8x average (relaxed from 1.0x)
         volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0
-        if volume_ratio < 1.0:
+        if volume_ratio < 0.8:
             return None
 
         # 6. Positive 3-month return

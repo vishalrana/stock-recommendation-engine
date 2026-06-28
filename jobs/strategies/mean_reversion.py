@@ -46,33 +46,31 @@ class MeanReversionStrategy(StrategyInterface):
         lower_val = bb_lower.iloc[-1]
         bb_position = (price - lower_val) / (upper_val - lower_val) if upper_val != lower_val else 0.5
 
-        # === GATES ===
-        # 1. Oversold gate: RSI < 35 (deeply oversold)
-        if current_rsi >= 35:
+        # 1. Oversold gate: RSI < 40 (relaxed from 35)
+        if current_rsi >= 40:
             return None
 
-        # 2. Bounce gate: RSI recovered from < 30 to current > 25 (starting to bounce)
+        # 2. Bounce gate: RSI recovered from < 35 (relaxed from 30)
         rsi_min_5d = df['RSI_14'].rolling(5).min().iloc[-1]
-        if rsi_min_5d > 30:  # Never got deeply oversold
+        if rsi_min_5d > 35:
             return None
 
-        # 3. Support gate: Price within 5% of 20-day low (near support)
+        # 3. Support gate: Price within 8% of 20-day low (relaxed from 5%)
         pct_vs_low = (price / low_20 - 1) * 100
-        if pct_vs_low > 5:
+        if pct_vs_low > 8:
             return None
 
-        # 4. Volume gate: >= 1.0x average (some interest on the bounce)
+        # 4. Volume gate: >= 0.8x average (relaxed from 1.0x)
         volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0
-        if volume_ratio < 1.0:
+        if volume_ratio < 0.8:
             return None
 
-        # 5. ADX gate: Not in strong downtrend (ADX < 25 means not strongly trending down)
-        # Note: constraint was changed to ADX <= 30 to match comment "ADX < 25 means not strongly trending down" but gate has:
-        if adx_value > 30:
-            return None  # Too strong a downtrend, catch falling knife
+        # 5. ADX gate: ADX <= 40 (relaxed from 30)
+        if adx_value > 40:
+            return None
 
-        # 6. Bollinger gate: Price near lower band (bb_position <= 0.25)
-        if bb_position > 0.25:
+        # 6. Bollinger gate: Price near lower band (bb_position <= 0.35) (relaxed from 0.25)
+        if bb_position > 0.35:
             return None
 
         # === SIGNAL CONSTRUCTION ===

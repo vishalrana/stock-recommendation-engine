@@ -575,7 +575,12 @@ def main():
                             'volume_ratio': sig.get("volume_ratio", 1.0),
                         }
                         sig["context_score"] = context_scorer.calculate(ctx, float(sig["entry_price"]), tech_data)
-                        logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']}")
+                        
+                        # Recompute composite score using the ranker
+                        res = ranker.compute_composite_score(sig, regime_str)
+                        sig["composite_score"] = round(float(res["total"]), 4)
+                        sig["quality_score"] = round(float(res["total"]), 4)
+                        logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']} (new composite: {sig['composite_score']:.1f})")
                 except Exception as e:
                     logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
                     sig["context_score"] = 0.0

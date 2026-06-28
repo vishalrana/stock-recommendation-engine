@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
+import datetime
 
 from src.providers.context.aggregator import ContextAggregator
 from src.scorers.context_scorer import ContextScorer
@@ -247,7 +247,7 @@ class SignalRanker:
             logger.info("Starting parallel context scoring for %d candidates", len(top_50_tickers))
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {
-                    executor.submit(compute_context_score, ticker, row.to_dict()): ticker
+                    executor.submit(compute_context_score, row["ticker"], row.to_dict()): row["ticker"]
                     for _, row in df_filtered.iterrows()
                     if row["ticker"] in top_50_tickers
                 }
@@ -391,24 +391,24 @@ class SignalRanker:
         return result.reset_index(drop=True)
 
     def _fetch_price_history(self, ticker: str) -> Optional[pd.DataFrame]:
-        # Try new date-partitioned cache first
-        cache_manager = get_cache_manager()
-        today = datetime.date.today().isoformat()
-        ticker_data = cache_manager.get_ticker_data(ticker, today)
-        if ticker_data is not None and not ticker_data.empty:
-            return ticker_data
-        
-        # Fallback to old per-ticker cache
+        # Try old per-ticker cache first for full history
         cache_path = os.path.join("data", "cache", f"{ticker.upper()}.parquet")
         if os.path.exists(cache_path):
             try:
                 return pd.read_parquet(cache_path, engine="pyarrow")
             except Exception:
                 pass
+
+        # Try new date-partitioned cache next
+        cache_manager = get_cache_manager()
+        today = datetime.date.today().isoformat()
+        ticker_data = cache_manager.get_ticker_data(ticker, today)
+        if ticker_data is not None and not ticker_data.empty:
+            return ticker_data
+        
         # Fallback: Download via YahooProvider
         try:
             from src.providers.price.yahoo_provider import YahooProvider
-            import datetime
             provider = YahooProvider()
             end_date = datetime.date.today().isoformat()
             start_date = (datetime.date.today() - datetime.timedelta(days=40)).isoformat()

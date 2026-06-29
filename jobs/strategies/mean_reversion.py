@@ -84,12 +84,12 @@ class MeanReversionStrategy(StrategyInterface):
             return None
 
         # Targets: quick bounce, smaller than pullback or trend
-        target_1 = entry_price * 1.08   # 8% bounce
-        target_2 = entry_price * 1.15   # 15% bounce
-        target_3 = entry_price * 1.25   # 25% max
-        target_1_pct = 8.0
-        target_2_pct = 15.0
-        target_3_pct = 25.0
+        target_1 = entry_price * 1.05
+        target_2 = entry_price * 1.10
+        target_3 = entry_price * 1.15
+        target_1_pct = 5.0
+        target_2_pct = 10.0
+        target_3_pct = 15.0
 
         # Weighted R/R
         reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2

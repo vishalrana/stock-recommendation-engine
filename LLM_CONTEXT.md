@@ -349,3 +349,44 @@ python -m jobs.generate_signals
 cd frontend
 npm run dev
 ```
+
+---
+
+## 8. Performance Overhaul, Caching & Cache Modes
+
+To optimize run times from **~20 minutes** down to **under 2 minutes** (and **under 30s** for dry-run scans) and prevent rate limits, a multi-tier caching and execution layer has been implemented:
+
+### A. Date‑Partitioned Daily Cache (`src/data/cache_manager.py`)
+- OHLCV price histories are saved in daily files (`data/cache/by_date/YYYY-MM-DD.parquet`) rather than per-ticker parquet files.
+- `preload_history()` loads the entire historical dataset into memory at start, reducing file operations from **125,000** down to **~250**.
+- The downloader performs bulk batch downloads using `yf.download(tickers)` in a single request instead of sequentially, and supports exponential backoff retries with chunking fallbacks (chunk size default 50).
+
+### B. Supabase Context Score Cache (`context_cache` table)
+- Computed FinBERT NLP, analyst recommendations, and metrics are cached in a new `context_cache` database table:
+```sql
+CREATE TABLE context_cache (
+    ticker VARCHAR(10) PRIMARY KEY,
+    context_score FLOAT NOT NULL,
+    components JSONB NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+```
+- Scans query `context_cache` first. Cache hits within `CONTEXT_CACHE_TTL_HOURS` (default 24 hours) bypass the expensive NLP/FinBERT and yfinance fundamentals pipeline.
+
+### C. Local Earnings Dates Cache (`src/utils/earnings_cache.py`)
+- Strategy check bottlenecks (which sequentially fetched yfinance earnings calendars for hundreds of tickers) are optimized via a local JSON cache (`data/cache/earnings_dates_cache.json`) with a 24-hour TTL.
+
+### D. Local Ticker Metrics Cache (`src/utils/metrics_cache.py`)
+- Offline/local scans load the seed backtest metrics from a local JSON cache (`data/cache/ticker_metrics_cache.json`) with a 24-hour TTL, completely bypassing the Supabase query.
+
+### E. Environment-Aware Cache Refresh Modes
+You can specify the data refresh behavior via `--cache-mode` CLI arguments or the `CACHE_MODE` environment variable:
+
+| Mode | Behavior | Primary Use Case |
+| :--- | :--- | :--- |
+| **`local`** (default) | Skip downloading historical price bars if the cache is up-to-date (within 2 trading days). Uses pandas business-day logic (`BDay`) to correctly handle weekends and holidays. | Local testing, dry runs. |
+| **`incremental`** | Downloads only dates missing since the last cached date (highly optimized). | Nightly production cron runs. |
+| **`force`** | Completely clears the cache directory and does a full historical download. | Manual resets. |
+
+*Note: In GITHUB_ACTIONS environment, the default mode is automatically inferred as `incremental`. In `--dry-run` runs, `os.environ["SKIP_NLP"]` is set to `true` to skip HuggingFace model loading and query fallbacks.*
+

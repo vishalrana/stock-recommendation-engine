@@ -99,26 +99,19 @@ def compute_targets(df: pd.DataFrame, entry: float) -> dict:
 
     resistance_levels = [h for h in significant_highs if h > entry * 1.01]
 
-    target_1 = resistance_levels[0] if resistance_levels else entry * 1.05
-    target_2 = resistance_levels[1] if len(resistance_levels) > 1 else target_1 * 1.05
-    target_3 = resistance_levels[2] if len(resistance_levels) > 2 else target_2 * 1.05
-
-    max_target = entry * 1.20
-    target_1 = min(target_1, max_target)
-    target_2 = min(target_2, max_target)
-    target_3 = min(target_3, max_target)
-
-    target_2 = max(target_2, target_1 * 1.02)
-    target_3 = max(target_3, target_2 * 1.02)
+    target_1 = entry * 1.07
+    target_2 = entry * 1.12
+    target_3 = entry * 1.18
 
     return {
         "target_1": round(target_1, 2),
         "target_2": round(target_2, 2),
         "target_3": round(target_3, 2),
-        "target_1_pct": round((target_1 / entry - 1) * 100, 2),
-        "target_2_pct": round((target_2 / entry - 1) * 100, 2),
-        "target_3_pct": round((target_3 / entry - 1) * 100, 2),
+        "target_1_pct": 7.0,
+        "target_2_pct": 12.0,
+        "target_3_pct": 18.0,
     }
+
 
 
 def compute_weighted_rr(entry: float, stop: float, targets: dict) -> float:

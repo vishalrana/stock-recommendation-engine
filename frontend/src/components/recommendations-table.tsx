@@ -15,6 +15,28 @@ import {
 import { Recommendation, ScanLog } from '../types/database';
 import { ArrowUpDown, ArrowUp, ArrowDown, Search, HelpCircle } from 'lucide-react';
 
+const formatPrice = (val: number | null | undefined): string => {
+  if (val === null || val === undefined) return '0';
+  return Math.round(val).toString();
+};
+
+function ContextBadge({ score }: { score: number }) {
+  if (score < 5)  return <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-500 font-medium">Low</span>;
+  if (score < 10) return <span className="px-2 py-1 rounded-full text-xs bg-amber-100 text-amber-700 font-medium">Moderate</span>;
+  return           <span className="px-2 py-1 rounded-full text-xs bg-emerald-100 text-emerald-700 font-medium">Strong</span>;
+}
+
+const STRATEGY_NOTES: Record<string, string> = {
+  'Trend Following':          'Hold until trailing stop (10-day low) hit. Targets are 12%/22%/35% — trends run further than pullbacks.',
+  'Pullback Recovery':        'Exit at targets or stop. Short hold 5-15 days. Targets are 7%/12%/18%.',
+  'Mean Reversion':           'Quick reversion trade. Hold 3-10 days. Targets are 5%/10%/15%.',
+  '52-Week High Breakout':    'Breakout momentum trade. Hold 3-6 weeks. Targets are 10%/18%/28%.',
+  '52-Week High':             'Breakout momentum trade. Hold 3-6 weeks. Targets are 10%/18%/28%.',
+  'Post-Earnings Drift':      'Post-earnings drift. Hold 2-4 weeks. Targets are 8%/15%/22%.',
+  'Sector Rotation':          'Sector leadership trade. Hold 2-6 weeks. Targets are 8%/15%/22%.',
+  'Cross-Sectional Momentum': 'Relative strength trade. Hold 2-6 weeks. Targets are 10%/18%/25%.',
+};
+
 interface TableProps {
   data: Recommendation[];
   regime: string | null;
@@ -140,45 +162,24 @@ function ExpandableDetails({ row }: { row: any }) {
               {wins} wins / {losses} losses ({winRate}%)
             </div>
           </div>
+          <div className="col-span-2 md:col-span-4 pt-3 border-t border-gray-100">
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Signal Summary</p>
+            <p className="text-sm text-gray-700">{row.original.narrative || 'Technical setup'}</p>
+          </div>
         </div>
       </div>
 
-      {row.original.strategy === 'Trend Following' && (
-        <div className="mt-2 mb-4 text-xs text-purple-600 bg-purple-50 rounded p-2">
-          <strong>Trend Following:</strong> Hold until trailing stop (10-day low) hit. 
-          Targets are 20% / 35% / 50% — trends run further than pullbacks.
-        </div>
-      )}
-      {row.original.strategy === 'Mean Reversion' && (
-        <div className="mt-2 mb-4 text-xs text-amber-600 bg-amber-50 rounded p-2">
-          <strong>Mean Reversion:</strong> Quick bounce play. Hold 1-3 weeks. 
-          Exit if bounce fails or 20-day low breaks.
-        </div>
-      )}
-      {row.original.strategy === 'Sector Rotation' && (
-        <div className="mt-2 mb-4 text-xs text-teal-600 bg-teal-50 rounded p-2">
-          <strong>Sector Rotation:</strong> Macro play. Hold 2-6 weeks. 
-          Exit if sector falls below 50 DMA. Diversifies single-stock risk.
-        </div>
-      )}
-      {row.original.strategy === 'Post-Earnings Drift' && (
-        <div className="mt-2 mb-4 text-xs text-rose-600 bg-rose-50 rounded p-2">
-          <strong>Post-Earnings Drift:</strong> Event-driven play. Earnings winner pulling back. 
-          Hold 2-4 weeks for drift to continue. Exit if gap low breaks.
-        </div>
-      )}
-      {row.original.strategy === '52-Week High' && (
-        <div className="mt-2 mb-4 text-xs text-indigo-600 bg-indigo-50 rounded p-2">
-          <strong>52-Week High:</strong> Strength begets strength. Hold 3-6 weeks. 
-          Exit if falls below 50 DMA or 5% off 52-week high.
-        </div>
-      )}
-      {row.original.strategy === 'Cross-Sectional Momentum' && (
-        <div className="mt-2 mb-4 text-xs text-emerald-600 bg-emerald-50 rounded p-2">
-          <strong>Cross-Sectional Momentum:</strong> Top 15% performer over 3 months. 
-          Rebalance weekly. Exit if drops out of top 25%.
-        </div>
-      )}
+      {(() => {
+        const strategyName = row.original.strategy || 'Pullback Recovery';
+        const strategyNote = STRATEGY_NOTES[strategyName];
+        if (!strategyNote) return null;
+        return (
+          <div className="mt-3 px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-sm text-gray-600">
+            <span className="font-medium text-gray-700">Strategy note: </span>
+            {strategyNote}
+          </div>
+        );
+      })()}
       {(() => {
         const riskPct = row.original.risk_pct || 0;
         if (riskPct > 15) {
@@ -266,22 +267,16 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
         header: 'Verdict',
         cell: ({ row }) => {
           const tier = row.original.tier_label;
-          const narrative = row.original.narrative || 'Technical setup';
           const isStrongBuy = tier === 'Strong Buy';
           return (
-            <div>
-              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                isStrongBuy ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-blue-100 text-blue-800 border border-blue-200'
-              }`}>
-                {tier}
-              </span>
-              <div className="text-xs text-gray-500 mt-1 max-w-[180px] whitespace-normal break-words" title={narrative}>
-                {narrative}
-              </div>
-            </div>
+            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+              isStrongBuy ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-blue-100 text-blue-800 border border-blue-200'
+            }`}>
+              {tier}
+            </span>
           );
         },
-        size: 160,
+        size: 110,
       },
       {
         accessorKey: 'entry_price',
@@ -305,46 +300,42 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
         id: 'profitPlan',
         header: 'Profit Plan',
         cell: ({ row }) => {
-          const t1 = row.original.target_1;
-          const t2 = row.original.target_2;
-          const t3 = row.original.target_3;
-          const t1pct = row.original.target_1_pct;
-          const t2pct = row.original.target_2_pct;
-          const t3pct = row.original.target_3_pct;
+          const target_1_price = row.original.target_1;
+          const target_2_price = row.original.target_2;
+          const target_3_price = row.original.target_3;
+          const t1_pct = Math.round(row.original.target_1_pct || 0);
+          const t2_pct = Math.round(row.original.target_2_pct || 0);
+          const t3_pct = Math.round(row.original.target_3_pct || 0);
           const rr = row.original.weighted_rr;
-
-          let rrColor = 'text-gray-500';
-          let rrBg = 'bg-gray-100';
-          if (rr !== undefined && rr !== null) {
-            if (rr >= 2.0) { rrColor = 'text-green-700'; rrBg = 'bg-green-50'; }
-            else if (rr >= 1.0) { rrColor = 'text-yellow-700'; rrBg = 'bg-yellow-50'; }
-            else { rrColor = 'text-red-700'; rrBg = 'bg-red-50'; }
-          }
+          const weighted_rr = rr !== undefined && rr !== null ? rr.toFixed(1) : '-';
 
           return (
-            <div className="space-y-0.5 min-w-[130px] group relative cursor-help" title="Sell 50% at first target, move stop to breakeven">
-              <div className="text-xs text-gray-700">
-                50% at <span className="font-semibold text-gray-900">${Math.round(t1 || 0)}</span>
-                <span className="text-green-600 ml-1">+{Math.round(t1pct || 0)}%</span>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-semibold text-gray-900 w-6">T1</span>
+                <span className="font-mono">${formatPrice(target_1_price)}</span>
+                <span className="text-emerald-600 font-medium">+{t1_pct}%</span>
+                <span className="text-xs text-gray-400 ml-auto">50% exit</span>
               </div>
-              <div className="text-xs text-gray-500 hidden sm:block">
-                30% at <span className="font-medium">${Math.round(t2 || 0)}</span>
-                <span className="text-blue-600 ml-1">+{Math.round(t2pct || 0)}%</span>
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <span className="font-semibold w-6">T2</span>
+                <span className="font-mono">${formatPrice(target_2_price)}</span>
+                <span className="text-emerald-500">+{t2_pct}%</span>
+                <span className="text-xs text-gray-400 ml-auto">30% exit</span>
               </div>
-              <div className="text-xs text-gray-500 hidden sm:block">
-                20% at <span className="font-medium">${Math.round(t3 || 0)}</span>
-                <span className="text-purple-600 ml-1">+{Math.round(t3pct || 0)}%</span>
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <span className="font-semibold w-6">T3</span>
+                <span className="font-mono">${formatPrice(target_3_price)}</span>
+                <span className="text-emerald-400">+{t3_pct}%</span>
+                <span className="text-xs text-gray-400 ml-auto">20% exit</span>
               </div>
-              <div className="block sm:hidden text-[10px] text-blue-500 font-semibold mt-0.5">2 more targets</div>
-              {rr !== null && rr !== undefined && (
-                <div className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${rrBg} ${rrColor} inline-block mt-1 hidden sm:inline-block`}>
-                  R/R: {rr.toFixed(1)}
-                </div>
-              )}
+              <div className="pt-1 border-t border-gray-100 text-xs text-gray-500">
+                Weighted R/R: <span className="font-semibold text-gray-700">{weighted_rr}x</span>
+              </div>
             </div>
           );
         },
-        size: 150,
+        size: 160,
       },
       {
         id: 'risk',
@@ -416,40 +407,7 @@ export default function RecommendationsTable({ data, regime, scanLog }: TablePro
           if (score === undefined || score === null || score === 0) {
             return <span className="text-gray-300 text-xs">—</span>;
           }
-
-          let bgColor, textColor, label;
-          if (score > 10) {
-            bgColor = 'bg-emerald-100 border border-emerald-200';
-            textColor = 'text-emerald-700';
-            label = 'Strong Positive';
-          } else if (score > 7) {
-            bgColor = 'bg-blue-100 border border-blue-200';
-            textColor = 'text-blue-700';
-            label = 'Positive';
-          } else if (score > 4) {
-            bgColor = 'bg-yellow-100 border border-yellow-200';
-            textColor = 'text-yellow-700';
-            label = 'Neutral';
-          } else {
-            bgColor = 'bg-gray-100 border border-gray-200';
-            textColor = 'text-gray-500';
-            label = 'Cautious';
-          }
-
-          return (
-            <div className="group relative inline-block cursor-help">
-              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${bgColor} ${textColor}`}>
-                {score.toFixed(1)}
-              </span>
-              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs rounded-lg p-3 z-30 w-56 shadow-xl leading-relaxed whitespace-pre-line pointer-events-none border border-gray-800">
-                <div className="font-bold text-gray-200 border-b border-gray-700 pb-1 mb-1">Context Score: {score.toFixed(1)}/15</div>
-                <div className="text-gray-300">Verdict: <span className="font-semibold text-white">{label}</span></div>
-                <div className="text-gray-400 mt-2 text-[10px] pt-1.5 border-t border-gray-805">
-                  Calculated from analyst consensus estimates, quarterly earnings surprise surprise, Google News FinBERT sentiment, and balance sheet safety.
-                </div>
-              </div>
-            </div>
-          );
+          return <ContextBadge score={score} />;
         },
         size: 90,
       },

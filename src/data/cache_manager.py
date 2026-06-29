@@ -14,6 +14,7 @@ import time
 import datetime
 from typing import Optional, List, Dict
 import pandas as pd
+from pandas.tseries.offsets import BDay
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,34 @@ class CacheManager:
             except Exception as e:
                 logger.warning(f"Failed to delete {f}: {e}")
         self._history_cache.clear()
+
+    def get_last_cached_date(self) -> Optional[datetime.date]:
+        """Return the most recent date for which a cache file exists, or None."""
+        parquet_files = glob.glob(os.path.join(self.cache_dir, "*.parquet"))
+        if not parquet_files:
+            return None
+        dates = []
+        for fpath in parquet_files:
+            bname = os.path.basename(fpath).replace(".parquet", "")
+            try:
+                dates.append(datetime.date.fromisoformat(bname))
+            except ValueError:
+                continue
+        return max(dates) if dates else None
+
+    def is_stale(self, max_age_trading_days: int = 2) -> bool:
+        """
+        Check if the cache is stale (missing recent trading-day data).
+        Uses pandas BDay to skip weekends/holidays.
+        Returns True if cache is empty or older than max_age_trading_days.
+        """
+        last = self.get_last_cached_date()
+        if last is None:
+            return True
+        # The latest expected trading day (last business day up to today)
+        latest_bday = (pd.Timestamp.now() - BDay(0)).date()
+        cutoff = (pd.Timestamp(latest_bday) - BDay(max_age_trading_days - 1)).date()
+        return last < cutoff
 
     def get_data_for_date(self, date_str: str) -> Optional[pd.DataFrame]:
         """Load MultiIndex DataFrame for a specific date from cache."""

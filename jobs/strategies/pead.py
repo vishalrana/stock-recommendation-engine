@@ -121,12 +121,12 @@ class PEADStrategy(StrategyInterface):
             return None
 
         # Targets: earnings drift continues 2-4 weeks
-        target_1 = entry_price * 1.08   # 8%
-        target_2 = entry_price * 1.15   # 15%
-        target_3 = entry_price * 1.25   # 25%
+        target_1 = entry_price * 1.08
+        target_2 = entry_price * 1.15
+        target_3 = entry_price * 1.22
         target_1_pct = 8.0
         target_2_pct = 15.0
-        target_3_pct = 25.0
+        target_3_pct = 22.0
 
         reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
         weighted_rr = reward / risk if risk > 0 else 0

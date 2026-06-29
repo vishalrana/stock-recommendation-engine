@@ -75,12 +75,12 @@ class TrendFollowingStrategy(StrategyInterface):
             return None
 
         # Targets: trends run further than pullbacks
-        target_1 = entry_price * 1.20
-        target_2 = entry_price * 1.35
-        target_3 = entry_price * 1.50
-        target_1_pct = 20.0
-        target_2_pct = 35.0
-        target_3_pct = 50.0
+        target_1 = entry_price * 1.12
+        target_2 = entry_price * 1.22
+        target_3 = entry_price * 1.35
+        target_1_pct = 12.0
+        target_2_pct = 22.0
+        target_3_pct = 35.0
 
         # Weighted R/R
         reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2

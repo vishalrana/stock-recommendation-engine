@@ -363,31 +363,32 @@ class SignalRanker:
 
         # On-the-fly fallback context scoring for candidates in final recommendations that missed top 30
         fallback_happened = False
-        for idx, row in result.iterrows():
-            ticker = row["ticker"]
-            if row.get("context_score", 0.0) == 0.0 and ticker not in top_50_tickers:
-                logger.info("Triggering fallback on-the-fly context scoring for final recommended setup: %s", ticker)
-                c_score = 0.0
-                try:
-                    price_df = self._fetch_price_history(ticker)
-                    if price_df is not None and not price_df.empty:
-                        ctx = self.context_aggregator.get_aggregated(ticker, price_df)
-                        current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
-                        c_score = self.context_scorer.calculate(ctx, float(current_price))
-                except Exception as e:
-                    logger.warning("Failed context aggregation for fallback ticker %s: %s", ticker, e)
+        if not skip_nlp:
+            for idx, row in result.iterrows():
+                ticker = row["ticker"]
+                if row.get("context_score", 0.0) == 0.0 and ticker not in top_50_tickers:
+                    logger.info("Triggering fallback on-the-fly context scoring for final recommended setup: %s", ticker)
                     c_score = 0.0
+                    try:
+                        price_df = self._fetch_price_history(ticker)
+                        if price_df is not None and not price_df.empty:
+                            ctx = self.context_aggregator.get_aggregated(ticker, price_df)
+                            current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
+                            c_score = self.context_scorer.calculate(ctx, float(current_price))
+                    except Exception as e:
+                        logger.warning("Failed context aggregation for fallback ticker %s: %s", ticker, e)
+                        c_score = 0.0
 
-                result.at[idx, "context_score"] = c_score
-                
-                # Recompute composite score
-                row_dict = result.loc[idx].to_dict()
-                row_dict["context_score"] = c_score
-                row_dict["regime_score"] = row["regime_score"]
-                res = self.compute_composite_score(row_dict, regime)
-                result.at[idx, "composite_score"] = res["total"]
-                result.at[idx, "score_breakdown"] = res["breakdown"]
-                fallback_happened = True
+                    result.at[idx, "context_score"] = c_score
+                    
+                    # Recompute composite score
+                    row_dict = result.loc[idx].to_dict()
+                    row_dict["context_score"] = c_score
+                    row_dict["regime_score"] = row["regime_score"]
+                    res = self.compute_composite_score(row_dict, regime)
+                    result.at[idx, "composite_score"] = res["total"]
+                    result.at[idx, "score_breakdown"] = res["breakdown"]
+                    fallback_happened = True
 
         if fallback_happened:
             result = result.sort_values("composite_score", ascending=False)

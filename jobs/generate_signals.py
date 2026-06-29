@@ -39,6 +39,29 @@ from regime import get_regime
 from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
 from src.data.cache_manager import get_cache_manager
+from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
+
+
+def get_cache_mode(args) -> str:
+    """Determine cache refresh mode based on CLI flags, env vars, and environment.
+
+    Priority chain:
+      1. --force-refresh flag  → "force"
+      2. --cache-mode CLI arg  → whatever the user typed
+      3. CACHE_MODE env var    → whatever is set
+      4. GITHUB_ACTIONS=true   → "incremental"
+      5. default               → "local"
+    """
+    if args.force_refresh:
+        return "force"
+    if hasattr(args, "cache_mode") and args.cache_mode:
+        return args.cache_mode
+    env_mode = os.environ.get("CACHE_MODE", "").lower()
+    if env_mode in ("local", "incremental", "force"):
+        return env_mode
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return "incremental"
+    return "local"
 
 # Strategy activation by market regime
 REGIME_STRATEGY_MAP = {
@@ -301,18 +324,25 @@ def main():
         help="Delete all cached parquet files and re-download fresh data from yfinance for the full universe",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--cache-mode",
+        choices=["local", "incremental", "force"],
+        default=None,
+        help="Override automatic cache mode detection (local=no downloads, incremental=missing days only, force=full re-download)",
+    )
     args = parser.parse_args()
     
     # If dry-run is requested, set SKIP_NLP=true to bypass model loading entirely
     if args.dry_run:
         os.environ["SKIP_NLP"] = "true"
 
+    cache_mode = get_cache_mode(args)
+
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
     if args.dry_run:
         logger.info("DRY RUN ACTIVE — database writes will be skipped")
-    if args.force_refresh:
-        logger.info("FORCE REFRESH ACTIVE — cache will be cleared and data re-downloaded")
+    logger.info("Cache mode: %s", cache_mode.upper())
     logger.info("=" * 60)
 
     scan_date_today = datetime.now().date().isoformat()
@@ -333,45 +363,59 @@ def main():
 
     tickers, company_names, industries = load_universe()
 
-    # Initialize date-partitioned CacheManager
+    # ── Cache Mode Detection ──────────────────────────────────────────
     cache_manager = get_cache_manager()
     by_date_dir = os.path.join(PROJECT_ROOT, "data", "cache", "by_date")
-    
-    is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
-    force_download = os.environ.get("DOWNLOAD_DATA") == "true"
-    cache_empty = len(glob.glob(os.path.join(by_date_dir, "*.parquet"))) == 0
-
-    if args.force_refresh:
-        logger.info("FORCE REFRESH: clearing cache and deleting old parquet files...")
-        cache_manager.clear_all()
-        # Delete old legacy files
-        legacy_files = glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet"))
-        for lf in legacy_files:
-            try:
-                os.remove(lf)
-            except Exception as e:
-                logger.warning(f"Failed to delete old legacy file {lf}: {e}")
-        cache_empty = True
 
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     etf_tickers = list(SECTOR_ETFS.keys())
     all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
     all_download_tickers = [t for t in all_download_tickers if t not in BLACKLIST]
 
+    # ── Cache Refresh (mode-aware) ────────────────────────────────────
     t_download_start = time.time()
-    if is_ci or force_download or cache_empty:
-        logger.info("Performing full bulk data cache refresh...")
-        end_date_dt = datetime.now().date()
+    end_date_dt = datetime.now().date()
+
+    if cache_mode == "force":
+        logger.info("FORCE: Clearing all cache and re-downloading full history...")
+        cache_manager.clear_all()
+        # Also clean up any legacy per-ticker files
+        for lf in glob.glob(os.path.join(PROJECT_ROOT, "data", "cache", "*.parquet")):
+            try:
+                os.remove(lf)
+            except Exception:
+                pass
         start_date_dt = end_date_dt - timedelta(days=500)
         cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
-        logger.info(f"Full bulk data cache refresh completed in {time.time() - t_download_start:.2f}s")
-    else:
-        logger.info("Performing incremental daily update...")
-        end_date_dt = datetime.now().date()
-        # Grab last 5 days to cover weekend gaps
-        start_date_dt = end_date_dt - timedelta(days=5)
-        cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
-        logger.info(f"Incremental daily update completed in {time.time() - t_download_start:.2f}s")
+        logger.info(f"Force refresh completed in {time.time() - t_download_start:.1f}s")
+
+    elif cache_mode == "incremental":
+        last_cached = cache_manager.get_last_cached_date()
+        if last_cached:
+            start_date_dt = last_cached + timedelta(days=1)
+            logger.info(f"INCREMENTAL: Downloading from {start_date_dt} to {end_date_dt} (last cached: {last_cached})")
+        else:
+            start_date_dt = end_date_dt - timedelta(days=500)
+            logger.info(f"INCREMENTAL: No cache found. Full download from {start_date_dt} to {end_date_dt}")
+        if start_date_dt <= end_date_dt:
+            cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+        else:
+            logger.info("INCREMENTAL: Cache already covers today. No download needed.")
+        logger.info(f"Incremental refresh completed in {time.time() - t_download_start:.1f}s")
+
+    else:  # local
+        if cache_manager.is_stale(max_age_trading_days=2):
+            last_cached = cache_manager.get_last_cached_date()
+            if last_cached:
+                start_date_dt = last_cached + timedelta(days=1)
+                logger.info(f"LOCAL: Cache stale (last: {last_cached}). Downloading {start_date_dt} to {end_date_dt}...")
+            else:
+                start_date_dt = end_date_dt - timedelta(days=500)
+                logger.info(f"LOCAL: No cache found. Full download from {start_date_dt}...")
+            cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+            logger.info(f"Local refresh completed in {time.time() - t_download_start:.1f}s")
+        else:
+            logger.info("LOCAL: Cache is fresh (last: %s). Skipping downloads.", cache_manager.get_last_cached_date())
 
     daily_files = glob.glob(os.path.join(by_date_dir, "*.parquet"))
     total_files = len(daily_files)
@@ -381,31 +425,38 @@ def main():
         logger.error("No cached daily files found. Cannot generate signals.")
         sys.exit(1)
 
+    # ── Supabase Client ───────────────────────────────────────────────
     try:
         supabase = get_client()
     except Exception as e:
         logger.error("Failed to initialize Supabase client: %s", e)
         sys.exit(1)
 
+    # ── Ticker Metrics (with local cache for zero-network local mode) ─
     metrics_map: dict = {}
-    try:
-        logger.info("Fetching historical metrics from Supabase ticker_metrics...")
-        res = supabase.table("ticker_metrics").select(
-            "ticker, win_rate, expectancy_pct, total_signals, wins, losses, median_win_return"
-        ).execute()
-        for row in res.data:
-            ticker = row["ticker"].upper()
-            metrics_map[ticker] = {
-                "win_rate": float(row["win_rate"] or 0),
-                "expectancy_pct": float(row["expectancy_pct"] or 0),
-                "total_signals": int(row["total_signals"] or 0),
-                "wins": int(row.get("wins") or 0),
-                "losses": int(row.get("losses") or 0),
-                "median_win_return": float(row.get("median_win_return") or 0.0),
-            }
-        logger.info("Loaded metrics for %d tickers.", len(metrics_map))
-    except Exception as e:
-        logger.warning("Could not load ticker metrics: %s. Using fallback values.", e)
+    if cache_mode == "local":
+        metrics_map = load_cached_metrics() or {}
+
+    if not metrics_map:
+        try:
+            logger.info("Fetching historical metrics from Supabase ticker_metrics...")
+            res = supabase.table("ticker_metrics").select(
+                "ticker, win_rate, expectancy_pct, total_signals, wins, losses, median_win_return"
+            ).execute()
+            for row in res.data:
+                ticker = row["ticker"].upper()
+                metrics_map[ticker] = {
+                    "win_rate": float(row["win_rate"] or 0),
+                    "expectancy_pct": float(row["expectancy_pct"] or 0),
+                    "total_signals": int(row["total_signals"] or 0),
+                    "wins": int(row.get("wins") or 0),
+                    "losses": int(row.get("losses") or 0),
+                    "median_win_return": float(row.get("median_win_return") or 0.0),
+                }
+            logger.info("Loaded metrics for %d tickers.", len(metrics_map))
+            save_cached_metrics(metrics_map)
+        except Exception as e:
+            logger.warning("Could not load ticker metrics: %s. Using fallback values.", e)
 
     all_signals: list[dict] = []
     strategy_counts: dict[str, int] = {}
@@ -591,24 +642,66 @@ def main():
                                 from src.providers.context.aggregator import save_context_to_cache
                                 save_context_to_cache(sig["ticker"], sig["context_score"], ctx)
                                 
-                            # Recompute composite score using the ranker
-                            res = ranker.compute_composite_score(sig, regime_str)
-                            sig["composite_score"] = round(float(res["total"]), 4)
-                            sig["quality_score"] = round(float(res["total"]), 4)
+                            # Adjust composite score by adding the context score contribution
+                            old_score = float(sig.get("composite_score", 50.0))
+                            context_score = float(sig["context_score"])
+                            new_score = old_score + context_score * 0.15
+                            sig["composite_score"] = round(new_score, 4)
+                            sig["quality_score"] = round(new_score, 4)
                             logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']} (new composite: {sig['composite_score']:.1f})")
                     except Exception as e:
                         logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
                         sig["context_score"] = 0.0
 
+        STRATEGY_TARGETS = {
+            'Trend Following':          (0.12, 0.22, 0.35),
+            'Pullback Recovery':        (0.07, 0.12, 0.18),
+            'Mean Reversion':           (0.05, 0.10, 0.15),
+            '52-Week High Breakout':    (0.10, 0.18, 0.28),
+            '52-Week High':             (0.10, 0.18, 0.28),
+            'Post-Earnings Drift':      (0.08, 0.15, 0.22),
+            'Sector Rotation':          (0.08, 0.15, 0.22),
+            'Cross-Sectional Momentum': (0.10, 0.18, 0.25),
+        }
+
         for sig in final_signals:
             entry_price = float(sig["entry_price"])
-            t1_pct = float(sig.get("target_1_pct") or 0.0)
-            t2_pct = float(sig.get("target_2_pct") or 0.0)
-            t3_pct = float(sig.get("target_3_pct") or 0.0)
+            stop_loss = float(sig["stop_loss"])
+            strategy_name = sig["strategy"]
 
-            target_1 = round(entry_price * (1 + t1_pct / 100), 2) if t1_pct else None
-            target_2 = round(entry_price * (1 + t2_pct / 100), 2) if t2_pct else None
-            target_3 = round(entry_price * (1 + t3_pct / 100), 2) if t3_pct else None
+            # Re-evaluate tier label based on the actual final composite score and metrics
+            score = float(sig.get("composite_score", 0.0))
+            exp = float(sig.get("expectancy_pct") or 0.0)
+            wr = float(sig.get("past_win_rate") or 0.0)
+            trades = int(sig.get("total_trades") or 0)
+
+            is_t1 = (score >= 65.0) and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
+            is_t2 = (score >= 50.0) and (exp >= 0.0) and (wr >= 25.0) and (trades >= 10)
+            is_t3 = (score >= 40.0) and (exp >= -2.0)
+
+            if is_t1:
+                sig["tier_label"] = "Strong Buy"
+            elif is_t2:
+                sig["tier_label"] = "Buy"
+            elif is_t3:
+                sig["tier_label"] = "Watch"
+            else:
+                sig["tier_label"] = "Speculative"
+
+            t1_pct, t2_pct, t3_pct = STRATEGY_TARGETS.get(strategy_name, (0.10, 0.20, 0.30))
+
+            target_1 = round(entry_price * (1 + t1_pct), 2)
+            target_2 = round(entry_price * (1 + t2_pct), 2)
+            target_3 = round(entry_price * (1 + t3_pct), 2)
+
+            sig["target_1_pct"] = round(t1_pct * 100, 1)
+            sig["target_2_pct"] = round(t2_pct * 100, 1)
+            sig["target_3_pct"] = round(t3_pct * 100, 1)
+
+            risk = entry_price - stop_loss
+            reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
+            sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
+
 
             ranked_signals.append(
                 {
@@ -653,7 +746,13 @@ def main():
 
     rsi_breadth_pct = round(100.0 * rsi_passed_count / scanned_count, 1) if scanned_count > 0 else 0.0
     signals_recommended = len(ranked_signals)
-    if signals_recommended == 0:
+    
+    if ranked_signals:
+        logger.info("=== FINAL RECOMMENDED SIGNALS ===")
+        for s in ranked_signals:
+            logger.info(f"Ticker: {s['ticker']:<5} | Strategy: {s['strategy']:<25} | Composite Score: {s['composite_score']:.2f} | Tier: {s['tier_label']}")
+        logger.info("=================================")
+    else:
         logger.info("No high-confidence setups tonight. Cash is a position.")
 
     duration = round(time.time() - start_time, 2)

@@ -73,12 +73,12 @@ class Week52HighStrategy(StrategyInterface):
             return None
 
         # Targets: strength begets strength
-        target_1 = entry_price * 1.12   # 12%
-        target_2 = entry_price * 1.20   # 20%
-        target_3 = entry_price * 1.30   # 30%
-        target_1_pct = 12.0
-        target_2_pct = 20.0
-        target_3_pct = 30.0
+        target_1 = entry_price * 1.10
+        target_2 = entry_price * 1.18
+        target_3 = entry_price * 1.28
+        target_1_pct = 10.0
+        target_2_pct = 18.0
+        target_3_pct = 28.0
 
         reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
         weighted_rr = reward / risk if risk > 0 else 0

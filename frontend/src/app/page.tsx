@@ -72,23 +72,25 @@ export default async function Page() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-[#f8f9fa] py-8 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
-        <header className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <header className="mb-8 flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2 pb-4 border-b border-gray-200/80">
           <div>
-            <h1 className="text-3xl font-extrabold text-gray-900 sm:text-4xl tracking-tight">
+            <h1 className="text-2xl font-bold text-gray-900 sm:text-3xl tracking-tight flex items-center gap-2">
+              <span className="w-1.5 h-6 bg-blue-600 rounded-full inline-block"></span>
               Stock Recommendations
             </h1>
+            <p className="text-xs text-gray-500 mt-1 pl-3.5">Strategy 1.3 Rev B • Live Signal Intelligence</p>
           </div>
           {scanLog?.scan_date && (
-            <div className="text-xs text-gray-500 font-medium sm:text-right">
-              Last scan date: <span className="font-semibold text-gray-800">{formatDateLong(scanLog.scan_date)}</span>
+            <div className="text-xs text-gray-500 font-medium pl-3.5 sm:pl-0 sm:text-right">
+              Last database scan: <span className="font-semibold text-gray-800">{formatDateLong(scanLog.scan_date)}</span>
             </div>
           )}
         </header>
 
         {errorMsg ? (
-          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded shadow-sm">
+          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-xl shadow-sm">
             <div className="flex">
               <div className="flex-shrink-0">
                 <svg className="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
@@ -104,7 +106,7 @@ export default async function Page() {
             </div>
           </div>
         ) : (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200/80 p-6">
             <RecommendationsTable data={data} regime={regime} scanLog={scanLog} />
           </div>
         )}

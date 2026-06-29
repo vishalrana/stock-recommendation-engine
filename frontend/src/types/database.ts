@@ -59,4 +59,5 @@ export interface ScanLog {
   regime?: string;
   active_strategies?: number;
   skipped_strategies?: Record<string, string>;
+  rsi_breadth_pct?: number;
 }

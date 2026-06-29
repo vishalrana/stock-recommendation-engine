@@ -99,7 +99,13 @@ def get_regime() -> dict:
                 "date": date_str,
             }
 
-        regime = "bull" if spy_price > spy_200dma else "bear"
+        pct_above_200dma = (spy_price / spy_200dma - 1) * 100
+        if pct_above_200dma > 2.0:
+            regime = "bull"
+        elif pct_above_200dma < -2.0:
+            regime = "bear"
+        else:
+            regime = "sideways"
 
         logger.info(
             "Regime detected: %s | SPY: $%.2f | 200 DMA: $%.2f | Date: %s",
@@ -163,7 +169,7 @@ if __name__ == "__main__":
     print()
 
     # Assertions
-    assert result["regime"] in ("bull", "bear"), f"Invalid regime: {result['regime']}"
+    assert result["regime"] in ("bull", "bear", "sideways"), f"Invalid regime: {result['regime']}"
     assert isinstance(result["spy_price"], float), "spy_price must be float"
     assert isinstance(result["spy_200dma"], float), "spy_200dma must be float"
     assert isinstance(result["date"], str), "date must be string"

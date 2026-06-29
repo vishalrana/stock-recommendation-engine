@@ -251,7 +251,7 @@ class PEADStrategy(StrategyInterface):
             'risk_pct': round(risk_pct, 2),
             'composite_score': round(composite_score, 1),
             'tier_label': tier_label,
-            'quality_score': round(composite_score * 0.8, 1) if is_blocked else round(composite_score, 1),
+            'quality_score': round(composite_score * 0.3, 1) if is_blocked else round(composite_score, 1),
             'narrative': narrative,
             'past_win_rate': past_win_rate,
             'total_trades': total_trades,

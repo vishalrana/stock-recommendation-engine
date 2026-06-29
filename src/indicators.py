@@ -118,9 +118,12 @@ def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     dm_plus_smooth = wilder_smooth(dm_plus, period)
     dm_minus_smooth = wilder_smooth(dm_minus, period)
 
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    dx = 100 * (di_plus - di_minus).abs() / (di_plus + di_minus)
+    # Guard: avoid division by zero when tr_smooth or (DI+ + DI-) is zero
+    tr_smooth_safe = tr_smooth.replace(0, np.nan)
+    di_plus = 100 * dm_plus_smooth / tr_smooth_safe
+    di_minus = 100 * dm_minus_smooth / tr_smooth_safe
+    di_sum = (di_plus + di_minus).replace(0, np.nan)
+    dx = (100 * (di_plus - di_minus).abs() / di_sum).fillna(0)
     adx = wilder_smooth(dx, period) / period
     return adx
 

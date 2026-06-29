@@ -27,14 +27,16 @@ class ContextScorer:
         score = 0.0
         
         # 1. Analyst Alignment (Max 30)
+        analyst_pts = 0
         if ctx.analyst.target_mean_price and current_price > 0:
             upside = (ctx.analyst.target_mean_price - current_price) / current_price
             if upside > self.config['analyst']['upside_threshold_bonus']:
-                score += 30
+                analyst_pts += 30
             elif upside > 0:
-                score += 15
+                analyst_pts += 15
             if ctx.analyst.recommendation in ["buy", "strong_buy"]:
-                score += self.config['analyst']['buy_bonus']
+                analyst_pts += self.config['analyst']['buy_bonus']
+        score += min(analyst_pts, 30)  # Cap at documented max
         
         # 2. Earnings Momentum (Max 30)
         if ctx.earnings.surprise_percent is not None:
@@ -76,6 +78,6 @@ class ContextScorer:
             )
             score = max(score, min(15, fallback))
         
-        # Clamp to [0, 100] and apply global weight (15%)
-        raw_score = max(0, min(100, score))
-        return raw_score * self.config.get('global_multiplier', 0.15)
+        # Clamp to [0, 100] — the composite formula in SignalRanker applies
+        # WEIGHT_CONTEXT (0.15) itself, so we must NOT pre-multiply here.
+        return max(0, min(100, score))

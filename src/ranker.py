@@ -1,13 +1,14 @@
 """
-Signal Ranker — Strategy 1.3 Rev A
+Signal Ranker — Strategy 1.3 Rev B
 ===================================
 Composite-normalized, tiered ranking engine for Strategy 1.3.
 
 Weights:
-  - Technical Momentum (30%): RSI, Proximity to 50 DMA, Volume Ratio, MACD histogram
-  - Risk-Adjusted Expectancy (40%): Z-score in pool, with negative expectancy penalty
-  - Historical Win Rate (20%): Percentile rank
+  - Technical Momentum (25%): RSI, Proximity to 50 DMA, Volume Ratio, MACD histogram
+  - Risk-Adjusted Expectancy (35%): Z-score in pool, with negative expectancy penalty
+  - Historical Win Rate (15%): Percentile rank
   - Regime Adjustment (10%): Bull/Bear/Sideways specific bonus
+  - Context Score (15%): Analyst, earnings, fundamentals, news, price/volume events
 """
 
 import logging
@@ -235,7 +236,12 @@ class SignalRanker:
                 if price_df is not None and not price_df.empty:
                     ctx = self.context_aggregator.get_aggregated(ticker, price_df)
                     current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
-                    c_score = self.context_scorer.calculate(ctx, float(current_price))
+                    tech_data = {
+                        'rsi': row.get('current_rsi', 50),
+                        'adx': row.get('adx_value', 20),
+                        'volume_ratio': row.get('volume_ratio', 1.0),
+                    }
+                    c_score = self.context_scorer.calculate(ctx, float(current_price), tech_data)
                     
                     # If it was a cache miss, save the computed score to cache
                     if ctx.cached_score is None:
@@ -374,7 +380,12 @@ class SignalRanker:
                         if price_df is not None and not price_df.empty:
                             ctx = self.context_aggregator.get_aggregated(ticker, price_df)
                             current_price = row.get("price") or (price_df['Close'].iloc[-1] if not price_df.empty else 0.0)
-                            c_score = self.context_scorer.calculate(ctx, float(current_price))
+                            tech_data = {
+                                'rsi': row.get('current_rsi', 50),
+                                'adx': row.get('adx_value', 20),
+                                'volume_ratio': row.get('volume_ratio', 1.0),
+                            }
+                            c_score = self.context_scorer.calculate(ctx, float(current_price), tech_data)
                     except Exception as e:
                         logger.warning("Failed context aggregation for fallback ticker %s: %s", ticker, e)
                         c_score = 0.0

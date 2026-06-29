@@ -500,14 +500,15 @@ class PullbackRecoveryStrategy(StrategyInterface):
         ranked: List[dict] = []
         for _, row in scored_df.iterrows():
             breakdown = row["score_breakdown"]
-            a = 0.30 * breakdown["momentum"]
-            b = 0.40 * breakdown["expectancy"]
-            c = 0.20 * breakdown["winrate"]
+            a = 0.25 * breakdown["momentum"]
+            b = 0.35 * breakdown["expectancy"]
+            c = 0.15 * breakdown["winrate"]
             d = 0.10 * breakdown["regime"]
+            e = 0.15 * breakdown["context"]
 
             logger.info(
                 "%s | Composite: %.1f | Tier: %s | "
-                "Momentum: %.1f/30, Expectancy: %.1f/40, WinRate: %.1f/20, Regime: %.1f/10 | "
+                "Momentum: %.1f/25, Expectancy: %.1f/35, WinRate: %.1f/15, Regime: %.1f/10, Context: %.1f/15 | "
                 "Raw: exp=%.2f%%, win=%.1f%%, trades=%s",
                 row["ticker"],
                 row["composite_score"],
@@ -516,6 +517,7 @@ class PullbackRecoveryStrategy(StrategyInterface):
                 b,
                 c,
                 d,
+                e,
                 row["expectancy_pct"],
                 row["win_rate"],
                 row["total_trades"],

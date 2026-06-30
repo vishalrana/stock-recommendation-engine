@@ -57,3 +57,100 @@ try:
     supabase = get_client()
 except Exception:
     supabase = None
+
+
+def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_reason=None):
+    from datetime import datetime
+    if not supabase:
+        return
+    today = datetime.now().date().isoformat()
+    update_data = {
+        'status': status,
+        'exit_price': exit_price,
+        'sell_price': exit_price,
+        'sell_signal': True,
+        'sell_signal_reason': sell_signal_reason or sell_signal,
+        'sell_signal_date': today,
+        'exit_date': today,
+        'price': exit_price,
+    }
+    supabase.table('signals').update(update_data).eq('ticker', ticker).eq('status', 'open').execute()
+
+
+def update_signals_price(ticker, current_price):
+    if not supabase:
+        return
+    supabase.table('signals').update({
+        'price': current_price
+    }).eq('ticker', ticker).eq('status', 'open').execute()
+
+
+def update_history_outcome(ticker, status, exit_price, sell_signal):
+    if not supabase:
+        return
+    from datetime import datetime
+    outcome_map = {
+        'stop_loss': 'stopped',
+        'take_profit_1': 'hit_t1',
+        'take_profit_2': 'hit_t2',
+        'take_profit_3': 'hit_t3',
+    }
+    outcome = outcome_map.get(status, status)
+    
+    res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('outcome', 'open').execute()
+    if res.data:
+        record = res.data[0]
+        entry_price = float(record.get('entry_price') or 0)
+        scan_date_str = record.get('scan_date')
+        
+        return_pct = None
+        if entry_price > 0 and exit_price is not None:
+            return_pct = ((exit_price - entry_price) / entry_price) * 100
+            
+        holding_days = None
+        if scan_date_str:
+            try:
+                scan_date = datetime.strptime(scan_date_str, '%Y-%m-%d').date()
+                holding_days = (datetime.now().date() - scan_date).days
+            except Exception:
+                pass
+                
+        supabase.table('signals_history').update({
+            'outcome': outcome,
+            'outcome_date': datetime.now().date().isoformat(),
+            'outcome_return_pct': return_pct,
+            'outcome_holding_days': holding_days
+        }).eq('ticker', ticker).eq('outcome', 'open').execute()
+
+
+def get_latest_price(ticker):
+    ticker = ticker.upper()
+    try:
+        from src.data.cache_manager import get_cache_manager
+        cm = get_cache_manager()
+        # Check preloaded history cache
+        if ticker in cm._history_cache and not cm._history_cache[ticker].empty:
+            df = cm._history_cache[ticker]
+            close_col = "CLOSE" if "CLOSE" in df.columns else "Close"
+            return float(df[close_col].iloc[-1])
+        # Fallback to reading disk/download
+        import datetime
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=10)
+        df = cm.get_ticker_history(ticker, start_date.isoformat(), end_date.isoformat())
+        if df is not None and not df.empty:
+            close_col = "CLOSE" if "CLOSE" in df.columns else "Close"
+            return float(df[close_col].iloc[-1])
+        # Direct yfinance fallback
+        import yfinance as yf
+        ticker_obj = yf.Ticker(ticker)
+        fast_info = ticker_obj.fast_info
+        if fast_info and 'lastPrice' in fast_info:
+            return float(fast_info['lastPrice'])
+        history = ticker_obj.history(period="1d")
+        if not history.empty:
+            return float(history['Close'].iloc[-1])
+    except Exception as e:
+        print(f"Error fetching latest price for {ticker}: {e}")
+    return None
+

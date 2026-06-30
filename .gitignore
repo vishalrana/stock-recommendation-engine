@@ -29,3 +29,8 @@ scratch/
 
 
 .vercel
+
+# Exclude generated document manuals and cached HMM weights
+*.docx
+*.pkl
+*.zip

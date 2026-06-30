@@ -52,8 +52,12 @@ def build_candidate_from_row(row: pd.Series) -> dict:
         "target_3_pct": float(row.get("target_3_pct", 0.0)),
         "weighted_rr": float(row.get("weighted_rr", 0.0)),
         "position_sizing": str(row.get("position_sizing", "50/30/20")),
-        # --- The critical fix: context_score ---
+        # --- The critical fix: context_score & breakdown ---
         "context_score": context,
+        "context_analyst": float(row.get("context_analyst", 0.0)) if "context_analyst" in row.index and pd.notna(row["context_analyst"]) else 0.0,
+        "context_earnings": float(row.get("context_earnings", 0.0)) if "context_earnings" in row.index and pd.notna(row["context_earnings"]) else 0.0,
+        "context_fundamental": float(row.get("context_fundamental", 0.0)) if "context_fundamental" in row.index and pd.notna(row["context_fundamental"]) else 0.0,
+        "context_news": float(row.get("context_news", 0.0)) if "context_news" in row.index and pd.notna(row["context_news"]) else 0.0,
         # --- Guardrails ---
         "is_blocked": False,
         "blocked_reason": None,

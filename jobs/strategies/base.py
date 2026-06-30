@@ -42,3 +42,46 @@ class StrategyInterface(ABC):
         Must preserve existing ranking logic (SignalRanker composite scoring).
         """
         pass
+
+
+def consensus_pass(row) -> bool:
+    """
+    Multi-Indicator Consensus Gate (Task 6.2)
+    Computes a continuous score across RSI, ADX, Volume Ratio, and DMA 50.
+    Returns True if average score > 0.65 and at least 3 indicators show strength (> 0.5).
+    """
+    try:
+        rsi = float(row.get('RSI_14', 55.0))
+    except (ValueError, TypeError):
+        rsi = 55.0
+
+    try:
+        adx = float(row.get('ADX_14', 20.0))
+    except (ValueError, TypeError):
+        adx = 20.0
+
+    try:
+        vol_ratio = float(row.get('volume_ratio', row.get('VOLUME_RATIO', 1.0)))
+    except (ValueError, TypeError):
+        vol_ratio = 1.0
+
+    try:
+        close = float(row.get('CLOSE', row.get('Close', 1.0)))
+    except (ValueError, TypeError):
+        close = 1.0
+
+    try:
+        sma_50 = float(row.get('DMA_50', close))
+    except (ValueError, TypeError):
+        sma_50 = close
+    
+    rsi_score = 1.0 - abs(rsi - 55.0) / 35.0
+    adx_score = min(1.0, (adx - 10.0) / 25.0)
+    vol_score = min(1.0, (vol_ratio - 0.5) / 1.5)
+    dma_score = min(1.0, (close / sma_50 - 0.95) / 0.15) if sma_50 > 0 else 1.0
+    
+    avg = (rsi_score + adx_score + vol_score + dma_score) / 4.0
+    passes_count = sum(s > 0.5 for s in [rsi_score, adx_score, vol_score, dma_score])
+    
+    return avg > 0.65 and passes_count >= 3
+

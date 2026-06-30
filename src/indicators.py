@@ -216,6 +216,14 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD_HIST"] = histogram
     df["EMA_20"] = compute_ema(df["CLOSE"], 20)
     
+    # Calculate ATR_14 (Task 6.1)
+    tr = pd.concat([
+        df["HIGH"] - df["LOW"],
+        (df["HIGH"] - df["CLOSE"].shift(1)).abs(),
+        (df["LOW"] - df["CLOSE"].shift(1)).abs()
+    ], axis=1).max(axis=1)
+    df["ATR_14"] = tr.ewm(span=14, adjust=False).mean()
+    
     return df
 
 

@@ -243,72 +243,117 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
 
 
 def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
-    """Archive current signals to signals_history before clearing."""
+    """Evaluate existing open positions, update their statuses, and archive outcomes."""
     try:
+        from jobs.supabase_client import get_latest_price, update_signals_status, update_signals_price, update_history_outcome
+        
+        # 1. Fetch current signals
         res = supabase.table("signals").select("*").execute()
         current_signals = res.data or []
-
+        
         if not current_signals:
-            logger.info("No existing signals to archive.")
-            return
-
-        history_rows = []
-        for sig in current_signals:
-            ticker = sig.get("ticker", "")
-            m = metrics_map.get(ticker.upper(), {})
-            history_rows.append(
-                {
-                    "scan_date": sig.get("scan_date"),
-                    "ticker": ticker,
-                    "company_name": sig.get("company_name"),
-                    "industry": sig.get("industry"),
-                    "price": sig.get("price"),
-                    "entry_price": sig.get("entry_price"),
-                    "stop_loss": sig.get("stop_loss"),
-                    "exit_price": sig.get("exit_price"),
-                    "upside_pct": sig.get("upside_pct"),
-                    "risk_reward": sig.get("risk_reward"),
-                    "current_rsi": sig.get("current_rsi"),
-                    "rsi_min_10d": sig.get("rsi_min_10d"),
-                    "volume_ratio": sig.get("volume_ratio"),
-                    "adx_value": sig.get("adx_value"),
-                    "macd_histogram": sig.get("macd_histogram"),
-                    "ema20": sig.get("ema20"),
-                    "score": sig.get("score"),
-                    "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
-                    "quality_score": sig.get("quality_score", sig.get("composite_score", 0.0)),
-                    "tier_label": sig.get("tier_label", "Speculative"),
-                    "strategy": sig.get("strategy"),
-                    "past_win_rate": m.get("win_rate", 0),
-                    "expectancy_pct": m.get("expectancy_pct", 0),
-                    "total_trades": m.get("total_trades", 0),
-                    "regime": regime_str,
-                    "earnings_date": sig.get("earnings_date"),
-                    "is_momentum_exception": sig.get("is_momentum_exception", False),
-                    "distance_from_high_pct": sig.get("distance_from_high_pct"),
-                    "target_1": sig.get("target_1"),
-                    "target_2": sig.get("target_2"),
-                    "target_3": sig.get("target_3"),
-                    "target_1_pct": sig.get("target_1_pct"),
-                    "target_2_pct": sig.get("target_2_pct"),
-                    "target_3_pct": sig.get("target_3_pct"),
-                    "weighted_rr": sig.get("weighted_rr"),
-                    "position_sizing": sig.get("position_sizing", "50/30/20"),
-                    "narrative": sig.get("narrative"),
-                    "strategy_name": sig.get("strategy_name"),
-                    "outcome": "open",
-                    "context_score": sig.get("context_score", 0.0),
-                }
-            )
-
-        supabase.table("signals_history").upsert(
-            history_rows,
-            on_conflict="scan_date,ticker",
-        ).execute()
-        logger.info("Archived %d signals to signals_history (upsert, duplicates skipped).", len(history_rows))
-
+            logger.info("No existing signals in the database to process.")
+            return []
+            
+        logger.info("Evaluating %d existing positions...", len(current_signals))
+        
+        for existing in current_signals:
+            # Only evaluate open positions
+            if existing.get('status', 'open') != 'open':
+                continue
+                
+            ticker = existing['ticker']
+            entry_price = float(existing['entry_price'])
+            stop_loss = float(existing['stop_loss'])
+            target_1 = float(existing['target_1'])
+            target_2 = float(existing['target_2'])
+            target_3 = float(existing['target_3'])
+            
+            current_price = get_latest_price(ticker)
+            if current_price is None:
+                logger.warning(f"Could not fetch latest price for {ticker}. Skipping evaluation.")
+                continue
+                
+            # Determine status
+            status = 'open'
+            exit_price = None
+            sell_signal = None
+            
+            if current_price <= stop_loss:
+                status = 'closed'
+                exit_price = stop_loss
+                sell_signal = 'Stop loss hit'
+            elif current_price >= target_3:
+                status = 'closed'
+                exit_price = target_3
+                sell_signal = 'Target 3 hit – full exit'
+            elif current_price >= target_2:
+                status = 'open'  # Partial exit — keep open
+                exit_price = target_2
+                sell_signal = 'Target 2 hit – sell 30%'
+            elif current_price >= target_1:
+                status = 'open'  # Partial exit — keep open
+                exit_price = target_1
+                sell_signal = 'Target 1 hit – sell 50%'
+                
+            if sell_signal is not None:
+                logger.info(f"[SELL SIGNAL] {ticker} triggered {sell_signal} at {exit_price}")
+                if status == 'closed':
+                    # Full exit — update and archive
+                    update_signals_status(ticker, 'closed', exit_price, sell_signal, sell_signal_reason=sell_signal)
+                    update_history_outcome(ticker, status, exit_price, sell_signal)
+                else:
+                    # Partial exit — update sell_signal fields but keep open
+                    supabase.table('signals').update({
+                        'sell_signal': True,
+                        'sell_signal_reason': sell_signal,
+                        'sell_price': exit_price,
+                        'price': current_price,
+                    }).eq('ticker', ticker).eq('status', 'open').execute()
+            else:
+                logger.info(f"[POSITION HOLD] {ticker} remains open. Current price: {current_price:.2f}")
+                # Update current price in signals table
+                update_signals_price(ticker, current_price)
+                
+        # Return list of active open tickers to skip in daily scan insertion
+        res_updated = supabase.table("signals").select("ticker").eq("status", "open").execute()
+        open_tickers = [row['ticker'] for row in (res_updated.data or [])]
+        return open_tickers
+        
     except Exception as e:
-        logger.error("Failed to archive signals to history: %s", e)
+        logger.error("Failed to archive/evaluate current signals: %s", e)
+        return []
+
+
+def get_next_trading_day(date_obj):
+    """Return the next trading day (skip weekends)."""
+    next_day = date_obj + timedelta(days=1)
+    while next_day.weekday() >= 5:  # Saturday=5, Sunday=6
+        next_day += timedelta(days=1)
+    return next_day
+
+
+VIX_EMERGENCY_THRESHOLD = 40
+
+def apply_vix_override(regime, strategies, size_mult):
+    import yfinance as yf
+    try:
+        vix_ticker = yf.Ticker("^VIX")
+        vix_history = vix_ticker.history(period="1d")
+        if not vix_history.empty:
+            vix = float(vix_history["Close"].iloc[-1])
+            if vix > VIX_EMERGENCY_THRESHOLD:
+                regime = "bear"
+                strategies = ["Mean Reversion", "Post-Earnings Drift"]
+                size_mult = 0.5
+                logger.info(f"[VIX OVERRIDE] VIX={vix:.1f} > 40 — forced bear, half sizing")
+            else:
+                logger.info(f"[VIX] VIX level: {vix:.1f} (Normal)")
+        else:
+            logger.warning("VIX history empty, skipping VIX override check.")
+    except Exception as e:
+        logger.warning(f"Failed to fetch VIX info: {e}")
+    return regime, strategies, size_mult
 
 
 def main():
@@ -349,8 +394,27 @@ def main():
     signal_date = scan_date_today
 
     regime_info = get_regime()
-    regime_str = regime_info["regime"]
+    sma_regime = regime_info["regime"]
+    
+    use_hmm = os.environ.get("USE_HMM", "false").lower() == "true"
+    if use_hmm:
+        try:
+            from src.hmm_regime import RollingHMM
+            hmm = RollingHMM()
+            hmm_regime = hmm.get_regime()
+            logger.info(f"[REGIME COMPARISON] HMM={hmm_regime}, SMA={sma_regime}")
+            regime_str = hmm_regime
+        except Exception as e:
+            logger.warning(f"Failed to calculate HMM regime: {e}. Falling back to SMA.")
+            regime_str = sma_regime
+    else:
+        regime_str = sma_regime
+
     allowed_strategies = REGIME_STRATEGY_MAP.get(regime_str, ["Pullback Recovery"])
+
+    # TASK 2: VIX Emergency Override
+    size_mult = 1.0
+    regime_str, allowed_strategies, size_mult = apply_vix_override(regime_str, allowed_strategies, size_mult)
 
     logger.info(
         "REGIME: %s | SPY: $%.2f | 200 DMA: $%.2f",
@@ -431,6 +495,26 @@ def main():
     except Exception as e:
         logger.error("Failed to initialize Supabase client: %s", e)
         sys.exit(1)
+
+    # TASK 3: Drawdown Circuit Breaker
+    portfolio_value = 10000.0
+    peak_value = 10000.0
+    try:
+        # Fetch the latest record in portfolio_state
+        res_state = supabase.table("portfolio_state").select("*").order("created_at", desc=True).limit(1).execute()
+        if res_state.data:
+            state = res_state.data[0]
+            portfolio_value = float(state["portfolio_value"])
+            peak_value = float(state["peak_value"])
+            logger.info(f"[PORTFOLIO] Found state: Value=${portfolio_value:.2f}, Peak=${peak_value:.2f}")
+        else:
+            logger.info("[PORTFOLIO] No state entries found in portfolio_state. Using default 10k values.")
+    except Exception as e:
+        logger.warning(f"Failed to fetch portfolio state: {e}. Using default 10k values.")
+
+    from src.risk_controls import get_drawdown_multiplier
+    risk_multiplier, risk_status = get_drawdown_multiplier(portfolio_value, peak_value)
+    logger.info(f"[RISK CONTROL] Drawdown Multiplier={risk_multiplier:.2f} ({risk_status})")
 
     # ── Ticker Metrics (with local cache for zero-network local mode) ─
     metrics_map: dict = {}
@@ -594,7 +678,23 @@ def main():
     error_msg = None
 
     if all_signals:
+        # TASK 1: Log the applied weight vector on each run
+        REGIME_WEIGHTS = {
+            "bull":     {"mom": 0.30, "exp": 0.30, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
+            "sideways": {"mom": 0.25, "exp": 0.35, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
+            "bear":     {"mom": 0.15, "exp": 0.35, "wr": 0.10, "reg": 0.10, "ctx": 0.30},
+        }
+        w = REGIME_WEIGHTS.get(regime_str.lower(), REGIME_WEIGHTS["sideways"])
+        logger.info(f"[WEIGHTS] Regime={regime_str}, weights={w}")
+
         final_signals = deduplicate_by_ticker(all_signals)
+        
+        # TASK 3: Filter candidates if drawdown is >= 10% (requires composite_score >= 80)
+        dd_pct = (peak_value - portfolio_value) / peak_value * 100 if peak_value > 0 else 0.0
+        if dd_pct >= 10.0:
+            logger.info(f"[RISK CONTROL] Drawdown is {dd_pct:.1f}% >= 10%. Filtering candidates to require composite_score >= 80.")
+            final_signals = [s for s in final_signals if float(s.get("composite_score", 0.0)) >= 80.0]
+
         final_signals.sort(key=lambda x: x.get('quality_score', x['composite_score']), reverse=True)
         final_signals = final_signals[:TOP_N]
 
@@ -636,6 +736,10 @@ def main():
                                 'volume_ratio': sig.get("volume_ratio", 1.0),
                             }
                             sig["context_score"] = context_scorer.calculate(ctx, float(sig["entry_price"]), tech_data)
+                            sig["context_analyst"] = getattr(ctx, "context_analyst", 0.0)
+                            sig["context_earnings"] = getattr(ctx, "context_earnings", 0.0)
+                            sig["context_fundamental"] = getattr(ctx, "context_fundamental", 0.0)
+                            sig["context_news"] = getattr(ctx, "context_news", 0.0)
                             
                             # Save to context_cache table on cache miss
                             if ctx.cached_score is None:
@@ -664,18 +768,47 @@ def main():
             'Cross-Sectional Momentum': (0.10, 0.18, 0.25),
         }
 
+        # Fetch active open tickers from Supabase to prevent duplicates in daily recommendation insertion
+        open_tickers = []
+        try:
+            if not args.dry_run:
+                res_open = supabase.table("signals").select("ticker").eq("status", "open").execute()
+                open_tickers = [row['ticker'].upper() for row in (res_open.data or [])]
+        except Exception as e:
+            logger.warning("Failed to fetch active open tickers from Supabase: %s", e)
+
         for sig in final_signals:
+            ticker = sig["ticker"]
+            if ticker.upper() in open_tickers:
+                logger.info(f"Ticker {ticker} is already an active open position. Skipping recommendation insertion.")
+                continue
+
             entry_price = float(sig["entry_price"])
             stop_loss = float(sig["stop_loss"])
             strategy_name = sig["strategy"]
 
             # Re-evaluate tier label based on the actual final composite score and metrics
             score = float(sig.get("composite_score", 0.0))
+            # TASK 4: Regime-Aware Tier 1 Threshold
+            TIER1_THRESHOLDS = {
+                "bull":     80,
+                "sideways": 75,
+                "bear":     75,   # also require ctx_score > 50
+            }
+            current_regime = regime_str.lower()
+            threshold = TIER1_THRESHOLDS.get(current_regime, 75)
+            ctx_score = float(sig.get("context_score", 0.0))
+            
+            if current_regime == "bear":
+                tier1_pass = (score >= threshold) and (ctx_score > 50.0)
+            else:
+                tier1_pass = score >= threshold
+
             exp = float(sig.get("expectancy_pct") or 0.0)
-            wr = float(sig.get("past_win_rate") or 0.0)
+            wr = float(sig.get("past_win_rate") or sig.get("win_rate") or 0.0)
             trades = int(sig.get("total_trades") or 0)
 
-            is_t1 = (score >= 65.0) and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
+            is_t1 = tier1_pass and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
             is_t2 = (score >= 50.0) and (exp >= 0.0) and (wr >= 25.0) and (trades >= 10)
             is_t3 = (score >= 40.0) and (exp >= -2.0)
 
@@ -702,6 +835,20 @@ def main():
             reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
             sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
 
+            # TASK 2 & 3: Sizing adjustments based on VIX override and drawdown controls
+            win_p = 0.35
+            if score >= 90.0: win_p = 0.75
+            elif score >= 80.0: win_p = 0.68
+            elif score >= 70.0: win_p = 0.60
+            elif score >= 60.0: win_p = 0.52
+            elif score >= 50.0: win_p = 0.45
+            
+            rr_val = sig.get('weighted_rr') if sig.get('weighted_rr', 0) > 0 else 2.0
+            kelly_f = win_p - (1.0 - win_p) / rr_val
+            half_kelly = max(0.0, kelly_f / 2.0)
+            
+            final_allocation_pct = half_kelly * risk_multiplier * size_mult * 100.0
+            position_sizing_str = f"Kelly: {final_allocation_pct:.1f}%"
 
             ranked_signals.append(
                 {
@@ -735,10 +882,21 @@ def main():
                     "target_2_pct": sig.get("target_2_pct"),
                     "target_3_pct": sig.get("target_3_pct"),
                     "weighted_rr": sig.get("weighted_rr"),
-                    "position_sizing": sig.get("position_sizing", "50/30/20"),
+                    "position_sizing": position_sizing_str,
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig["strategy"],
                     "context_score": sig.get("context_score", 0.0),
+                    # GTM persistence columns (Task 2)
+                    "entry_date": get_next_trading_day(datetime.strptime(sig["scan_date"], "%Y-%m-%d").date()).isoformat(),
+                    "status": "open",
+                    "sell_signal": False,
+                    "sell_signal_reason": None,
+                    "sell_price": None,
+                    # Context breakdown columns (Task 7)
+                    "context_analyst": float(sig.get("context_analyst") or 0.0),
+                    "context_earnings": float(sig.get("context_earnings") or 0.0),
+                    "context_fundamental": float(sig.get("context_fundamental") or 0.0),
+                    "context_news": float(sig.get("context_news") or 0.0),
                 }
             )
     else:
@@ -761,9 +919,9 @@ def main():
     if not args.dry_run:
         try:
             archive_current_signals(supabase, regime_str, metrics_map)
-            logger.info("Clearing previous signals from Supabase...")
-            supabase.table("signals").delete().neq("ticker", "").execute()
-            logger.info("Previous signals cleared.")
+            logger.info("Clearing closed signals from Supabase (keeping open)...")
+            supabase.table("signals").delete().neq("status", "open").execute()
+            logger.info("Closed signals cleared.")
         except Exception as e:
             logger.error("Failed to clear/archive signals: %s", e)
             error_msg = f"Archive/Clear failed: {e}"
@@ -772,7 +930,60 @@ def main():
             if ranked_signals:
                 logger.info("Inserting %d ranked signals...", len(ranked_signals))
                 supabase.table("signals").insert(ranked_signals).execute()
-                logger.info("Signals inserted successfully.")
+                
+                # Also archive new signals to signals_history as open outcomes
+                history_rows = []
+                for sig in ranked_signals:
+                    ticker = sig.get("ticker", "")
+                    m = metrics_map.get(ticker.upper(), {})
+                    history_rows.append({
+                        "scan_date": sig.get("scan_date"),
+                        "ticker": ticker,
+                        "company_name": sig.get("company_name"),
+                        "industry": sig.get("industry"),
+                        "price": sig.get("price"),
+                        "entry_price": sig.get("entry_price"),
+                        "stop_loss": sig.get("stop_loss"),
+                        "exit_price": sig.get("exit_price"),
+                        "upside_pct": sig.get("upside_pct"),
+                        "risk_reward": sig.get("risk_reward"),
+                        "current_rsi": sig.get("current_rsi"),
+                        "rsi_min_10d": sig.get("rsi_min_10d"),
+                        "volume_ratio": sig.get("volume_ratio"),
+                        "adx_value": sig.get("adx_value"),
+                        "macd_histogram": sig.get("macd_histogram"),
+                        "ema20": sig.get("ema20"),
+                        "score": sig.get("composite_score", sig.get("score", 0.0)),
+                        "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
+                        "quality_score": sig.get("quality_score", sig.get("composite_score", 0.0)),
+                        "tier_label": sig.get("tier_label", "Speculative"),
+                        "strategy": sig.get("strategy"),
+                        "past_win_rate": m.get("win_rate", 0),
+                        "expectancy_pct": m.get("expectancy_pct", 0),
+                        "total_trades": m.get("total_trades", 0),
+                        "regime": regime_str,
+                        "earnings_date": sig.get("earnings_date"),
+                        "is_momentum_exception": sig.get("is_momentum_exception", False),
+                        "distance_from_high_pct": sig.get("distance_from_high_pct"),
+                        "target_1": sig.get("target_1"),
+                        "target_2": sig.get("target_2"),
+                        "target_3": sig.get("target_3"),
+                        "target_1_pct": sig.get("target_1_pct"),
+                        "target_2_pct": sig.get("target_2_pct"),
+                        "target_3_pct": sig.get("target_3_pct"),
+                        "weighted_rr": sig.get("weighted_rr"),
+                        "position_sizing": sig.get("position_sizing", "50/30/20"),
+                        "narrative": sig.get("narrative"),
+                        "strategy_name": sig.get("strategy_name"),
+                        "outcome": "open",
+                        "context_score": sig.get("context_score", 0.0),
+                    })
+                
+                supabase.table("signals_history").upsert(
+                    history_rows,
+                    on_conflict="scan_date,ticker"
+                ).execute()
+                logger.info("Signals inserted and archived successfully.")
             else:
                 logger.info("No signals to insert.")
         except Exception as e:

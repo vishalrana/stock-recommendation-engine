@@ -4,21 +4,20 @@ export interface Recommendation {
   company_name: string | null;
   industry: string | null;
   price: number | null;
-  entry_price: number;
-  stop_loss: number;
-  exit_price: number;
+  entry_price: number | null;
+  stop_loss: number | null;
+  exit_price: number | null;
   upside_pct: number | null;
   risk_reward: number | null;
   current_rsi: number | null;
   volume_ratio: number | null;
   score: number | null;
   regime: string | null;
-  past_win_rate: number;
-  expectancy_pct: number;
-  historical_signals: number;
-  historical_wins: number;
-  historical_losses: number;
-  median_holding_days: number;
+  past_win_rate?: number | null;
+  expectancy_pct?: number | null;
+  total_trades?: number | null;
+  wins?: number | null;
+  losses?: number | null;
   composite_score: number | null;
   tier_label: string | null;
   adx_value: number | null;
@@ -37,14 +36,20 @@ export interface Recommendation {
   weighted_rr?: number | null;
   position_sizing?: string | null;
   narrative?: string | null;
-  total_trades?: number | null;
-  past_wins?: number | null;
-  past_losses?: number | null;
   strategy?: string | null;
+  strategy_name?: string | null;
   quality_score?: number | null;
-  wins?: number | null;
-  losses?: number | null;
   context_score?: number | null;
+  entry_date?: string | null;
+  exit_date?: string | null;
+  status?: string | null;
+  sell_signal?: boolean | null;
+  sell_signal_reason?: string | null;
+  sell_price?: number | null;
+  context_analyst?: number | null;
+  context_earnings?: number | null;
+  context_news?: number | null;
+  context_fundamental?: number | null;
 }
 
 export interface ScanLog {

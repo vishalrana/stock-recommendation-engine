@@ -22,12 +22,16 @@ class ContextScorer:
     
     def calculate(self, ctx: AggregatedContext, current_price: float, tech_data=None) -> float:
         if ctx.cached_score is not None:
+            ctx.context_analyst = getattr(ctx, 'context_analyst', 0.0)
+            ctx.context_earnings = getattr(ctx, 'context_earnings', 0.0)
+            ctx.context_fundamental = getattr(ctx, 'context_fundamental', 0.0)
+            ctx.context_news = getattr(ctx, 'context_news', 0.0)
             return ctx.cached_score
 
         score = 0.0
         
         # 1. Analyst Alignment (Max 30)
-        analyst_pts = 0
+        analyst_pts = 0.0
         if ctx.analyst.target_mean_price and current_price > 0:
             upside = (ctx.analyst.target_mean_price - current_price) / current_price
             if upside > self.config['analyst']['upside_threshold_bonus']:
@@ -36,29 +40,36 @@ class ContextScorer:
                 analyst_pts += 15
             if ctx.analyst.recommendation in ["buy", "strong_buy"]:
                 analyst_pts += self.config['analyst']['buy_bonus']
-        score += min(analyst_pts, 30)  # Cap at documented max
+        analyst_score = min(analyst_pts, 30.0)
+        score += analyst_score
         
         # 2. Earnings Momentum (Max 30)
+        earnings_score = 0.0
         if ctx.earnings.surprise_percent is not None:
             surprise = ctx.earnings.surprise_percent
             if surprise > self.config['earnings']['surprise_beat_big']:
-                score += 30
+                earnings_score = 30.0
             elif surprise > self.config['earnings']['surprise_beat_small']:
-                score += 15
+                earnings_score = 15.0
             elif surprise < self.config['earnings']['surprise_miss_big']:
-                score -= 15
+                earnings_score = -15.0
+        score += earnings_score
         
         # 3. Fundamental Safety (Max 20)
+        fundamental_score = 0.0
         if ctx.fundamental.debt_to_equity is not None and ctx.fundamental.debt_to_equity < self.config['fundamental']['debt_to_equity_max']:
-            score += 10
+            fundamental_score += 10.0
         if ctx.fundamental.current_ratio is not None and ctx.fundamental.current_ratio > self.config['fundamental']['current_ratio_min']:
-            score += 10
+            fundamental_score += 10.0
+        score += fundamental_score
         
         # 4. News Sentiment (Max 20)
+        news_score = 0.0
         if ctx.news.headline_sentiment > self.config['news']['sentiment_positive_threshold']:
-            score += min(20, ctx.news.headline_sentiment * 50)  # Scale up
+            news_score = min(20.0, ctx.news.headline_sentiment * 50.0)
         elif ctx.news.headline_sentiment < self.config['news']['sentiment_negative_threshold']:
-            score -= 10
+            news_score = -10.0
+        score += news_score
         
         # 5. Price/Volume Event (Max 15)
         if ctx.price_volume_signal > 0:
@@ -70,7 +81,6 @@ class ContextScorer:
             adx = tech_data.get('adx', 20)
             vol_ratio = tech_data.get('volume_ratio', 1.0)
             
-            # Simple heuristic to give a small meaningful score (0-15 points)
             fallback = (
                 max(0, (rsi - 30) / 70) * 5 +   # 0-5 points for RSI momentum
                 max(0, (adx - 10) / 40) * 5 +   # 0-5 points for trend strength
@@ -78,6 +88,13 @@ class ContextScorer:
             )
             score = max(score, min(15, fallback))
         
-        # Clamp to [0, 100] — the composite formula in SignalRanker applies
-        # WEIGHT_CONTEXT (0.15) itself, so we must NOT pre-multiply here.
-        return max(0, min(100, score))
+        # Clamp to [0, 100]
+        final_score = max(0.0, min(100.0, score))
+        
+        # Store components on the context object for later extraction (Task 7)
+        ctx.context_analyst = analyst_score
+        ctx.context_earnings = earnings_score
+        ctx.context_fundamental = fundamental_score
+        ctx.context_news = news_score
+        
+        return final_score

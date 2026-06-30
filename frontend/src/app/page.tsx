@@ -4,6 +4,7 @@ import RecommendationsTable from '../components/recommendations-table';
 
 // Force dynamic rendering — never prerender at build time
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 async function getRecommendations() {
   const { data, error } = await getSupabase()
@@ -80,7 +81,6 @@ export default async function Page() {
               <span className="w-1.5 h-6 bg-blue-600 rounded-full inline-block"></span>
               Stock Recommendations
             </h1>
-            <p className="text-xs text-gray-500 mt-1 pl-3.5">Strategy 1.3 Rev B • Live Signal Intelligence</p>
           </div>
           {scanLog?.scan_date && (
             <div className="text-xs text-gray-500 font-medium pl-3.5 sm:pl-0 sm:text-right">

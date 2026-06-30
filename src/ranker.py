@@ -106,21 +106,26 @@ class SignalRanker:
         
         regime_score = self.regime_adjustment(momentum_score, regime, row)
         
+        # TASK 1: Regime-Dependent Composite Weights
+        REGIME_WEIGHTS = {
+            "bull":     {"mom": 0.30, "exp": 0.30, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
+            "sideways": {"mom": 0.25, "exp": 0.35, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
+            "bear":     {"mom": 0.15, "exp": 0.35, "wr": 0.10, "reg": 0.10, "ctx": 0.30},
+        }
+        current_regime = regime.lower()
+        w = REGIME_WEIGHTS.get(current_regime, REGIME_WEIGHTS["sideways"])
+        
+        # Assert weights sum to exactly 1.0
+        assert abs(sum(w.values()) - 1.0) < 1e-9, f"Weights for regime {current_regime} must sum to 1.0!"
+        
         total = (
-            self.WEIGHT_MOMENTUM * momentum_score
-            + self.WEIGHT_EXPECTANCY * expectancy_score
-            + self.WEIGHT_WIN_RATE * winrate_score
-            + self.WEIGHT_REGIME * regime_score
-            + self.WEIGHT_CONTEXT * context_score
+            w["mom"] * momentum_score
+            + w["exp"] * expectancy_score
+            + w["wr"] * winrate_score
+            + w["reg"] * regime_score
+            + w["ctx"] * context_score
         )
         
-        # Quality floor disabled to see more signals
-        # expectancy_pct = row.get("expectancy_pct", 0.0)
-        # win_rate = row.get("win_rate", 0.0)
-        # if expectancy_pct < 0.0 and win_rate < 25.0:
-        #     total = min(total, 40.0)
-        pass
-
         return {
             "total": round(total, 4),
             "breakdown": {
@@ -166,10 +171,10 @@ class SignalRanker:
 
         raw_momentum = (rsi_score + proximity_score + volume_score + macd_score) / 4.0
         
-        # Absolute floor BEFORE percentile normalization:
-        # If raw_momentum < 55, this stock gets a Momentum Score of 0 regardless of pool rank.
+        # Sigmoid transition instead of hard floor (Task 6.4)
         pct_normalized = self.normalize_percentile(raw_momentum)
-        df_filtered["momentum_score"] = pct_normalized.where(raw_momentum >= 55.0, 0.0)
+        sigmoid_weights = 1.0 / (1.0 + np.exp(-(raw_momentum - 55.0) / 5.0))
+        df_filtered["momentum_score"] = pct_normalized * sigmoid_weights
 
         # 2. Risk-Adjusted Expectancy (40% weight)
         mean_exp = df_filtered["expectancy_pct"].mean()
@@ -229,8 +234,12 @@ class SignalRanker:
 
         # 6. Context Scoring & Final Composite Score (Parallelized)
         def compute_context_score(ticker: str, row: dict) -> tuple:
-            """Compute context score for a single ticker."""
+            """Compute context score and components for a single ticker."""
             c_score = 0.0
+            c_analyst = 0.0
+            c_earnings = 0.0
+            c_fundamental = 0.0
+            c_news = 0.0
             try:
                 price_df = self._fetch_price_history(ticker)
                 if price_df is not None and not price_df.empty:
@@ -242,6 +251,10 @@ class SignalRanker:
                         'volume_ratio': row.get('volume_ratio', 1.0),
                     }
                     c_score = self.context_scorer.calculate(ctx, float(current_price), tech_data)
+                    c_analyst = getattr(ctx, 'context_analyst', 0.0)
+                    c_earnings = getattr(ctx, 'context_earnings', 0.0)
+                    c_fundamental = getattr(ctx, 'context_fundamental', 0.0)
+                    c_news = getattr(ctx, 'context_news', 0.0)
                     
                     # If it was a cache miss, save the computed score to cache
                     if ctx.cached_score is None:
@@ -249,8 +262,7 @@ class SignalRanker:
                         save_context_to_cache(ticker, c_score, ctx)
             except Exception as e:
                 logger.warning("Failed context aggregation for %s: %s", ticker, e)
-                c_score = 0.0
-            return ticker, c_score
+            return ticker, c_score, c_analyst, c_earnings, c_fundamental, c_news
 
         # Parallel context scoring for top 50 candidates
         context_score_map = {}
@@ -263,21 +275,32 @@ class SignalRanker:
                     if row["ticker"] in top_50_tickers
                 }
                 
-                for future in as_completed(futures):
-                    ticker, c_score = future.result()
-                    context_score_map[ticker] = c_score
-                    logger.info(f"Context score computed for {ticker}: {c_score:.2f}")
+                for future in futures:
+                    try:
+                        ticker, c_score, c_analyst, c_earnings, c_fundamental, c_news = future.result()
+                        context_score_map[ticker] = (c_score, c_analyst, c_earnings, c_fundamental, c_news)
+                    except Exception as future_err:
+                        logger.warning("Future execution failed: %s", future_err)
 
         # Build final scores
         context_scores = []
+        context_analysts = []
+        context_earnings_list = []
+        context_fundamentals = []
+        context_news_list = []
         composite_scores = []
         score_breakdowns = []
 
         for _, row in df_filtered.iterrows():
             ticker = row["ticker"]
-            c_score = context_score_map.get(ticker, 0.0)
+            c_data = context_score_map.get(ticker, (0.0, 0.0, 0.0, 0.0, 0.0))
+            c_score, c_analyst, c_earnings, c_fundamental, c_news = c_data
             
             context_scores.append(c_score)
+            context_analysts.append(c_analyst)
+            context_earnings_list.append(c_earnings)
+            context_fundamentals.append(c_fundamental)
+            context_news_list.append(c_news)
             
             # Compute final composite score using shifted weights (25/35/15/10/15) for all candidates
             row_dict = row.to_dict()
@@ -292,6 +315,10 @@ class SignalRanker:
             score_breakdowns.append(breakdown)
 
         df_filtered["context_score"] = context_scores
+        df_filtered["context_analyst"] = context_analysts
+        df_filtered["context_earnings"] = context_earnings_list
+        df_filtered["context_fundamental"] = context_fundamentals
+        df_filtered["context_news"] = context_news_list
         df_filtered["composite_score"] = composite_scores
         df_filtered["score_breakdown"] = score_breakdowns
 
@@ -301,19 +328,32 @@ class SignalRanker:
         ]
         logger.info("Context scores computed for top candidates: %s", ", ".join(computed_scores_log))
 
+        # TASK 4: Regime-Aware Tier 1 Threshold
+        TIER1_THRESHOLDS = {
+            "bull":     80,
+            "sideways": 75,
+            "bear":     75,   # also require ctx_score > 50
+        }
+        threshold = TIER1_THRESHOLDS.get(regime.lower(), 75)
+        logger.info(f"[SCORING] Regime={regime}, Tier1 threshold={threshold}")
+
         # 6. Assign Tier Labels
-        # Tier 1 "Strong Buy": score >= 65, expectancy_pct > 0.0, win_rate >= 35.0, total_trades >= 10
-        # Tier 2 "Buy": score >= 50, expectancy_pct >= 0.0, win_rate >= 25.0, total_trades >= 10
-        # Tier 3 "Watch": score >= 40, expectancy_pct >= -2.0
-        # Tier 4 "Speculative": score < 40 or doesn't meet Watch
         tiers = []
         for _, row in df_filtered.iterrows():
             score = row["composite_score"]
             exp = row["expectancy_pct"]
             wr = row["win_rate"]
             trades = row.get("total_trades", 0)
+            ctx_score = row.get("context_score", 0.0)
 
-            is_t1 = (score >= 65.0) and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
+            current_regime = regime.lower()
+            t_threshold = TIER1_THRESHOLDS.get(current_regime, 75)
+            if current_regime == "bear":
+                tier1_pass = (score >= t_threshold) and (ctx_score > 50.0)
+            else:
+                tier1_pass = score >= t_threshold
+
+            is_t1 = tier1_pass and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
             is_t2 = (score >= 50.0) and (exp >= 0.0) and (wr >= 25.0) and (trades >= 10)
             is_t3 = (score >= 40.0) and (exp >= -2.0)
 
@@ -391,6 +431,10 @@ class SignalRanker:
                         c_score = 0.0
 
                     result.at[idx, "context_score"] = c_score
+                    result.at[idx, "context_analyst"] = getattr(ctx, "context_analyst", 0.0) if 'ctx' in locals() else 0.0
+                    result.at[idx, "context_earnings"] = getattr(ctx, "context_earnings", 0.0) if 'ctx' in locals() else 0.0
+                    result.at[idx, "context_fundamental"] = getattr(ctx, "context_fundamental", 0.0) if 'ctx' in locals() else 0.0
+                    result.at[idx, "context_news"] = getattr(ctx, "context_news", 0.0) if 'ctx' in locals() else 0.0
                     
                     # Recompute composite score
                     row_dict = result.loc[idx].to_dict()

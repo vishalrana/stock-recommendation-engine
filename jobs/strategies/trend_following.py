@@ -42,31 +42,34 @@ class TrendFollowingStrategy(StrategyInterface):
         if price <= sma200 * 1.02:  # Must be at least 2% above 200 DMA
             return None
 
-        # 2. Momentum gate: Price > 50 DMA (intermediate trend up)
-        if price <= sma50:
-            return None
-
-        # 3. ADX gate: Trend strength >= 15 (relaxed from 20)
-        if adx_value < 15:
-            return None
-
-        # 4. Volume gate: >= 0.8x average (relaxed from 1.2x)
-        volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0
-        if volume_ratio < 0.8:
-            return None
-
-        # 5. RSI gate: Strong momentum (45-85) (relaxed from 60-80)
-        if current_rsi < 45 or current_rsi > 85:
-            return None
-
-        # 6. Breakout gate: Price within 5% of 20-day high (near breakout)
+        # 2. Breakout gate: Price within 5% of 20-day high (near breakout)
         pct_vs_high = (price / high_20 - 1) * 100
         if pct_vs_high < -5:  # Too far from recent highs
             return None
 
+        # 3. Multi-Indicator Consensus Gate (Task 6.2)
+        from jobs.strategies.base import consensus_pass
+        volume_ratio = volume_today / volume_avg if volume_avg > 0 else 0.0
+        row_data = {
+            'RSI_14': current_rsi,
+            'ADX_14': adx_value,
+            'volume_ratio': volume_ratio,
+            'CLOSE': price,
+            'DMA_50': sma50
+        }
+        if not consensus_pass(row_data):
+            return None
+
         # === SIGNAL CONSTRUCTION ===
         entry_price = price
-        stop_loss = max(low_10, sma200 * 0.98)  # 10-day low or 200 DMA cushion
+        
+        # ATR-Based Stop Loss (Task 6.3)
+        atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else 0.0
+        if atr > 0:
+            stop_loss = max(low_10, entry_price - 2.5 * atr)
+        else:
+            stop_loss = max(low_10, sma200 * 0.98)
+            
         risk = entry_price - stop_loss
         risk_pct = (risk / entry_price) * 100 if entry_price > 0 else 0
 

@@ -32,6 +32,14 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Cache Data Files
+        uses: actions/cache@v4
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-data-cache-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-data-cache-
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip

@@ -848,7 +848,7 @@ def main():
             half_kelly = max(0.0, kelly_f / 2.0)
             
             final_allocation_pct = half_kelly * risk_multiplier * size_mult * 100.0
-            position_sizing_str = f"Kelly: {final_allocation_pct:.1f}%"
+            position_sizing_str = f"K: {final_allocation_pct:.1f}%"
 
             ranked_signals.append(
                 {

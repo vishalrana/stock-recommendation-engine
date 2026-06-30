@@ -1,6 +1,4 @@
-import feedparser
 import requests
-from transformers import pipeline
 from src.providers.base import NewsContext
 
 class FinBERTNewsProvider:
@@ -9,6 +7,7 @@ class FinBERTNewsProvider:
     
     def _load_model(self):
         if self.sentiment_pipeline is None:
+            from transformers import pipeline
             # Load open-source FinBERT (ProsusAI/finbert)
             self.sentiment_pipeline = pipeline(
                 "sentiment-analysis",
@@ -18,6 +17,7 @@ class FinBERTNewsProvider:
     
     def fetch_and_score(self, ticker: str) -> NewsContext:
         try:
+            import feedparser
             # Scrape Google News RSS
             rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}

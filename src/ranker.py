@@ -496,22 +496,18 @@ def calculate_normalized_sizing(signals, portfolio_value, available_cash):
     """
     Applies Cash-Constrained Cross-Sectional Normalization to position sizing.
     
-    Mathematical logic:
-    1. Calculate raw dollar allocation = portfolio_value * half_kelly_fraction for each signal.
-    2. Sum raw allocations to get total_capital_needed.
-    3. If total_capital_needed > available_cash:
-         multiplier = available_cash / total_capital_needed
-         Multiply raw allocations by this multiplier.
-       Else:
-         No alteration.
-    4. Calculate max_shares = floor(final_dollar_allocation / risk_per_share).
-    
-    # ponytail: We use simple float math and standard dict iteration. Negative available cash
-    # is treated as 0 cash, and risk_per_share <= 0 defaults to 0 shares to avoid division-by-zero.
+    Sequential Loop:
+    1. available_cash is passed from jobs/generate_signals.py (pre-calculated).
+    2. Sum raw new demand (portfolio_value * half_kelly_fraction).
+    3. Determine multiplier:
+       - If available_cash == 0.0: multiplier = 0.0
+       - If raw new demand > available_cash: multiplier = available_cash / raw new demand
+       - Else: multiplier = 1.0
+    4. For every signal, set allocated_dollars = raw dollar sizing * multiplier, and compute shares.
     """
     safe_cash = max(0.0, float(available_cash))
     
-    # Compute raw dollar allocations
+    # Compute raw dollar allocations (Raw New Demand)
     raw_allocs = []
     for sig in signals:
         hk_frac = max(0.0, float(sig.get("half_kelly_fraction", 0.0)))
@@ -520,14 +516,16 @@ def calculate_normalized_sizing(signals, portfolio_value, available_cash):
     total_needed = sum(raw_allocs)
     
     # Calculate normalization multiplier
-    multiplier = 1.0
-    if total_needed > safe_cash and total_needed > 0.0:
+    if safe_cash == 0.0:
+        multiplier = 0.0
+    elif total_needed > safe_cash and total_needed > 0.0:
         multiplier = safe_cash / total_needed
+    else:
+        multiplier = 1.0
         
     # Build modified signals with final allocations and share counts
     result = []
     for i, sig in enumerate(signals):
-        # We copy the dictionary to prevent unintended mutating of inputs
         sig_copy = sig.copy()
         final_dollar = raw_allocs[i] * multiplier
         
@@ -535,7 +533,6 @@ def calculate_normalized_sizing(signals, portfolio_value, available_cash):
         stop = float(sig_copy.get("stop_loss", 0.0))
         risk_per_share = entry - stop
         
-        # Safe share count calculation
         if risk_per_share > 0.0 and final_dollar > 0.0:
             max_shares = int(math.floor(final_dollar / risk_per_share))
         else:

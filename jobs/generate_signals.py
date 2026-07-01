@@ -879,8 +879,8 @@ def main():
         except Exception as rotation_err:
             logger.error(f"[ROTATION ERROR] Failed during rotation evaluation: {rotation_err}")
 
-        # Compute available cash constraints: Portfolio Value - Sum(Allocated Dollars of Open Positions)
-        available_cash = portfolio_value - open_positions_allocated_sum
+        # Compute available cash constraints: Portfolio Value - Sum(Allocated Dollars of Open Positions) (Floored at 0.0)
+        available_cash = max(0.0, portfolio_value - open_positions_allocated_sum)
         logger.info(f"[PORTFOLIO] Available cash for new setups: ${available_cash:.2f}")
 
         # Phase 1: Pre-calculate raw Kelly weights and metrics for potential new setups
@@ -1000,7 +1000,7 @@ def main():
             if portfolio_value > 0:
                 final_alloc_pct = (sig["allocated_dollars"] / portfolio_value) * 100.0
             position_sizing_str = f"K: {final_alloc_pct:.1f}%"
-            if available_cash <= 0:
+            if final_alloc_pct == 0.0 or available_cash <= 0:
                 position_sizing_str = "Allocation: 0.0% (No Cash Available)"
 
             ranked_signals.append(

@@ -798,6 +798,87 @@ def main():
         except Exception as e:
             logger.warning("Failed to fetch active open positions/allocated capital from Supabase: %s", e)
 
+        # ── Capital Rotation Protocol ──────────────────────────────────────
+        try:
+            # 1. Identify Tier-1 Candidates (Score >= 85)
+            tier1_candidates = [sig for sig in final_signals if float(sig.get("composite_score") or 0.0) >= 85.0]
+            # 2. Identify Weak Holdings (Score <= 55)
+            weak_holdings = [pos for pos in open_positions if float(pos.get("composite_score") or 0.0) <= 55.0]
+            
+            if tier1_candidates and weak_holdings:
+                # Estimate raw Kelly weights & total raw dollars needed for new signals
+                total_raw_dollars_needed = 0.0
+                for sig in final_signals:
+                    score = float(sig.get("composite_score", 0.0))
+                    win_p = 0.35
+                    if score >= 90.0: win_p = 0.75
+                    elif score >= 80.0: win_p = 0.68
+                    elif score >= 70.0: win_p = 0.60
+                    elif score >= 60.0: win_p = 0.52
+                    elif score >= 50.0: win_p = 0.45
+                    
+                    rr_val = sig.get('weighted_rr') if sig.get('weighted_rr', 0) > 0 else 2.0
+                    kelly_f = win_p - (1.0 - win_p) / rr_val
+                    half_kelly = max(0.0, kelly_f / 2.0)
+                    
+                    half_kelly_fraction = half_kelly * risk_multiplier * size_mult
+                    raw_dollar_sizing = portfolio_value * half_kelly_fraction
+                    total_raw_dollars_needed += raw_dollar_sizing
+                
+                # Sort weak holdings lowest score first to rotate the weakest ones first
+                weak_holdings = sorted(weak_holdings, key=lambda x: float(x.get("composite_score") or 0.0))
+                
+                # Pair them up and trigger rotation if cash-constrained
+                from jobs.supabase_client import update_signals_status, update_history_outcome
+                
+                for t1_cand in tier1_candidates:
+                    # Check cash constraint
+                    unallocated_cash = portfolio_value - open_positions_allocated_sum
+                    if total_raw_dollars_needed <= unallocated_cash:
+                        break # No longer cash-constrained, stop rotating
+                        
+                    if not weak_holdings:
+                        break # No more weak holdings to rotate
+                        
+                    weak_pos = weak_holdings[0]
+                    spread = float(t1_cand.get("composite_score") or 0.0) - float(weak_pos.get("composite_score") or 0.0)
+                    
+                    if spread >= 30.0:
+                        exit_price = float(weak_pos.get("price") or weak_pos.get("entry_price") or 0.0)
+                        reason = f"Capital Rotation Triggered (Reallocating to {t1_cand['ticker']})"
+                        
+                        logger.info(f"[ROTATION] Rotating out of weak holding {weak_pos['ticker']} (Score: {weak_pos['composite_score']}) "
+                                    f"to fund {t1_cand['ticker']} (Score: {t1_cand['composite_score']}) | Spread: {spread:.2f}")
+                        
+                        # Execute database updates
+                        update_signals_status(weak_pos['ticker'], 'closed', exit_price, True, reason)
+                        update_history_outcome(weak_pos['ticker'], 'closed', exit_price, True)
+                        
+                        # Deduct weak position allocated dollars from Occupied pool
+                        allocated = weak_pos.get("allocated_dollars")
+                        if allocated is not None and float(allocated) > 0:
+                            pos_val = float(allocated)
+                        else:
+                            ps_str = weak_pos.get("position_sizing") or ""
+                            pct = 0.05
+                            clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
+                            try:
+                                if clean and '/' not in clean:
+                                    pct = float(clean) / 100.0
+                            except ValueError:
+                                pass
+                            pos_val = pct * portfolio_value
+                        
+                        open_positions_allocated_sum -= pos_val
+                        
+                        # Remove from tracking lists
+                        weak_holdings.pop(0)
+                        if weak_pos['ticker'].upper() in open_tickers:
+                            open_tickers.remove(weak_pos['ticker'].upper())
+                        open_positions = [p for p in open_positions if p['ticker'].upper() != weak_pos['ticker'].upper()]
+        except Exception as rotation_err:
+            logger.error(f"[ROTATION ERROR] Failed during rotation evaluation: {rotation_err}")
+
         # Compute available cash constraints: Portfolio Value - Sum(Allocated Dollars of Open Positions)
         available_cash = portfolio_value - open_positions_allocated_sum
         logger.info(f"[PORTFOLIO] Available cash for new setups: ${available_cash:.2f}")

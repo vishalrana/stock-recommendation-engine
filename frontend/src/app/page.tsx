@@ -8,16 +8,77 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 async function getRecommendations() {
-  const { data, error } = await getSupabase()
+  const supabase = getSupabase();
+  
+  // 1. Fetch active recommendations from recommendations view
+  const { data: activeData, error: activeError } = await supabase
     .from('recommendations')
     .select('*');
 
-  if (error) {
-    console.error('Error fetching recommendations:', error);
-    throw new Error(error.message);
+  if (activeError) {
+    console.error('Error fetching active recommendations:', activeError);
+    throw new Error(activeError.message);
   }
 
-  return (data || []) as Recommendation[];
+  // 2. Fetch closed signals from signals_history
+  const { data: historyData, error: historyError } = await supabase
+    .from('signals_history')
+    .select('*');
+
+  if (historyError) {
+    console.error('Error fetching signals history:', historyError);
+    throw new Error(historyError.message);
+  }
+
+  // 3. Union they, mapping signals_history fields to match Recommendation type
+  const activeMapped = (activeData || []).map((r: any) => ({
+    ...r,
+    status: r.status || 'open'
+  }));
+
+  const historyMapped = (historyData || [])
+    .filter((h: any) => h.outcome !== 'open')
+    .map((h: any) => {
+      let status = 'closed';
+      if (h.outcome === 'open') {
+        status = 'open';
+      }
+      
+      let sellReason = 'Closed';
+      if (h.outcome === 'stopped') {
+        sellReason = 'Stop loss hit';
+      } else if (h.outcome === 'hit_t3') {
+        sellReason = 'Target 3 hit – full exit';
+      } else if (h.outcome === 'hit_t2') {
+        sellReason = 'Target 2 hit – sell 30%';
+      } else if (h.outcome === 'hit_t1') {
+        sellReason = 'Target 1 hit – sell 50%';
+      }
+
+      return {
+        ...h,
+        entry_date: h.entry_date || h.scan_date,
+        exit_date: h.exit_date || h.outcome_date,
+        status,
+        sell_signal: true,
+        sell_signal_reason: sellReason,
+        sell_price: h.exit_price || h.price,
+        past_win_rate: h.past_win_rate || 0,
+        total_trades: h.total_trades || 0,
+        expectancy_pct: h.expectancy_pct || 0
+      };
+    });
+
+  const combined = [...activeMapped, ...historyMapped];
+  
+  // Sort by scan_date descending
+  combined.sort((a, b) => {
+    const dateA = new Date(a.scan_date || 0).getTime();
+    const dateB = new Date(b.scan_date || 0).getTime();
+    return dateB - dateA;
+  });
+
+  return combined as Recommendation[];
 }
 
 async function getLatestScanLog(): Promise<ScanLog | null> {

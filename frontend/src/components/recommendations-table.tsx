@@ -60,6 +60,9 @@ function getKellySize(score: number, rr: number): { kellyPct: number } {
 
 function parseAllocationPct(positionSizing: string | null | undefined, score: number, rr: number): number {
   if (positionSizing) {
+    if (positionSizing.includes('/')) {
+      return 5.0; // legacy scale-out size (5.0% base allocation)
+    }
     const raw = positionSizing.replace('Kelly:', '').replace('K:', '').replace('%', '').trim();
     const parsed = parseFloat(raw);
     if (!isNaN(parsed)) {

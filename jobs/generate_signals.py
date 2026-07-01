@@ -768,15 +768,50 @@ def main():
             'Cross-Sectional Momentum': (0.10, 0.18, 0.25),
         }
 
-        # Fetch active open tickers from Supabase to prevent duplicates in daily recommendation insertion
+        # Fetch active open positions from Supabase to prevent duplicates and calculate current portfolio allocation
+        open_positions = []
         open_tickers = []
+        open_positions_value = 0.0
         try:
-            if not args.dry_run:
-                res_open = supabase.table("signals").select("ticker").eq("status", "open").execute()
-                open_tickers = [row['ticker'].upper() for row in (res_open.data or [])]
+            res_open = supabase.table("signals").select("*").eq("status", "open").execute()
+            open_positions = res_open.data or []
+            open_tickers = [row['ticker'].upper() for row in open_positions]
+            
+            # ponytail: Loop to sum up value of currently open positions with fallbacks for legacy records
+            for pos in open_positions:
+                curr_price = float(pos.get("price") or pos.get("entry_price") or 0.0)
+                shares = pos.get("max_shares")
+                if shares is not None and shares > 0:
+                    pos_val = shares * curr_price
+                elif pos.get("allocated_dollars") is not None and float(pos["allocated_dollars"]) > 0:
+                    entry = float(pos.get("entry_price") or 1.0)
+                    alloc = float(pos["allocated_dollars"])
+                    pos_val = alloc * (curr_price / entry) if entry > 0 else alloc
+                else:
+                    # Estimate based on position_sizing string
+                    ps_str = pos.get("position_sizing") or ""
+                    pct = 0.05
+                    clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
+                    try:
+                        if clean:
+                            pct = float(clean) / 100.0
+                    except ValueError:
+                        pass
+                    entry = float(pos.get("entry_price") or 1.0)
+                    base_alloc = pct * portfolio_value
+                    pos_val = base_alloc * (curr_price / entry) if entry > 0 else base_alloc
+                open_positions_value += pos_val
+                
+            logger.info(f"[PORTFOLIO] Value of open positions: ${open_positions_value:.2f}")
         except Exception as e:
-            logger.warning("Failed to fetch active open tickers from Supabase: %s", e)
+            logger.warning("Failed to fetch active open positions/value from Supabase: %s", e)
 
+        # Compute available cash constraints
+        available_cash = portfolio_value - open_positions_value
+        logger.info(f"[PORTFOLIO] Available cash for new setups: ${available_cash:.2f}")
+
+        # Phase 1: Pre-calculate raw Kelly weights and metrics for potential new setups
+        candidates_to_size = []
         for sig in final_signals:
             ticker = sig["ticker"]
             if ticker.upper() in open_tickers:
@@ -847,8 +882,27 @@ def main():
             kelly_f = win_p - (1.0 - win_p) / rr_val
             half_kelly = max(0.0, kelly_f / 2.0)
             
-            final_allocation_pct = half_kelly * risk_multiplier * size_mult * 100.0
-            position_sizing_str = f"K: {final_allocation_pct:.1f}%"
+            # Pre-calculate half kelly fraction
+            sig["half_kelly_fraction"] = half_kelly * risk_multiplier * size_mult
+            
+            # Store temporary attributes needed for final build
+            sig["target_1"] = target_1
+            sig["target_2"] = target_2
+            sig["target_3"] = target_3
+            
+            candidates_to_size.append(sig)
+
+        # Phase 2: Apply Cash-Constrained Cross-Sectional Normalization
+        from src.ranker import calculate_normalized_sizing
+        sized_signals = calculate_normalized_sizing(candidates_to_size, portfolio_value, available_cash)
+
+        # Phase 3: Construct final ranked signals list for database insertion
+        for sig in sized_signals:
+            # We display the final allocated percentage in position_sizing string
+            final_alloc_pct = 0.0
+            if portfolio_value > 0:
+                final_alloc_pct = (sig["allocated_dollars"] / portfolio_value) * 100.0
+            position_sizing_str = f"K: {final_alloc_pct:.1f}%"
 
             ranked_signals.append(
                 {
@@ -875,9 +929,9 @@ def main():
                     "strategy": sig["strategy"],
                     "regime": regime_str,
                     "is_fallback": bool(sig.get("is_fallback", False)),
-                    "target_1": target_1,
-                    "target_2": target_2,
-                    "target_3": target_3,
+                    "target_1": sig["target_1"],
+                    "target_2": sig["target_2"],
+                    "target_3": sig["target_3"],
                     "target_1_pct": sig.get("target_1_pct"),
                     "target_2_pct": sig.get("target_2_pct"),
                     "target_3_pct": sig.get("target_3_pct"),
@@ -897,6 +951,9 @@ def main():
                     "context_earnings": float(sig.get("context_earnings") or 0.0),
                     "context_fundamental": float(sig.get("context_fundamental") or 0.0),
                     "context_news": float(sig.get("context_news") or 0.0),
+                    # New position sizing columns
+                    "allocated_dollars": sig["allocated_dollars"],
+                    "max_shares": sig["max_shares"],
                 }
             )
     else:
@@ -977,6 +1034,8 @@ def main():
                         "strategy_name": sig.get("strategy_name"),
                         "outcome": "open",
                         "context_score": sig.get("context_score", 0.0),
+                        "allocated_dollars": sig.get("allocated_dollars"),
+                        "max_shares": sig.get("max_shares"),
                     })
                 
                 supabase.table("signals_history").upsert(

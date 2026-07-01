@@ -35,6 +35,8 @@ export interface Recommendation {
   target_3_pct?: number | null;
   weighted_rr?: number | null;
   position_sizing?: string | null;
+  allocated_dollars?: number | null;
+  max_shares?: number | null;
   narrative?: string | null;
   strategy?: string | null;
   strategy_name?: string | null;

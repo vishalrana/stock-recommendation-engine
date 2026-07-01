@@ -265,9 +265,11 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
             ticker = existing['ticker']
             entry_price = float(existing['entry_price'])
             stop_loss = float(existing['stop_loss'])
-            target_1 = float(existing['target_1'])
-            target_2 = float(existing['target_2'])
-            target_3 = float(existing['target_3'])
+            # ponytail: targets can be None for trend/momentum strategies
+            target_1 = float(existing['target_1']) if existing.get('target_1') is not None else None
+            target_2 = float(existing['target_2']) if existing.get('target_2') is not None else None
+            target_3 = float(existing['target_3']) if existing.get('target_3') is not None else None
+            has_targets = target_1 is not None
             
             current_price = get_latest_price(ticker)
             if current_price is None:
@@ -283,15 +285,15 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 status = 'closed'
                 exit_price = stop_loss
                 sell_signal = 'Stop loss hit'
-            elif current_price >= target_3:
+            elif has_targets and current_price >= target_3:
                 status = 'closed'
                 exit_price = target_3
                 sell_signal = 'Target 3 hit – full exit'
-            elif current_price >= target_2:
+            elif has_targets and current_price >= target_2:
                 status = 'open'  # Partial exit — keep open
                 exit_price = target_2
                 sell_signal = 'Target 2 hit – sell 30%'
-            elif current_price >= target_1:
+            elif has_targets and current_price >= target_1:
                 status = 'open'  # Partial exit — keep open
                 exit_price = target_1
                 sell_signal = 'Target 1 hit – sell 50%'
@@ -621,6 +623,8 @@ def main():
                 signal = strategy.scan(ticker, df, regime_str, metrics)
 
                 if signal is not None:
+                    # ponytail: carry ATR into signal for hybrid exit calc later
+                    signal["atr_14"] = float(df["ATR_14"].iloc[-1]) if "ATR_14" in df.columns else 0.0
                     signals_qualified += 1
                     strategy_signals.append(signal)
                     logger.debug(
@@ -757,16 +761,10 @@ def main():
                         logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
                         sig["context_score"] = 0.0
 
-        STRATEGY_TARGETS = {
-            'Trend Following':          (0.12, 0.22, 0.35),
-            'Pullback Recovery':        (0.07, 0.12, 0.18),
-            'Mean Reversion':           (0.05, 0.10, 0.15),
-            '52-Week High Breakout':    (0.10, 0.18, 0.28),
-            '52-Week High':             (0.10, 0.18, 0.28),
-            'Post-Earnings Drift':      (0.08, 0.15, 0.22),
-            'Sector Rotation':          (0.08, 0.15, 0.22),
-            'Cross-Sectional Momentum': (0.10, 0.18, 0.25),
-        }
+        # ponytail: Hybrid exit architecture — short-term keeps ATR-scaled T1/T2/T3,
+        # trend/momentum strategies get None targets + trailing stop
+        SHORT_TERM_STRATEGIES = {'Pullback Recovery', 'Mean Reversion', 'Post-Earnings Drift'}
+        TREND_STRATEGIES = {'Trend Following', 'Sector Rotation', '52-Week High', '52-Week High Breakout', 'Cross-Sectional Momentum'}
 
         # Fetch active open positions from Supabase to prevent duplicates and calculate current portfolio allocation
         open_positions = []
@@ -856,19 +854,34 @@ def main():
             else:
                 sig["tier_label"] = "Speculative"
 
-            t1_pct, t2_pct, t3_pct = STRATEGY_TARGETS.get(strategy_name, (0.10, 0.20, 0.30))
+            atr = float(sig.get("atr_14", 0.0))
 
-            target_1 = round(entry_price * (1 + t1_pct), 2)
-            target_2 = round(entry_price * (1 + t2_pct), 2)
-            target_3 = round(entry_price * (1 + t3_pct), 2)
-
-            sig["target_1_pct"] = round(t1_pct * 100, 1)
-            sig["target_2_pct"] = round(t2_pct * 100, 1)
-            sig["target_3_pct"] = round(t3_pct * 100, 1)
-
-            risk = entry_price - stop_loss
-            reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
-            sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
+            if strategy_name in SHORT_TERM_STRATEGIES:
+                # ponytail: ATR-scaled T1/T2/T3 for cash-flow strategies
+                target_1 = round(entry_price + 1.5 * atr, 2) if atr > 0 else round(entry_price * 1.07, 2)
+                target_2 = round(entry_price + 2.5 * atr, 2) if atr > 0 else round(entry_price * 1.12, 2)
+                target_3 = round(entry_price + 3.5 * atr, 2) if atr > 0 else round(entry_price * 1.18, 2)
+                sig["target_1_pct"] = round((target_1 / entry_price - 1) * 100, 1)
+                sig["target_2_pct"] = round((target_2 / entry_price - 1) * 100, 1)
+                sig["target_3_pct"] = round((target_3 / entry_price - 1) * 100, 1)
+                risk = entry_price - stop_loss
+                reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
+                sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
+            else:
+                # ponytail: Trend/momentum — no profit caps, 3-ATR trailing stop
+                target_1 = None
+                target_2 = None
+                target_3 = None
+                sig["target_1_pct"] = None
+                sig["target_2_pct"] = None
+                sig["target_3_pct"] = None
+                # Override stop_loss to 3*ATR trailing stop
+                if atr > 0:
+                    stop_loss = round(entry_price - 3.0 * atr, 2)
+                    sig["stop_loss"] = stop_loss
+                risk = entry_price - stop_loss
+                # R:R approximation for trend: use 3*ATR as expected reward (conservative)
+                sig["weighted_rr"] = round((3.0 * atr) / risk, 2) if risk > 0 else 0.0
 
             # TASK 2 & 3: Sizing adjustments based on VIX override and drawdown controls
             win_p = 0.35

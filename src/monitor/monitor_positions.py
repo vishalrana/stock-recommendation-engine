@@ -117,31 +117,67 @@ def monitor_open_positions():
         
         entry_price = float(pos['entry_price'])
         stop_loss = float(pos['stop_loss'])
-        target_1 = float(pos['target_1'])
-        target_2 = float(pos['target_2'])
-        target_3 = float(pos['target_3'])
+        # ponytail: targets can be None for trend/momentum strategies
+        target_1 = float(pos['target_1']) if pos.get('target_1') is not None else None
+        target_2 = float(pos['target_2']) if pos.get('target_2') is not None else None
+        target_3 = float(pos['target_3']) if pos.get('target_3') is not None else None
+        has_targets = target_1 is not None
         
         sell_triggered = False
         status = 'open'
         reason = ""
         
-        # Priority checks: target_1, target_2, target_3, and stop_loss
-        if current_price >= target_3:
-            sell_triggered = True
-            reason = "Target 3 hit – full exit"
-            status = 'closed'
-        elif current_price >= target_2:
-            sell_triggered = True
-            reason = "Target 2 hit – sell 30%"
-            status = 'open'
-        elif current_price >= target_1:
-            sell_triggered = True
-            reason = "Target 1 hit – sell 50%"
-            status = 'open'
-        elif current_price <= stop_loss:
-            sell_triggered = True
-            reason = "Stop loss hit"
-            status = 'closed'
+        if has_targets:
+            # === Category 1: Short-Term strategies with T1/T2/T3 scale-out ===
+            if current_price >= target_3:
+                sell_triggered = True
+                reason = "Target 3 hit \u2013 full exit"
+                status = 'closed'
+            elif current_price >= target_2:
+                sell_triggered = True
+                reason = "Target 2 hit \u2013 sell 30%"
+                status = 'open'
+            elif current_price >= target_1:
+                sell_triggered = True
+                reason = "Target 1 hit \u2013 sell 50%"
+                status = 'open'
+                # ponytail: Breakeven stop \u2014 move stop_loss up to entry_price
+                print(f"[MONITOR] Breakeven stop activated for {ticker}: stop_loss -> {entry_price:.2f}")
+                supabase.table('signals').update({
+                    'stop_loss': entry_price
+                }).eq('ticker', ticker).eq('status', 'open').execute()
+            elif current_price <= stop_loss:
+                sell_triggered = True
+                reason = "Stop loss hit"
+                status = 'closed'
+        else:
+            # === Category 2: Trend/Momentum \u2014 trailing stop only ===
+            if current_price <= stop_loss:
+                sell_triggered = True
+                reason = "Trailing stop hit"
+                status = 'closed'
+            else:
+                # ponytail: Ratchet trailing stop upward using 3*ATR, never lower
+                try:
+                    import yfinance as yf
+                    hist = yf.Ticker(ticker).history(period="30d")
+                    if hist is not None and len(hist) >= 14:
+                        tr = hist[['High', 'Low', 'Close']].copy()
+                        tr['tr1'] = tr['High'] - tr['Low']
+                        tr['tr2'] = (tr['High'] - tr['Close'].shift(1)).abs()
+                        tr['tr3'] = (tr['Low'] - tr['Close'].shift(1)).abs()
+                        tr['TR'] = tr[['tr1', 'tr2', 'tr3']].max(axis=1)
+                        current_atr = float(tr['TR'].ewm(span=14, adjust=False).mean().iloc[-1])
+                        new_stop = round(current_price - 3.0 * current_atr, 2)
+                        if new_stop > stop_loss:
+                            print(f"[MONITOR] Trailing stop ratcheted for {ticker}: {stop_loss:.2f} -> {new_stop:.2f}")
+                            supabase.table('signals').update({
+                                'stop_loss': new_stop,
+                                'price': current_price,
+                            }).eq('ticker', ticker).eq('status', 'open').execute()
+                            continue  # Already updated price, skip to next
+                except Exception as e:
+                    print(f"[MONITOR] Failed to compute trailing stop for {ticker}: {e}")
             
         if sell_triggered:
             print(f"[MONITOR ALERT] Triggered for {ticker}: {reason} at {current_price:.2f}")
@@ -176,3 +212,4 @@ def monitor_open_positions():
 
 if __name__ == '__main__':
     monitor_open_positions()
+

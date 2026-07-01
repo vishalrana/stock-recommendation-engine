@@ -288,7 +288,22 @@ export default function RecommendationsTable({ data, scanLog }: TableProps) {
           const t2 = row.original.target_2;
           const t3 = row.original.target_3;
 
-          if (!t1 && !t2 && !t3) return <span className="text-gray-300">—</span>;
+          // ponytail: trend/momentum strategies have null targets — show trailing stop badge
+          if (!t1 && !t2 && !t3) {
+            const stopLoss = row.original.stop_loss;
+            return (
+              <div className="flex flex-col gap-0.5">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200">
+                  ⚡ Trailing Stop
+                </span>
+                {stopLoss && (
+                  <span className="font-mono text-[10px] text-red-600 font-bold">
+                    Stop: ${Number(stopLoss).toFixed(2)}
+                  </span>
+                )}
+              </div>
+            );
+          }
 
           return (
             <div className="flex flex-col gap-0.5 font-mono text-[10px]">

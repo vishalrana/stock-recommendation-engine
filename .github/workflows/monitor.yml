@@ -1,7 +1,7 @@
 name: Intraday Monitor
 on:
   schedule:
-    - cron: '*/15 13-20 * * 1-5'  # Every 15 min from 13:00 to 20:59 UTC (9:00 AM to 4:59 PM EST/EDT) during market hours
+    - cron: '*/15 * * * 1-5'  # Every 15 min on weekdays (market hours guard is enforced inside the Next.js API)
   workflow_dispatch:            # Allows manual execution from GitHub interface
 
 jobs:

@@ -2,8 +2,9 @@ name: Nightly Recommendation Scan
 
 on:
   schedule:
-    # Run daily at 6:00 AM UTC
-    - cron: '0 6 * * 1-5'
+    # Run 1-2 hours after EOD data settles (8:00 PM ET / 20:00 ET, Mon-Fri)
+    # 20:00 EST/EDT corresponds to 00:00 / 01:00 UTC on the next day (Tue-Sat)
+    - cron: '0 1 * * 2-6'
   workflow_dispatch: # Manual trigger from GitHub UI
 
 jobs:

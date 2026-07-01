@@ -1,6 +1,7 @@
 import { getSupabase } from '../lib/supabase';
 import { Recommendation, ScanLog } from '../types/database';
 import RecommendationsTable from '../components/recommendations-table';
+import PortfolioSummary from '../components/portfolio-summary';
 
 // Force dynamic rendering — never prerender at build time
 export const dynamic = 'force-dynamic';
@@ -37,6 +38,24 @@ async function getLatestScanLog(): Promise<ScanLog | null> {
   }
 }
 
+async function getLatestPortfolioValue(): Promise<number> {
+  try {
+    const { data, error } = await getSupabase()
+      .from('portfolio_state')
+      .select('portfolio_value')
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error || !data || data.length === 0) {
+      return 10000.0;
+    }
+
+    return parseFloat(data[0].portfolio_value) || 10000.0;
+  } catch {
+    return 10000.0;
+  }
+}
+
 function formatDateLong(val: string | null | undefined): string {
   if (!val) return '-';
   const parts = val.split('-');
@@ -58,19 +77,24 @@ export default async function Page() {
   let errorMsg = '';
   let regime: string | null = null;
   let scanLog: ScanLog | null = null;
+  let latestPortfolioValue = 10000.0;
 
   try {
-    const [recommendations, latestScanLog] = await Promise.all([
+    const [recommendations, latestScanLog, portfolioVal] = await Promise.all([
       getRecommendations(),
       getLatestScanLog(),
+      getLatestPortfolioValue()
     ]);
 
     data = recommendations;
     scanLog = latestScanLog;
+    latestPortfolioValue = portfolioVal;
     regime = scanLog?.regime || (data.length > 0 ? data[0].regime : null);
   } catch (e: any) {
     errorMsg = e.message || 'Failed to load recommendations';
   }
+
+  const openPositions = data.filter(p => p.status === 'open');
 
   return (
     <main className="min-h-screen bg-[#f8f9fa] py-8 px-4 sm:px-6 lg:px-8">
@@ -106,8 +130,11 @@ export default async function Page() {
             </div>
           </div>
         ) : (
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200/80 p-6">
-            <RecommendationsTable data={data} regime={regime} scanLog={scanLog} />
+          <div className="space-y-6">
+            <PortfolioSummary latestPortfolioValue={latestPortfolioValue} openPositions={openPositions} />
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200/80 p-6">
+              <RecommendationsTable data={data} regime={regime} scanLog={scanLog} latestPortfolioValue={latestPortfolioValue} />
+            </div>
           </div>
         )}
       </div>

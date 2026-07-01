@@ -955,7 +955,7 @@ def main():
                     "context_score": sig.get("context_score", 0.0),
                     # GTM persistence columns (Task 2)
                     "entry_date": get_next_trading_day(datetime.strptime(sig["scan_date"], "%Y-%m-%d").date()).isoformat(),
-                    "status": "open",
+                    "status": "pending",
                     "sell_signal": False,
                     "sell_signal_reason": None,
                     "sell_price": None,

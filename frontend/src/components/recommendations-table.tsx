@@ -58,6 +58,17 @@ function getKellySize(score: number, rr: number): { kellyPct: number } {
   };
 }
 
+function parseAllocationPct(positionSizing: string | null | undefined, score: number, rr: number): number {
+  if (positionSizing) {
+    const raw = positionSizing.replace('Kelly:', '').replace('K:', '').replace('%', '').trim();
+    const parsed = parseFloat(raw);
+    if (!isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return getKellySize(score, rr).kellyPct;
+}
+
 interface TableProps {
   data: Recommendation[];
   regime: string | null;
@@ -239,7 +250,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const tier = row.original.tier_label;
           const score = row.original.composite_score || 50;
           const rr = row.original.weighted_rr || 2.0;
-          const { kellyPct } = getKellySize(score, rr);
+          const kellyPct = parseAllocationPct(row.original.position_sizing, score, rr);
 
           const getTierColor = (t: string | null) => {
             if (t === 'Strong Buy') return 'bg-green-50 text-green-700 border-green-200';

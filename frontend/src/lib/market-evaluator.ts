@@ -451,6 +451,9 @@ export async function evaluate_open_positions() {
         const hasTargets = t1 !== null;
         
         let sellTriggered = false;
+        let isPartialExit = false;
+        let partialFraction = 0.0;
+        let partialReason = '';
         let status = 'open';
         let reason = '';
         let exitOutcome = '';
@@ -466,7 +469,10 @@ export async function evaluate_open_positions() {
             // Check if T2 was already processed to avoid repeat triggers
             if (!sig.sell_signal_reason?.includes('Target 2')) {
               sellTriggered = true;
+              isPartialExit = true;
+              partialFraction = 0.30;
               reason = 'Target 2 hit – sell 30%';
+              partialReason = 'Target 2 hit (Partial)';
               status = 'open';
               exitOutcome = 'hit_t2';
             }
@@ -474,13 +480,12 @@ export async function evaluate_open_positions() {
             // Check if T1 was already processed to avoid repeat triggers
             if (!sig.sell_signal_reason?.includes('Target 1')) {
               sellTriggered = true;
+              isPartialExit = true;
+              partialFraction = 0.50;
               reason = 'Target 1 hit – sell 50%';
+              partialReason = 'Target 1 hit (Partial)';
               status = 'open';
               exitOutcome = 'hit_t1';
-              // Move stop to breakeven
-              console.log(`[MONITOR] Target 1 hit for ${ticker}. Setting stop loss to entry price: ${entryPrice}`);
-              await supabase.from('signals').update({ stop_loss: entryPrice }).eq('id', sig.id);
-              sig.stop_loss = entryPrice;
             }
           } else if (livePrice <= stopLoss) {
             sellTriggered = true;
@@ -502,40 +507,101 @@ export async function evaluate_open_positions() {
         if (sellTriggered) {
           console.log(`[MONITOR ALERT] Triggered for ${ticker}: ${reason} at ${livePrice}`);
           
-          const updatePayload: any = {
-            sell_signal: true,
-            sell_signal_reason: reason,
-            price: livePrice,
-            sell_price: livePrice,
-            status: status
-          };
-          if (status === 'closed') {
-            updatePayload.exit_date = todayStr;
-          }
-          await supabase.from('signals').update(updatePayload).eq('id', sig.id);
-          
-          // Archive to history if closed or partial exits
-          if (exitOutcome) {
-            const returnPct = entryPrice > 0 ? ((livePrice - entryPrice) / entryPrice) * 100 : 0;
-            let holdingDays = 0;
-            if (sig.scan_date) {
-              const start = new Date(sig.scan_date);
-              const end = new Date(todayStr);
-              holdingDays = Math.max(0, Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+          if (isPartialExit) {
+            // ponytail: Position Lot Splitting logic
+            const originalMaxShares = sig.max_shares ? parseInt(sig.max_shares) : 0;
+            const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
+            
+            const sharesSold = Math.floor(originalMaxShares * partialFraction);
+            const dollarsSold = originalAllocated * partialFraction;
+            
+            if (sharesSold > 0 && dollarsSold > 0) {
+              const returnPct = entryPrice > 0 ? ((livePrice - entryPrice) / entryPrice) * 100 : 0;
+              let holdingDays = 0;
+              if (sig.scan_date) {
+                const start = new Date(sig.scan_date);
+                const end = new Date(todayStr);
+                holdingDays = Math.max(0, Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+              }
+              
+              // 1. Insert CLOSED portion into signals_history with dynamic outcome
+              const histRow = {
+                scan_date: sig.scan_date,
+                ticker: `${sig.ticker} (Partial)`,
+                company_name: sig.company_name,
+                industry: sig.industry,
+                price: livePrice,
+                entry_price: entryPrice,
+                stop_loss: stopLoss,
+                exit_price: livePrice,
+                outcome: exitOutcome,
+                outcome_date: todayStr,
+                outcome_return_pct: returnPct,
+                outcome_holding_days: holdingDays,
+                allocated_dollars: dollarsSold,
+                max_shares: sharesSold,
+                strategy_name: sig.strategy_name || sig.strategy
+              };
+              
+              console.log(`[MONITOR] Inserting partial closed history lot for ${ticker}: ${sharesSold} shares, $${dollarsSold.toFixed(2)}`);
+              await supabase.from('signals_history').insert(histRow);
+              
+              // 2. UPDATE existing OPEN row in signals table
+              const remainingShares = originalMaxShares - sharesSold;
+              const remainingDollars = originalAllocated - dollarsSold;
+              
+              const updatePayload: any = {
+                max_shares: remainingShares,
+                allocated_dollars: remainingDollars,
+                sell_signal_reason: reason,
+                sell_signal: true,
+                sell_price: livePrice,
+                price: livePrice
+              };
+              
+              if (exitOutcome === 'hit_t1') {
+                console.log(`[MONITOR] Target 1 hit. Setting stop loss to entry price (breakeven): ${entryPrice}`);
+                updatePayload.stop_loss = entryPrice;
+                sig.stop_loss = entryPrice; // local update
+              }
+              
+              await supabase.from('signals').update(updatePayload).eq('id', sig.id);
             }
-            
-            await supabase.from('signals_history').update({
-              outcome: exitOutcome,
-              outcome_date: todayStr,
-              outcome_return_pct: returnPct,
-              outcome_holding_days: holdingDays,
-              exit_price: livePrice
-            }).eq('scan_date', sig.scan_date).eq('ticker', ticker);
-            
+          } else {
+            // Full exit — update signals row and signals_history row
+            const updatePayload: any = {
+              sell_signal: true,
+              sell_signal_reason: reason,
+              price: livePrice,
+              sell_price: livePrice,
+              status: status
+            };
             if (status === 'closed') {
-              summary.closedExits++;
-              // Update portfolio drawdown with final return
-              await updatePortfolioDrawdown(supabase, returnPct, sig.position_sizing);
+              updatePayload.exit_date = todayStr;
+            }
+            await supabase.from('signals').update(updatePayload).eq('id', sig.id);
+            
+            if (exitOutcome) {
+              const returnPct = entryPrice > 0 ? ((livePrice - entryPrice) / entryPrice) * 100 : 0;
+              let holdingDays = 0;
+              if (sig.scan_date) {
+                const start = new Date(sig.scan_date);
+                const end = new Date(todayStr);
+                holdingDays = Math.max(0, Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+              }
+              
+              await supabase.from('signals_history').update({
+                outcome: exitOutcome,
+                outcome_date: todayStr,
+                outcome_return_pct: returnPct,
+                outcome_holding_days: holdingDays,
+                exit_price: livePrice
+              }).eq('scan_date', sig.scan_date).eq('ticker', ticker);
+              
+              if (status === 'closed') {
+                summary.closedExits++;
+                await updatePortfolioDrawdown(supabase, returnPct, sig.position_sizing);
+              }
             }
           }
         } else {

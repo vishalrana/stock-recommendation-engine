@@ -277,41 +277,122 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 continue
                 
             # Determine status
+            # Determine status
             status = 'open'
             exit_price = None
             sell_signal = None
+            is_partial_exit = False
+            partial_fraction = 0.0
+            partial_reason = ''
+            exit_outcome = ''
             
             if current_price <= stop_loss:
                 status = 'closed'
                 exit_price = stop_loss
                 sell_signal = 'Stop loss hit'
+                exit_outcome = 'stopped'
             elif has_targets and current_price >= target_3:
                 status = 'closed'
                 exit_price = target_3
                 sell_signal = 'Target 3 hit – full exit'
+                exit_outcome = 'hit_t3'
             elif has_targets and current_price >= target_2:
-                status = 'open'  # Partial exit — keep open
-                exit_price = target_2
-                sell_signal = 'Target 2 hit – sell 30%'
+                # Check if T2 was already processed to avoid repeat triggers
+                if not (existing.get('sell_signal_reason') and 'Target 2' in existing['sell_signal_reason']):
+                    status = 'open'  # Partial exit — keep open
+                    exit_price = target_2
+                    sell_signal = 'Target 2 hit – sell 30%'
+                    is_partial_exit = True
+                    partial_fraction = 0.30
+                    partial_reason = 'Target 2 hit (Partial)'
+                    exit_outcome = 'hit_t2'
             elif has_targets and current_price >= target_1:
-                status = 'open'  # Partial exit — keep open
-                exit_price = target_1
-                sell_signal = 'Target 1 hit – sell 50%'
+                # Check if T1 was already processed to avoid repeat triggers
+                if not (existing.get('sell_signal_reason') and 'Target 1' in existing['sell_signal_reason']):
+                    status = 'open'  # Partial exit — keep open
+                    exit_price = target_1
+                    sell_signal = 'Target 1 hit – sell 50%'
+                    is_partial_exit = True
+                    partial_fraction = 0.50
+                    partial_reason = 'Target 1 hit (Partial)'
+                    exit_outcome = 'hit_t1'
                 
             if sell_signal is not None:
                 logger.info(f"[SELL SIGNAL] {ticker} triggered {sell_signal} at {exit_price}")
-                if status == 'closed':
-                    # Full exit — update and archive
-                    update_signals_status(ticker, 'closed', exit_price, sell_signal, sell_signal_reason=sell_signal)
-                    update_history_outcome(ticker, status, exit_price, sell_signal)
+                
+                if is_partial_exit:
+                    # ponytail: Position Lot Splitting logic
+                    import math
+                    original_max_shares = int(existing.get("max_shares") or 0)
+                    original_allocated = float(existing.get("allocated_dollars") or 0.0)
+                    
+                    shares_sold = int(math.floor(original_max_shares * partial_fraction))
+                    dollars_sold = original_allocated * partial_fraction
+                    
+                    if shares_sold > 0 and dollars_sold > 0:
+                        # 1. Insert CLOSED portion into signals_history with dynamic outcome
+                        return_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+                        holding_days = 0
+                        scan_date_str = existing.get("scan_date")
+                        if scan_date_str:
+                            try:
+                                scan_date = datetime.strptime(scan_date_str, '%Y-%m-%d').date()
+                                holding_days = (datetime.now().date() - scan_date).days
+                            except Exception:
+                                pass
+                                
+                        hist_row = {
+                            "scan_date": existing.get("scan_date"),
+                            "ticker": f"{ticker} (Partial)",
+                            "company_name": existing.get("company_name"),
+                            "industry": existing.get("industry"),
+                            "price": exit_price,
+                            "entry_price": entry_price,
+                            "stop_loss": stop_loss,
+                            "exit_price": exit_price,
+                            "outcome": exit_outcome,
+                            "outcome_date": datetime.now().date().isoformat(),
+                            "outcome_return_pct": return_pct,
+                            "outcome_holding_days": holding_days,
+                            "allocated_dollars": dollars_sold,
+                            "max_shares": shares_sold,
+                            "strategy_name": existing.get("strategy_name") or existing.get("strategy")
+                        }
+                        
+                        logger.info(f"[ROTATION/MONITOR] Inserting partial closed history lot for {ticker}: {shares_sold} shares, ${dollars_sold:.2f}")
+                        supabase.table('signals_history').insert(hist_row).execute()
+                        
+                        # 2. UPDATE existing OPEN row in signals table
+                        remaining_shares = original_max_shares - shares_sold
+                        remaining_dollars = original_allocated - dollars_sold
+                        
+                        update_payload = {
+                            "max_shares": remaining_shares,
+                            "allocated_dollars": remaining_dollars,
+                            "sell_signal_reason": sell_signal,
+                            "sell_signal": True,
+                            "sell_price": exit_price,
+                            "price": current_price
+                        }
+                        
+                        if exit_outcome == 'hit_t1':
+                            logger.info(f"[MONITOR] Setting stop loss to breakeven: {entry_price}")
+                            update_payload["stop_loss"] = entry_price
+                            
+                        supabase.table('signals').update(update_payload).eq('id', existing['id']).execute()
                 else:
-                    # Partial exit — update sell_signal fields but keep open
-                    supabase.table('signals').update({
-                        'sell_signal': True,
-                        'sell_signal_reason': sell_signal,
-                        'sell_price': exit_price,
-                        'price': current_price,
-                    }).eq('ticker', ticker).eq('status', 'open').execute()
+                    if status == 'closed':
+                        # Full exit — update and archive
+                        update_signals_status(ticker, 'closed', exit_price, sell_signal, sell_signal_reason=sell_signal)
+                        update_history_outcome(ticker, status, exit_price, sell_signal)
+                    else:
+                        # Fallback standard update
+                        supabase.table('signals').update({
+                            'sell_signal': True,
+                            'sell_signal_reason': sell_signal,
+                            'sell_price': exit_price,
+                            'price': current_price,
+                        }).eq('ticker', ticker).eq('status', 'open').execute()
             else:
                 logger.info(f"[POSITION HOLD] {ticker} remains open. Current price: {current_price:.2f}")
                 # Update current price in signals table

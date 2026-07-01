@@ -382,7 +382,16 @@ export default function RecommendationsTable({ data, scanLog }: TableProps) {
           let displayStatus = 'Open';
           let badgeColor = 'bg-green-50 text-green-700 border-green-200';
 
-          if (status === 'closed') {
+          if (status === 'pending') {
+            displayStatus = 'Pending';
+            badgeColor = 'bg-sky-50 text-sky-700 border-sky-200';
+          } else if (status === 'cancelled_gap_up') {
+            displayStatus = 'Cancelled (Gap Up)';
+            badgeColor = 'bg-rose-50 text-rose-700 border-rose-200';
+          } else if (status === 'cancelled_gap_down') {
+            displayStatus = 'Cancelled (Gap Down)';
+            badgeColor = 'bg-rose-50 text-rose-700 border-rose-200';
+          } else if (status === 'closed') {
             if (sell_signal_reason && sell_signal_reason.toLowerCase().includes('target 3')) {
               displayStatus = 'Closed (T3)';
               badgeColor = 'bg-indigo-50 text-indigo-700 border-indigo-200';

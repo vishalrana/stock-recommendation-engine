@@ -145,19 +145,15 @@ function ExpandableDetails({ row }: { row: any }) {
           </div>
 
           {/* Action Panel */}
-          <div className="bg-white p-4 border border-gray-200 rounded-xl shadow-sm">
-            <h5 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">⚡ Position Details</h5>
-            {sell_signal || row.original.status === 'closed' ? (
+          {(sell_signal || row.original.status === 'closed') && (
+            <div className="bg-white p-4 border border-gray-200 rounded-xl shadow-sm">
+              <h5 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">⚡ Position Details</h5>
               <div className="text-xs font-bold text-red-600 leading-relaxed">
                 {row.original.status === 'closed' ? '🏁 Exit complete:' : '⚠️ Active sell alert:'} {sell_signal_reason}
                 {sell_price && <span className="block font-mono text-gray-700 mt-1">at ${Number(sell_price).toFixed(2)}</span>}
               </div>
-            ) : (
-              <div className="text-xs text-gray-500 font-medium">
-                Monitoring active in real-time. No trigger breaches detected.
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* Right column: Interactive TradingView Chart */}
@@ -185,7 +181,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
   
   const router = useRouter();
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [lastSynced, setLastSynced] = useState<string | null>(null);
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
   // Centralized evaluation loop HTTP trigger
@@ -215,7 +211,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           second: '2-digit',
           hour12: false
         });
-        setLastSynced(`${nyTimeStr} ET`);
+        setLastSyncTime(`${nyTimeStr} ET`);
         setSyncMessage({
           text: 'Market synced successfully!',
           isError: false
@@ -367,19 +363,11 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const t2 = row.original.target_2;
           const t3 = row.original.target_3;
 
-          if (!t1 && !t2 && !t3) {
-            const stopLoss = row.original.stop_loss;
+          if (!t1) {
             return (
-              <div className="flex flex-col gap-0.5">
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200">
-                  ⚡ Trailing Stop
-                </span>
-                {stopLoss && (
-                  <span className="font-mono text-[10px] text-red-600 font-bold">
-                    Stop: ${Number(stopLoss).toFixed(2)}
-                  </span>
-                )}
-              </div>
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 shadow-sm">
+                Trailing Stop Active
+              </span>
             );
           }
 
@@ -559,9 +547,9 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
             </div>
             
             <div className="flex items-center gap-3">
-              {lastSynced && (
-                <span className="text-xs font-semibold text-slate-500">
-                  Last Sync: {lastSynced}
+              {lastSyncTime && (
+                <span className="text-xs text-gray-400 font-medium select-none">
+                  Last Sync: {lastSyncTime}
                 </span>
               )}
               <button

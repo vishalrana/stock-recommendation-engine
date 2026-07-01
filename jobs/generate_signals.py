@@ -769,43 +769,37 @@ def main():
         # Fetch active open positions from Supabase to prevent duplicates and calculate current portfolio allocation
         open_positions = []
         open_tickers = []
-        open_positions_value = 0.0
+        open_positions_allocated_sum = 0.0
         try:
             res_open = supabase.table("signals").select("*").eq("status", "open").execute()
             open_positions = res_open.data or []
             open_tickers = [row['ticker'].upper() for row in open_positions]
             
-            # ponytail: Loop to sum up value of currently open positions with fallbacks for legacy records
+            # Sum up allocated_dollars of all currently 'open' positions
             for pos in open_positions:
-                curr_price = float(pos.get("price") or pos.get("entry_price") or 0.0)
-                shares = pos.get("max_shares")
-                if shares is not None and shares > 0:
-                    pos_val = shares * curr_price
-                elif pos.get("allocated_dollars") is not None and float(pos["allocated_dollars"]) > 0:
-                    entry = float(pos.get("entry_price") or 1.0)
-                    alloc = float(pos["allocated_dollars"])
-                    pos_val = alloc * (curr_price / entry) if entry > 0 else alloc
+                allocated = pos.get("allocated_dollars")
+                if allocated is not None and float(allocated) > 0:
+                    pos_val = float(allocated)
                 else:
-                    # Estimate based on position_sizing string
+                    # Fallback to estimate if allocated_dollars is missing/NULL
                     ps_str = pos.get("position_sizing") or ""
                     pct = 0.05
+                    # Do not parse slash formats (legacy)
                     clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
                     try:
-                        if clean:
+                        if clean and '/' not in clean:
                             pct = float(clean) / 100.0
                     except ValueError:
                         pass
-                    entry = float(pos.get("entry_price") or 1.0)
-                    base_alloc = pct * portfolio_value
-                    pos_val = base_alloc * (curr_price / entry) if entry > 0 else base_alloc
-                open_positions_value += pos_val
+                    pos_val = pct * portfolio_value
+                open_positions_allocated_sum += pos_val
                 
-            logger.info(f"[PORTFOLIO] Value of open positions: ${open_positions_value:.2f}")
+            logger.info(f"[PORTFOLIO] Allocated capital in open positions: ${open_positions_allocated_sum:.2f}")
         except Exception as e:
-            logger.warning("Failed to fetch active open positions/value from Supabase: %s", e)
+            logger.warning("Failed to fetch active open positions/allocated capital from Supabase: %s", e)
 
-        # Compute available cash constraints
-        available_cash = portfolio_value - open_positions_value
+        # Compute available cash constraints: Portfolio Value - Sum(Allocated Dollars of Open Positions)
+        available_cash = portfolio_value - open_positions_allocated_sum
         logger.info(f"[PORTFOLIO] Available cash for new setups: ${available_cash:.2f}")
 
         # Phase 1: Pre-calculate raw Kelly weights and metrics for potential new setups
@@ -883,6 +877,15 @@ def main():
                 # R:R approximation for trend: use 3*ATR as expected reward (conservative)
                 sig["weighted_rr"] = round((3.0 * atr) / risk, 2) if risk > 0 else 0.0
 
+            # Explicit target nullification for all Trend/Momentum strategies
+            if strategy_name in TREND_STRATEGIES:
+                target_1 = None
+                target_2 = None
+                target_3 = None
+                sig["target_1_pct"] = None
+                sig["target_2_pct"] = None
+                sig["target_3_pct"] = None
+
             # TASK 2 & 3: Sizing adjustments based on VIX override and drawdown controls
             win_p = 0.35
             if score >= 90.0: win_p = 0.75
@@ -916,6 +919,8 @@ def main():
             if portfolio_value > 0:
                 final_alloc_pct = (sig["allocated_dollars"] / portfolio_value) * 100.0
             position_sizing_str = f"K: {final_alloc_pct:.1f}%"
+            if available_cash <= 0:
+                position_sizing_str = "Allocation: 0.0% (No Cash Available)"
 
             ranked_signals.append(
                 {

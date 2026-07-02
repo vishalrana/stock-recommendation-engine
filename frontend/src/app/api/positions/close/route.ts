@@ -18,54 +18,36 @@ export async function POST(request: Request) {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // 1. Fetch current open signal from signals to update outcome in history
     const { data: openSignals } = await supabase
       .from('signals')
       .select('*')
       .eq('ticker', ticker)
-      .eq('status', 'open');
+      .eq('status', 'open')
+      .limit(1);
 
-    if (openSignals && openSignals.length > 0) {
-      const pos = openSignals[0];
-      const entry = pos.entry_price || 0;
-      const price = pos.price || entry;
-      const returnPct = entry > 0 ? ((price - entry) / entry) * 100 : 0;
-      
-      const entryDate = pos.entry_date ? new Date(pos.entry_date) : new Date();
-      const today = new Date();
-      const diffTime = Math.abs(today.getTime() - entryDate.getTime());
-      const holdingDays = Math.max(0, Math.floor(diffTime / (1000 * 60 * 60 * 24)));
-
-      // Update outcome in signals_history to closed
-      await supabase
-        .from('signals_history')
-        .update({
-          outcome: 'closed',
-          outcome_date: today.toISOString().split('T')[0],
-          outcome_return_pct: returnPct,
-          outcome_holding_days: holdingDays,
-        })
-        .eq('ticker', ticker)
-        .eq('outcome', 'open');
+    if (!openSignals || openSignals.length === 0) {
+      return NextResponse.json({ error: 'open position not found' }, { status: 404 });
     }
 
-    // 2. Update signals table to closed status
-    const { error } = await supabase
-      .from('signals')
-      .update({
-        status: 'closed',
-        exit_date: new Date().toISOString().split('T')[0],
-        sell_signal: false,
-      })
-      .eq('ticker', ticker)
-      .eq('status', 'open');
+    const pos = openSignals[0];
+    const exitPrice = Number(pos.price || pos.entry_price || 0);
+    const { data, error } = await supabase.rpc('execute_position_exit', {
+      p_signal_id: String(pos.id),
+      p_exit_price: exitPrice,
+      p_outcome: 'closed',
+      p_reason: 'Manual close',
+      p_split_fraction: 1,
+      p_live_price: exitPrice,
+      p_move_stop_to_entry: false
+    });
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ success: true });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Internal Server Error' }, { status: 500 });
+    return NextResponse.json({ success: true, result: data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Internal Server Error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

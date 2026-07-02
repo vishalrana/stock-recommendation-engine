@@ -1,11 +1,14 @@
 -- Migration: Widen ticker and position_sizing columns to prevent value too long errors
+-- Step 1: Drop the dependent view first
+DROP VIEW IF EXISTS recommendations;
+
+-- Step 2: Alter the column types
 ALTER TABLE signals ALTER COLUMN ticker TYPE VARCHAR(30);
 ALTER TABLE signals ALTER COLUMN position_sizing TYPE VARCHAR(30);
 ALTER TABLE signals_history ALTER COLUMN ticker TYPE VARCHAR(30);
 ALTER TABLE signals_history ALTER COLUMN position_sizing TYPE VARCHAR(30);
 
--- Recreate recommendations view to reflect schema changes
-DROP VIEW IF EXISTS recommendations;
+-- Step 3: Recreate recommendations view
 CREATE OR REPLACE VIEW recommendations AS
 SELECT
   s.scan_date,

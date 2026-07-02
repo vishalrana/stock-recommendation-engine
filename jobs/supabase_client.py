@@ -85,7 +85,37 @@ def update_signals_price(ticker, current_price):
     }).eq('ticker', ticker).eq('status', 'open').execute()
 
 
-def update_history_outcome(ticker, status, exit_price, sell_signal):
+def update_portfolio_realized_pnl(pnl_dollars):
+    if not supabase:
+        return
+    try:
+        from datetime import datetime
+        res = supabase.table("portfolio_state").select("*").order("created_at", desc=True).limit(1).execute()
+        portfolio_value = 10000.0
+        peak_value = 10000.0
+        if res.data:
+            state = res.data[0]
+            portfolio_value = float(state.get("portfolio_value") or 10000.0)
+            peak_value = float(state.get("peak_value") or 10000.0)
+            
+        new_portfolio_value = portfolio_value + pnl_dollars
+        new_peak_value = max(peak_value, new_portfolio_value)
+        new_dd = ((new_peak_value - new_portfolio_value) / new_peak_value) * 100.0 if new_peak_value > 0 else 0.0
+        
+        today_str = datetime.now().date().isoformat()
+        supabase.table("portfolio_state").insert({
+            "date": today_str,
+            "portfolio_value": new_portfolio_value,
+            "peak_value": new_peak_value,
+            "current_drawdown_pct": new_dd
+        }).execute()
+        
+        print(f"[PORTFOLIO UPDATE] Realized PNL: ${pnl_dollars:.2f}, New Value: ${new_portfolio_value:.2f}")
+    except Exception as e:
+        print(f"[PORTFOLIO UPDATE] Failed to update portfolio state realized PNL: {e}")
+
+
+def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_dollars=None, max_shares=None):
     if not supabase:
         return
     from datetime import datetime
@@ -115,12 +145,19 @@ def update_history_outcome(ticker, status, exit_price, sell_signal):
             except Exception:
                 pass
                 
-        supabase.table('signals_history').update({
+        update_data = {
             'outcome': outcome,
+            'exit_price': exit_price,
             'outcome_date': datetime.now().date().isoformat(),
             'outcome_return_pct': return_pct,
             'outcome_holding_days': holding_days
-        }).eq('ticker', ticker).eq('outcome', 'open').execute()
+        }
+        if allocated_dollars is not None:
+            update_data['allocated_dollars'] = allocated_dollars
+        if max_shares is not None:
+            update_data['max_shares'] = max_shares
+
+        supabase.table('signals_history').update(update_data).eq('ticker', ticker).eq('outcome', 'open').execute()
 
 
 def get_latest_price(ticker):

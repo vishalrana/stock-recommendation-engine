@@ -245,7 +245,7 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
 def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
     """Evaluate existing open positions, update their statuses, and archive outcomes."""
     try:
-        from jobs.supabase_client import get_latest_price, update_signals_status, update_signals_price, update_history_outcome
+        from jobs.supabase_client import get_latest_price, update_signals_status, update_signals_price, update_history_outcome, update_portfolio_realized_pnl
         
         # 1. Fetch current signals
         res = supabase.table("signals").select("*").execute()
@@ -277,7 +277,6 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                 continue
                 
             # Determine status
-            # Determine status
             status = 'open'
             exit_price = None
             sell_signal = None
@@ -288,8 +287,10 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
             
             if current_price <= stop_loss:
                 status = 'closed'
-                exit_price = stop_loss
-                sell_signal = 'Stop loss hit'
+                # Stop Loss sets exit_price strictly to stop_loss for Category 1 (has targets),
+                # but to current_price for Category 2 (trailing stop).
+                exit_price = stop_loss if has_targets else current_price
+                sell_signal = 'Stop loss hit' if has_targets else 'Trailing stop hit'
                 exit_outcome = 'stopped'
             elif has_targets and current_price >= target_3:
                 status = 'closed'
@@ -320,12 +321,13 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
             if sell_signal is not None:
                 logger.info(f"[SELL SIGNAL] {ticker} triggered {sell_signal} at {exit_price}")
                 
+                # Retrieve current allocation from active signals row
+                original_max_shares = int(existing.get("max_shares") or 0)
+                original_allocated = float(existing.get("allocated_dollars") or 0.0)
+                
                 if is_partial_exit:
                     # ponytail: Position Lot Splitting logic
                     import math
-                    original_max_shares = int(existing.get("max_shares") or 0)
-                    original_allocated = float(existing.get("allocated_dollars") or 0.0)
-                    
                     shares_sold = int(math.floor(original_max_shares * partial_fraction))
                     dollars_sold = original_allocated * partial_fraction
                     
@@ -362,6 +364,10 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                         logger.info(f"[ROTATION/MONITOR] Inserting partial closed history lot for {ticker}: {shares_sold} shares, ${dollars_sold:.2f}")
                         supabase.table('signals_history').insert(hist_row).execute()
                         
+                        # Realized Equity Sync: Update portfolio state realized P&L
+                        pnl_dollars = (exit_price - entry_price) * shares_sold
+                        update_portfolio_realized_pnl(pnl_dollars)
+                        
                         # 2. UPDATE existing OPEN row in signals table
                         remaining_shares = original_max_shares - shares_sold
                         remaining_dollars = original_allocated - dollars_sold
@@ -384,7 +390,11 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                     if status == 'closed':
                         # Full exit — update and archive
                         update_signals_status(ticker, 'closed', exit_price, sell_signal, sell_signal_reason=sell_signal)
-                        update_history_outcome(ticker, status, exit_price, sell_signal)
+                        update_history_outcome(ticker, exit_outcome, exit_price, sell_signal, allocated_dollars=original_allocated, max_shares=original_max_shares)
+                        
+                        # Realized Equity Sync: Update portfolio state realized P&L
+                        pnl_dollars = (exit_price - entry_price) * original_max_shares
+                        update_portfolio_realized_pnl(pnl_dollars)
                     else:
                         # Fallback standard update
                         supabase.table('signals').update({
@@ -910,7 +920,7 @@ def main():
                 weak_holdings = sorted(weak_holdings, key=lambda x: float(x.get("composite_score") or 0.0))
                 
                 # Pair them up and trigger rotation if cash-constrained
-                from jobs.supabase_client import update_signals_status, update_history_outcome
+                from jobs.supabase_client import update_signals_status, update_history_outcome, update_portfolio_realized_pnl
                 
                 for t1_cand in tier1_candidates:
                     # Check cash constraint
@@ -931,9 +941,19 @@ def main():
                         logger.info(f"[ROTATION] Rotating out of weak holding {weak_pos['ticker']} (Score: {weak_pos['composite_score']}) "
                                     f"to fund {t1_cand['ticker']} (Score: {t1_cand['composite_score']}) | Spread: {spread:.2f}")
                         
+                        # Retrieve current allocation from active signals row
+                        allocated_dollars = float(weak_pos.get("allocated_dollars") or 0.0)
+                        max_shares = int(weak_pos.get("max_shares") or 0)
+                        
                         # Execute database updates
                         update_signals_status(weak_pos['ticker'], 'closed', exit_price, True, reason)
-                        update_history_outcome(weak_pos['ticker'], 'closed', exit_price, True)
+                        update_history_outcome(weak_pos['ticker'], 'closed', exit_price, True, allocated_dollars=allocated_dollars, max_shares=max_shares)
+                        
+                        # Realized Equity Sync: Update portfolio state realized P&L
+                        entry_price = float(weak_pos.get("entry_price") or 0.0)
+                        if entry_price > 0:
+                            pnl_dollars = (exit_price - entry_price) * max_shares
+                            update_portfolio_realized_pnl(pnl_dollars)
                         
                         # Deduct weak position allocated dollars from Occupied pool
                         allocated = weak_pos.get("allocated_dollars")

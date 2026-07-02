@@ -214,7 +214,7 @@ async function calculateATR(ticker: string, tiingoKey: string): Promise<number |
   }
 }
 
-async function updatePortfolioDrawdown(supabase: any, returnPct: number, positionSizingStr?: string | null) {
+async function updatePortfolioRealizedPnL(supabase: any, pnlDollars: number) {
   try {
     const res = await supabase.from("portfolio_state").select("*").order("created_at", { ascending: false }).limit(1);
     let portfolio_value = 10000.0;
@@ -225,21 +225,7 @@ async function updatePortfolioDrawdown(supabase: any, returnPct: number, positio
       peak_value = parseFloat(state.peak_value);
     }
     
-    let allocation_pct = 0.05; // default 5%
-    if (positionSizingStr) {
-      // Handle both Kelly: X% and K: X% formats
-      const raw = positionSizingStr.replace('Kelly:', '').replace('K:', '').replace('%', '').trim();
-      try {
-        const val = parseFloat(raw);
-        if (!isNaN(val)) {
-          allocation_pct = val / 100.0;
-        }
-      } catch {}
-    }
-    
-    const allocation_dollars = allocation_pct * portfolio_value;
-    const pnl_dollars = allocation_dollars * (returnPct / 100.0);
-    const new_portfolio_value = portfolio_value + pnl_dollars;
+    const new_portfolio_value = portfolio_value + pnlDollars;
     const new_peak_value = Math.max(peak_value, new_portfolio_value);
     const new_dd = ((new_peak_value - new_portfolio_value) / new_peak_value) * 100;
     
@@ -251,9 +237,9 @@ async function updatePortfolioDrawdown(supabase: any, returnPct: number, positio
       current_drawdown_pct: new_dd
     });
     
-    console.log(`[PORTFOLIO UPDATE] New value: $${new_portfolio_value.toFixed(2)}, Drawdown: ${new_dd.toFixed(2)}%`);
+    console.log(`[PORTFOLIO UPDATE] Realized PNL: $${pnlDollars.toFixed(2)}, New value: $${new_portfolio_value.toFixed(2)}, Drawdown: ${new_dd.toFixed(2)}%`);
   } catch (e) {
-    console.error('[PORTFOLIO UPDATE] Failed to update portfolio state drawdown:', e);
+    console.error('[PORTFOLIO UPDATE] Failed to update portfolio state realized PNL:', e);
   }
 }
 
@@ -457,6 +443,7 @@ export async function evaluate_open_positions() {
         let status = 'open';
         let reason = '';
         let exitOutcome = '';
+        let exitPrice = livePrice;
         
         if (hasTargets) {
           // Category 1: Targets-based scale outs
@@ -465,6 +452,7 @@ export async function evaluate_open_positions() {
             reason = 'Target 3 hit – full exit';
             status = 'closed';
             exitOutcome = 'hit_t3';
+            exitPrice = t3 || livePrice;
           } else if (livePrice >= (t2 || 999999)) {
             // Check if T2 was already processed to avoid repeat triggers
             if (!sig.sell_signal_reason?.includes('Target 2')) {
@@ -475,6 +463,7 @@ export async function evaluate_open_positions() {
               partialReason = 'Target 2 hit (Partial)';
               status = 'open';
               exitOutcome = 'hit_t2';
+              exitPrice = t2 || livePrice;
             }
           } else if (livePrice >= (t1 || 999999)) {
             // Check if T1 was already processed to avoid repeat triggers
@@ -486,12 +475,14 @@ export async function evaluate_open_positions() {
               partialReason = 'Target 1 hit (Partial)';
               status = 'open';
               exitOutcome = 'hit_t1';
+              exitPrice = t1 || livePrice;
             }
           } else if (livePrice <= stopLoss) {
             sellTriggered = true;
             reason = 'Stop loss hit';
             status = 'closed';
             exitOutcome = 'stopped';
+            exitPrice = stopLoss; // strictly exact stop_loss price
           }
         } else {
           // Category 2: Trailing Stop only
@@ -500,12 +491,13 @@ export async function evaluate_open_positions() {
             reason = 'Trailing stop hit';
             status = 'closed';
             exitOutcome = 'stopped';
+            exitPrice = livePrice; // live market price that breached the stop
           }
         }
         
         // 2c. Execute exits if triggered
         if (sellTriggered) {
-          console.log(`[MONITOR ALERT] Triggered for ${ticker}: ${reason} at ${livePrice}`);
+          console.log(`[MONITOR ALERT] Triggered for ${ticker}: ${reason} at ${exitPrice}`);
           
           if (isPartialExit) {
             // ponytail: Position Lot Splitting logic
@@ -516,7 +508,7 @@ export async function evaluate_open_positions() {
             const dollarsSold = originalAllocated * partialFraction;
             
             if (sharesSold > 0 && dollarsSold > 0) {
-              const returnPct = entryPrice > 0 ? ((livePrice - entryPrice) / entryPrice) * 100 : 0;
+              const returnPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
               let holdingDays = 0;
               if (sig.scan_date) {
                 const start = new Date(sig.scan_date);
@@ -530,10 +522,10 @@ export async function evaluate_open_positions() {
                 ticker: `${sig.ticker} (Partial)`,
                 company_name: sig.company_name,
                 industry: sig.industry,
-                price: livePrice,
+                price: exitPrice,
                 entry_price: entryPrice,
                 stop_loss: stopLoss,
-                exit_price: livePrice,
+                exit_price: exitPrice,
                 outcome: exitOutcome,
                 outcome_date: todayStr,
                 outcome_return_pct: returnPct,
@@ -546,6 +538,10 @@ export async function evaluate_open_positions() {
               console.log(`[MONITOR] Inserting partial closed history lot for ${ticker}: ${sharesSold} shares, $${dollarsSold.toFixed(2)}`);
               await supabase.from('signals_history').insert(histRow);
               
+              // Realized Equity Sync: Update portfolio state realized P&L
+              const pnlDollars = (exitPrice - entryPrice) * sharesSold;
+              await updatePortfolioRealizedPnL(supabase, pnlDollars);
+              
               // 2. UPDATE existing OPEN row in signals table
               const remainingShares = originalMaxShares - sharesSold;
               const remainingDollars = originalAllocated - dollarsSold;
@@ -555,7 +551,7 @@ export async function evaluate_open_positions() {
                 allocated_dollars: remainingDollars,
                 sell_signal_reason: reason,
                 sell_signal: true,
-                sell_price: livePrice,
+                sell_price: exitPrice,
                 price: livePrice
               };
               
@@ -568,12 +564,16 @@ export async function evaluate_open_positions() {
               await supabase.from('signals').update(updatePayload).eq('id', sig.id);
             }
           } else {
+            // Retrieve current allocation from active signals row
+            const originalMaxShares = sig.max_shares ? parseInt(sig.max_shares) : 0;
+            const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
+            
             // Full exit — update signals row and signals_history row
             const updatePayload: any = {
               sell_signal: true,
               sell_signal_reason: reason,
-              price: livePrice,
-              sell_price: livePrice,
+              price: exitPrice,
+              sell_price: exitPrice,
               status: status
             };
             if (status === 'closed') {
@@ -582,7 +582,7 @@ export async function evaluate_open_positions() {
             await supabase.from('signals').update(updatePayload).eq('id', sig.id);
             
             if (exitOutcome) {
-              const returnPct = entryPrice > 0 ? ((livePrice - entryPrice) / entryPrice) * 100 : 0;
+              const returnPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
               let holdingDays = 0;
               if (sig.scan_date) {
                 const start = new Date(sig.scan_date);
@@ -595,12 +595,16 @@ export async function evaluate_open_positions() {
                 outcome_date: todayStr,
                 outcome_return_pct: returnPct,
                 outcome_holding_days: holdingDays,
-                exit_price: livePrice
+                exit_price: exitPrice,
+                allocated_dollars: originalAllocated,
+                max_shares: originalMaxShares
               }).eq('scan_date', sig.scan_date).eq('ticker', ticker);
               
               if (status === 'closed') {
                 summary.closedExits++;
-                await updatePortfolioDrawdown(supabase, returnPct, sig.position_sizing);
+                // Realized Equity Sync: Update portfolio state realized P&L
+                const pnlDollars = (exitPrice - entryPrice) * originalMaxShares;
+                await updatePortfolioRealizedPnL(supabase, pnlDollars);
               }
             }
           }

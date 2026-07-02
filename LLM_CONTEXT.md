@@ -390,3 +390,37 @@ You can specify the data refresh behavior via `--cache-mode` CLI arguments or th
 
 *Note: In GITHUB_ACTIONS environment, the default mode is automatically inferred as `incremental`. In `--dry-run` runs, `os.environ["SKIP_NLP"]` is set to `true` to skip HuggingFace model loading and query fallbacks.*
 
+---
+
+## 9. Position Execution, Lot Splitting & P&L Ledger (Rev B Updates)
+
+To prevent unrealized "Phantom P&L" inflation and maintain mathematically sound ledger math across the database, several key modifications have been made to the execution loops in both the Next.js intraday evaluator (`frontend/src/lib/market-evaluator.ts`) and Python nightly scanner (`jobs/generate_signals.py`):
+
+### A. Position Lot Splitting (Partial Exits)
+When a target-based strategy hits partial targets, it scales out to secure profits:
+1. **Target 1 (Sell 50%)**: When price hits Target 1, 50% of the active position is sold. The Stop Loss of the remaining 50% is adjusted to the entry price (breakeven).
+2. **Target 2 (Sell 30%)**: When price hits Target 2, an additional 30% of the original position is sold.
+3. **Ledger Splitting**: 
+   - A new row is cloned and inserted into `signals_history` with the ticker symbol appended with ` (P)` (e.g. `MU (P)`). This represents the closed lot.
+   - The corresponding values for `allocated_dollars` and `max_shares` are calculated fractions of the original (e.g. $50\%$ or $30\%$).
+   - The active row in `signals` is updated in-place to contain the remaining $50\%$ or $20\%$ allocation (`max_shares` and `allocated_dollars` are reduced).
+   - This ensures the active dashboard and historical ledger preserve exact capital splits.
+
+### B. Exit Price Rules (Stop Loss vs. Trailing Stop)
+- **Stop Loss Exits**: When an exit is triggered by a swing low Stop Loss (Category 1, has targets), the `exit_price` is set strictly to the exact `stop_loss` price, NOT a target price or current price.
+- **Trailing Stop Exits**: When triggered by a Trailing Stop (Category 2, trend-based, no targets), the `exit_price` is set to the live market price (`current_price` / `livePrice`) that breached the stop.
+- **Outcome Return**: `outcome_return_pct` and absolute P&L match the exact execution price.
+
+### C. Realized Equity Sync
+- Upon closing any position (full exit or partial lot splitting), the system calculates the absolute dollar P&L:
+  $$\text{Realized PnL} = (\text{exit\_price} - \text{entry\_price}) \times \text{shares\_sold}$$
+- The `portfolio_state` table is updated by adding this realized P&L dollar amount to the `portfolio_value`. Peak value and drawdown percentage are updated accordingly.
+
+### D. Schema Widen & Ticker Compact Suffix
+- **Suffix Limit**: Tickers are limited to `VARCHAR(10)`. The suffix ` (Partial)` (10 chars) + ticker symbol exceeded this limit, causing database insertion crashes. The suffix was changed to ` (P)` (e.g., `ASML (P)` = 8 chars) to stay safely below 10 characters.
+- **Schema Widen**: A database migration (`supabase/migration_widen_columns.sql`) widens the `ticker` and `position_sizing` columns in both `signals` and `signals_history` to `VARCHAR(30)` as a permanent safety measure.
+
+### E. Unified Frontend Fetching (Client-Side Union)
+- The Next.js dashboard queries both the active `recommendations` view (which filters active `signals`) and the historical `signals_history` table, merging them client-side in the loader. This ensures closed trades remain visible in the "Closed History" tab even after they are purged from the active `signals` table by nightly scanner sweeps.
+
+

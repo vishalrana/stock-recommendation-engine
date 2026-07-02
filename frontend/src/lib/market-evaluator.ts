@@ -519,7 +519,7 @@ export async function evaluate_open_positions() {
               // 1. Insert CLOSED portion into signals_history with dynamic outcome
               const histRow = {
                 scan_date: sig.scan_date,
-                ticker: `${sig.ticker} (Partial)`,
+                ticker: `${sig.ticker} (P)`,
                 company_name: sig.company_name,
                 industry: sig.industry,
                 price: exitPrice,

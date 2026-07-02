@@ -345,7 +345,7 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
                                 
                         hist_row = {
                             "scan_date": existing.get("scan_date"),
-                            "ticker": f"{ticker} (Partial)",
+                            "ticker": f"{ticker} (P)",
                             "company_name": existing.get("company_name"),
                             "industry": existing.get("industry"),
                             "price": exit_price,
@@ -1102,7 +1102,7 @@ def main():
                 final_alloc_pct = (sig["allocated_dollars"] / portfolio_value) * 100.0
             position_sizing_str = f"K: {final_alloc_pct:.1f}%"
             if final_alloc_pct == 0.0 or available_cash <= 0:
-                position_sizing_str = "Allocation: 0.0% (No Cash Available)"
+                position_sizing_str = "K: 0.0%"
 
             ranked_signals.append(
                 {

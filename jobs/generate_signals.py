@@ -809,7 +809,7 @@ def main():
                     clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
                     try:
                         if clean and '/' not in clean:
-                            pct = float(clean) / 100.0
+                            pct = min(float(clean) / 100.0, 0.05)  # Hard cap at 5.0%
                     except ValueError:
                         pass
                     pos_val = pct * portfolio_value
@@ -883,7 +883,7 @@ def main():
                             clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
                             try:
                                 if clean and '/' not in clean:
-                                    pct = float(clean) / 100.0
+                                    pct = min(float(clean) / 100.0, 0.05)
                             except ValueError:
                                 pass
                             pos_val = pct * portfolio_value

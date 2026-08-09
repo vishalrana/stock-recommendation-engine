@@ -54,7 +54,7 @@ function getKellySize(score: number, rr: number): { kellyPct: number } {
   const halfKelly = Math.max(0, kelly / 2);
 
   return {
-    kellyPct: halfKelly * 100
+    kellyPct: Math.min(halfKelly * 100, 5.0)
   };
 }
 
@@ -66,7 +66,7 @@ function parseAllocationPct(positionSizing: string | null | undefined, score: nu
     const raw = positionSizing.replace('Kelly:', '').replace('K:', '').replace('%', '').trim();
     const parsed = parseFloat(raw);
     if (!isNaN(parsed)) {
-      return parsed;
+      return Math.min(parsed, 5.0); // Hard cap at 5.0% of portfolio
     }
   }
   return getKellySize(score, rr).kellyPct;

@@ -1,426 +1,228 @@
 # Master LLM Project Context: Stock Recommendation Engine (Strategy 1.3 Rev B)
 
-This document serves as the definitive reference manual for the **Stock Recommendation Engine** codebase. It provides a complete, structured context covering the engine's core algorithm (Strategy 1.3 Rev B), scoring mechanics, directory architecture, database schema, frontend UI specifications, and CI/CD pipelines.
+This document serves as the definitive reference manual for the **Stock Recommendation Engine** codebase. It provides a complete, structured context covering the engine's core algorithm (Strategy 1.3 Rev B), scoring mechanics, directory architecture, database schema, risk allocation caps, frontend UI specifications, and enhancement opportunities.
 
 ---
 
-## 1. Core Architecture Overview
+## 1. Executive Summary & Core Philosophy
 
-The system is a fully automated, data-driven stock scanner inspired by Danelfin. It operates nightly to discover, score, rank, and publish premium buy recommendations from a universe of **514 US equities** (S&P 500 + Nasdaq-100).
+The **Stock Recommendation Engine** is an automated, data-driven quantitative stock scanner and portfolio management system (inspired by platforms like Danelfin). It operates nightly to scan a universe of **500+ US Equities** (S&P 500 + Nasdaq-100), identify high-probability swing trading setups, score candidates using regime-dependent multi-factor models, enforce strict risk allocation controls, and render real-time trade signals on a Next.js web application.
+
+### Key Trading Principles Enforced:
+1. **Regime-Aware Execution**: Technical indicators and composite weights dynamically adapt depending on whether the market is in a **Bull**, **Bear**, or **Sideways** regime.
+2. **Strict Single-Stock Allocation Cap**: No individual stock position can receive more than **5.0% of total portfolio capital** at entry.
+3. **High-Confidence Filtering**: Only top-tier setups meeting a **Composite Score $\ge 80.0$** are output, capping nightly recommendations at the **Top 2–3 setups**.
+4. **Asymmetric Risk-Reward Exits**: Every trade features ATR-scaled profit targets ($T_1, T_2, T_3$), automated partial profit taking (50% scale-out at $T_1$), stop-loss ratcheting to breakeven, a hard **7.0% max loss ceiling**, and nightly trailing stops ($2.0 \times \text{ATR}$).
+
+---
+
+## 2. System Architecture & Component Map
 
 ```
-                     +---------------------------------------+
-                     |             yfinance API              |
-                     +-------------------+-------------------+
-                                         |
-                                         | (Daily data fetch)
-                                         v
-                     +-------------------+-------------------+
-                     |          GitHub Actions Cron          |
-                     |      (Runs nightly at 6:00 AM UTC)    |
-                     +-------------------+-------------------+
-                                         |
-                                         | (Runs Python jobs/generate_signals.py)
-                                         v
-                     +-------------------+-------------------+
-                     |         Supabase PostgreSQL DB        |
-                     | (Tables: signals, scan_log, metrics)  |
-                     +-------------------+-------------------+
-                                         |
-                                         | (Real-time dynamic query)
-                                         v
-                     +-------------------+-------------------+
-                     |         Next.js Web Application       |
-                     |  (TailwindCSS, TanStack Table, Vercel) |
-                     +---------------------------------------+
+ +-----------------------------------------------------------------------------------+
+ |                                 EXTERNAL APIS                                     |
+ |  - yfinance (OHLCV, Volume, ADX, RSI, SPY, ^VIX, Analyst Targets, Earnings)       |
+ |  - Tiingo API (Intraday price monitoring)                                         |
+ +-----------------------------------------+-----------------------------------------+
+                                           |
+                                           v
+ +-----------------------------------------------------------------------------------+
+ |                            PYTHON BACKEND & SCANNER                               |
+ |                                                                                   |
+ |  jobs/generate_signals.py ──> Main pipeline controller & signal generation        |
+ |  src/ranker.py            ──> Composite ranking & 5% capital allocation engine     |
+ |  src/market_context.py    ──> Market regime detection (SPY 200-DMA & VIX override)  |
+ |  src/providers/context/   ──> Context aggregator (Analyst, Earnings, News, P/E)   |
+ |  src/scorers/             ──> Sub-component scoring engines                       |
+ +-----------------------------------------+-----------------------------------------+
+                                           |
+                                           v
+ +-----------------------------------------------------------------------------------+
+ |                              SUPABASE POSTGRESQL DB                               |
+ |                                                                                   |
+ |  - signals           : Active open & pending signal recommendations               |
+ |  - signals_history   : Historical trades & completed outcome records              |
+ |  - portfolio_state   : Daily portfolio equity value, peak value & drawdown %      |
+ |  - scan_log          : Nightly scan execution metrics & filter breakdown          |
+ |  - context_cache     : 24-hour cached context scores (analyst, news, P/E)          |
+ |  - RPC SQL Procedure : execute_position_exit() (Atomic partial & full lot exits) |
+ +-----------------------------------------+-----------------------------------------+
+                                           |
+                                           v
+ +-----------------------------------------------------------------------------------+
+ |                             NEXT.JS FRONTEND WEB APP                              |
+ |                                                                                   |
+ |  - frontend/src/app/page.tsx               : Main Dashboard & recommendations view|
+ |  - frontend/src/components/recommendations-table.tsx : Interactive TanStack Table|
+ |  - frontend/src/components/portfolio-summary.tsx     : Real-time equity & P&L    |
+ |  - frontend/src/lib/market-evaluator.ts   : Client-side position exit sync      |
+ +-----------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 2. Technical Strategy: Strategy 1.3 Rev B
+## 3. Data Pipeline & API Integration Details
 
-Nightly scanning executes the **Strategy 1.3 Rev B** parameters. Each ticker must pass through multiple regime-aware indicators and quality gate checks to qualify as a candidate.
+| Provider | Purpose | Trigger / Frequency | Fallback Logic |
+| :--- | :--- | :--- | :--- |
+| **`yfinance` (History)** | Daily OHLCV price history (125 daily bars) | Nightly scan run | Local Parquet cache (`data/cache/by_date`) |
+| **`yfinance` (SPY)** | SPY Close vs. 200-day DMA for regime sensing | Nightly scan run | Defaults to Sideways regime if fetch fails |
+| **`yfinance` (^VIX)** | Emergency Market Volatility Check | Nightly scan run | Skips VIX override if empty |
+| **`yfinance` (Info)** | Analyst target mean price, P/E ratio, Revenue Growth | Nightly scan run | Neutral score (`0.0`) if fields missing |
+| **`Supabase REST API`** | Persistent DB reads/writes & context caching | Real-time & Nightly | In-memory local fallback calculations |
+| **`Tiingo API`** | Intraday price updates for active position monitoring | Every 15 minutes | Uses latest close bar if API rate-limited |
 
-### A. Market Regime Detection
+---
+
+## 4. Strategy 1.3 Rev B Execution Rules
+
+### A. Regime Sensing & Strategy Activation
 * **Sensing Asset**: `SPY` (S&P 500 ETF).
 * **Reference Line**: 200-day Simple Moving Average (SMA).
-* **Regimes**:
-  * **BULL**: `SPY Close > 200 SMA`
-  * **BEAR / SIDEWAYS**: `SPY Close <= 200 SMA` (or Sideways if specified).
+* **VIX Emergency Check**: If `^VIX > 40.0`, force **BEAR regime** and cut sizing by 50%.
+* **Regime Strategy Mapping**:
+  * **BULL Regime**: `Pullback Recovery`, `Trend Following`, `Sector Rotation`, `52-Week High`, `Cross-Sectional Momentum`.
+  * **BEAR Regime**: `Mean Reversion`, `Post-Earnings Drift` (defensive strategies only).
+  * **SIDEWAYS Regime**: All strategies active with increased expectancy weighting.
 
-### B. Technical Indicators & Gated Parameters
+### B. Quality Gates & Qualification Rules
 1. **Regime-Aware Trend Gate**:
-   * **BULL Regime**: `Close > 50 DMA` only (relaxed to prevent over-filtering during strong markets).
-   * **BEAR / SIDEWAYS Regime**: Strict trend stack requiring `Close > 50 DMA > 200 DMA`.
+   * **Bull**: `Price > 50 DMA` (relaxed to catch early pullbacks).
+   * **Bear/Sideways**: `Price > 50 DMA > 200 DMA` (strict trend confirmation).
 2. **RSI Pullback-Recovery Gate**:
-   * Standard Wilder RSI(14) must have dipped below **`52.0`** within the last 10 trading days (`rsi_min_10d < 52.0`).
-   * Current RSI(14) must reside between **`45.0`** and **`67.0`** (inclusive) to confirm recovery from the pullback.
-3. **Regime-Aware ADX Gate**:
-   * **BULL Regime**: Current ADX(14) must be `>= 15.0` (captures emerging trends).
-   * **BEAR / SIDEWAYS Regime**: Current ADX(14) must be `>= 18.0` (requires stronger trend confirmation).
-4. **Volume Confirmation**:
-   * Daily volume must be `>= 1.0x` of the 20-day Volume Simple Moving Average.
-5. **Historical Trades Floor**:
-   * Tickers must have generated `>= 10` historical backtested trades in `ticker_metrics` to filter out low-sample-size anomalies.
-
-### C. Dynamic Trade Setup Calculations
-* **Entry Price**: Next day's high * 1.001 (representing a breakout entry trigger).
-* **Stop-Loss Price**: Recent 20-day swing low (the lowest low of the last 20 days, requiring a 2-day left/right clearance).
-* **Dynamic profit target (`target_pct`)**:
-  * If the ticker has winning trades in `ticker_metrics` (`median_win_return > 0`): `median_win_return * 1.15` (15% premium buffer), capped between **`5.0%`** and **`20.0%`**.
-  * If no winning history: ATR fallback: `2.5 * ATR(14) / Price * 100` (capped at **`20.0%`**).
-* **Target Exit Price**: `Entry Price * (1 + target_pct / 100)`
-* **Risk/Reward Ratio**: `target_pct / ((entry_price - stop_loss) / entry_price * 100)`
-
-### D. The 4 Active Quality Gates (Rev B)
-1. **Min Risk % Gate**: Rejects signals if the stop-loss risk is `< 2.5%` of the entry price (avoids noise-level shakeouts).
-2. **Max Gap % Gate**: Rejects signals if the single-day drop in the last 5 trading days exceeds `5.0%` (guards against flash crashes and falling knives).
-3. **Earnings Calendar Filter**: Rejects signals if the next earnings date (scraped via `yfinance`) falls within the next `7` days (prevents holding through binary earnings events).
-4. **Momentum Exception**: Bypasses the RSI pullback gate entirely if strong breakout momentum is detected: `Price > 50 DMA by >= 20%`, `Volume Ratio >= 1.5x`, and `ADX >= 20.0` (with current RSI `<= 75` to prevent peak buying).
-
-*(Note: The "Distance from 20-Day High" gate has been permanently removed to restore standard pullback selection).*
+   * Wilder RSI(14) minimum in last 10 days: `rsi_min_10d < 52.0`.
+   * Current RSI(14): `45.0 <= RSI <= 67.0` (confirming turnaround).
+3. **ADX Trend Strength Gate**:
+   * Bull regime: `ADX(14) >= 15.0`.
+   * Bear/Sideways regime: `ADX(14) >= 18.0`.
+4. **Volume Confirmation Gate**: `Volume Ratio >= 1.0x` (20-day SMA).
+5. **Risk Ceiling Gate**: Hard stop loss ceiling capping risk at **max 7.0% below entry price**: `stop_loss = max(stop_loss, entry_price * 0.93)`.
+6. **Max Gap Filter**: Rejects setup if single-day drop in last 5 days exceeds `5.0%`.
+7. **Earnings Filter**: Rejects setup if earnings date is within `7` days.
+8. **Momentum Exception**: Bypasses RSI pullback if: `Price > 50 DMA + 20%`, `Volume Ratio >= 1.5x`, `ADX >= 20.0`, and `RSI <= 75.0`.
 
 ---
 
-## 3. Gated Composite Scoring & Tier Ranking
+## 5. Mathematical Specification of Scoring Formulas
 
-Scoring and ranking are processed by `SignalRanker` (`src/ranker.py`). Every candidate ticker receives a 0-100 composite score composed of four weighted components:
+Candidate scoring is handled by `SignalRanker` ([src/ranker.py](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/ranker.py)).
 
-$$\text{Composite Score} = 0.30 \times \text{Momentum} + 0.40 \times \text{Expectancy} + 0.20 \times \text{Win Rate} + 0.10 \times \text{Regime}$$
+### A. Component Score Calculations (0 to 100)
 
-### Component Math
-1. **Momentum Score (30% weight)**:
-   * Combines:
-     * **RSI Proximity**: $100 - |RSI - 50| \times 4$
-     * **50 DMA Proximity**: $100 - |\frac{Price}{50DMA} - 1| \times 500$
-     * **Volume Score**: $Volume Ratio \times 50$ (capped at 100)
-     * **MACD Score**: $50.0 + MACD Histogram \times 200.0$ (clipped to [0, 100])
-   * The average of these four is percentile-normalized (0 to 100) within the candidate pool.
-   * *Absolute Floor*: If the raw momentum average is $< 55.0$, the momentum score is forced to `0.0`.
-2. **Risk-Adjusted Expectancy Score (40% weight)**:
-   * Z-score of `expectancy_pct` is computed and mapped via sigmoid: $100 / (1 + e^{-z})$.
-   * Negative expectancy penalty: if $Expectancy < 0$, the score is penalized by $-30.0$ and capped at a minimum of $5.0$.
-3. **Win Rate Score (20% weight)**:
-   * Percentile-normalized value of the ticker's backtest `win_rate` relative to the current candidate pool.
-4. **Regime Score (10% weight)**:
-   * **BULL**: 100.0 if RSI is between 50 and 70 AND price is above 50 DMA, else 0.0.
-   * **BEAR**: 100.0 if the sector is defensive (Utilities, Consumer Staples, Health Care, Insurance, Telecom) OR Beta < 1.0, else 0.0.
-   * **SIDEWAYS**: 100.0 if $|RSI - 50| < 8.0$ (mean-reversion setup), else 0.0.
+1. **Technical Momentum Score ($S_{\text{mom}}$)**:
+   * **RSI Proximity**: $S_{\text{rsi}} = \text{clip}(100 - |RSI - 50| \times 4, 0, 100)$
+   * **50 DMA Proximity**: $S_{\text{dma}} = \text{clip}\left(100 - \left|\frac{Price}{50DMA} - 1\right| \times 500, 0, 100\right)$
+   * **Volume Score**: $S_{\text{vol}} = \text{clip}(\text{Volume Ratio} \times 50, 0, 100)$
+   * **MACD Score**: $S_{\text{macd}} = \text{clip}(50.0 + \text{MACD Histogram} \times 200.0, 0, 100)$
+   * Raw Average: $S_{\text{raw}} = \frac{S_{\text{rsi}} + S_{\text{dma}} + S_{\text{vol}} + S_{\text{macd}}}{4}$
+   * Sigmoid Normalization: $S_{\text{mom}} = \text{PercentileRank}(S_{\text{raw}}) \times \frac{1}{1 + e^{-(S_{\text{raw}} - 55)/5}}$
 
-### Tier Mapping & Absolute Floors
-Candidates are classified into four tiers:
-* **Strong Buy (Tier 1)**: Composite Score $\ge 65.0$, expectancy $> 0.0$, win rate $\ge 35.0\%$, and total trades $\ge 10$.
-* **Buy (Tier 2)**: Composite Score $\ge 50.0$, expectancy $\ge 0.0$, win rate $\ge 25.0\%$, and total trades $\ge 10$.
-* **Watch (Tier 3)**: Composite Score $\ge 40.0$, expectancy $\ge -2.0$.
-* **Speculative (Tier 4)**: Composite Score $< 40.0$ or fails Watch criteria.
-* *Absolute Floor*: If expectancy is negative and win rate is $< 25\%$, the composite score is capped at `40.0` (forces ticker into Speculative/Watch).
+2. **Risk-Adjusted Expectancy Score ($S_{\text{exp}}$)**:
+   * Z-score of backtested expectancy: $Z = \frac{\text{Expectancy}_{\%} - \mu_{\text{exp}}}{\sigma_{\text{exp}}}$
+   * Sigmoid Mapping: $S_{\text{exp}} = \frac{100}{1 + e^{-Z}}$
+   * Penalty: If $\text{Expectancy}_{\%} < 0$, $S_{\text{exp}} = \max(5.0, S_{\text{exp}} - 30.0)$.
 
-### Selection & Auto-Relax Logic
-* The engine **only** recommends **Strong Buy** and **Buy** signals. Watch and Speculative signals are completely filtered out.
-* **Auto-Relax Selection**: If there are $< 3$ Strong Buy signals, the engine merges the Buy signals and sorts by composite score.
-* **Cash Override**: If the combined count of Strong Buy + Buy signals is **`0`**, the database `signals` table is wiped clean and `scan_log` records `signals_recommended = 0`. If 1, 2, or more quality signals exist, they are successfully output.
+3. **Historical Win Rate Score ($S_{\text{wr}}$)**:
+   * $S_{\text{wr}} = \text{PercentileRank}(\text{Win Rate}_{\%})$
 
----
+4. **Regime Alignment Score ($S_{\text{reg}}$)**:
+   * **Bull**: $100.0$ if $50 \le RSI \le 70$ AND $Price > 50 DMA$, else $0.0$.
+   * **Bear**: $100.0$ if Industry is Defensive OR Beta $< 1.0$, else $0.0$.
+   * **Sideways**: $100.0$ if $|RSI - 50| < 8.0$, else $0.0$.
 
-## 4. Database Schema (Supabase PostgreSQL)
+5. **Context Score ($S_{\text{ctx}}$)**:
+   * Aggregates Analyst Target Upside ($+3$), Positive Earnings Surprise ($+3$), P/E & Growth ($+3$), FinBERT News Sentiment ($+3$), Technical Alignment ($+3$). Total max: $15.0$.
 
-### A. Table: `ticker_metrics`
-Holds historical backtest metrics populated by seeding scripts.
-```sql
-CREATE TABLE ticker_metrics (
-    ticker VARCHAR(10) PRIMARY KEY,
-    industry VARCHAR(100),
-    total_signals INT DEFAULT 0,
-    wins INT DEFAULT 0,
-    losses INT DEFAULT 0,
-    win_rate NUMERIC(6,2) DEFAULT 0.00,
-    expectancy_pct NUMERIC(8,4) DEFAULT 0.0000,
-    median_holding_days NUMERIC(6,1) DEFAULT 0.0,
-    median_win_return FLOAT DEFAULT 0.0,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
-);
-```
+### B. Regime-Dependent Composite Weighting
 
-### B. Table: `signals`
-Stores daily qualified active signals. Wiped and inserted fresh nightly.
-```sql
-CREATE TABLE signals (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    scan_date DATE NOT NULL,
-    ticker VARCHAR(10) NOT NULL,
-    company_name VARCHAR(150),
-    industry VARCHAR(100),
-    price NUMERIC(10,2),
-    entry_price NUMERIC(10,2) NOT NULL,
-    stop_loss NUMERIC(10,2) NOT NULL,
-    exit_price NUMERIC(10,2) NOT NULL,
-    upside_pct NUMERIC(8,2),
-    risk_reward NUMERIC(5,2),
-    current_rsi NUMERIC(5,2),
-    volume_ratio NUMERIC(8,2),
-    score NUMERIC(8,4),
-    regime VARCHAR(10),
-    composite_score FLOAT DEFAULT 0,
-    tier_label TEXT DEFAULT 'Speculative',
-    adx_value FLOAT DEFAULT NULL,
-    macd_histogram FLOAT DEFAULT NULL,
-    rsi_min_10d FLOAT DEFAULT NULL,
-    ema20 FLOAT DEFAULT NULL,
-    is_fallback BOOLEAN DEFAULT FALSE,
-    earnings_date DATE,
-    is_momentum_exception BOOLEAN DEFAULT FALSE,
-    distance_from_high_pct DECIMAL(5,2),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
-    UNIQUE (scan_date, ticker)
-);
-```
+$$\text{Composite Score} = (w_{\text{mom}} \cdot S_{\text{mom}}) + (w_{\text{exp}} \cdot S_{\text{exp}}) + (w_{\text{wr}} \cdot S_{\text{wr}}) + (w_{\text{reg}} \cdot S_{\text{reg}}) + (w_{\text{ctx}} \cdot S_{\text{ctx}})$$
 
-### C. Table: `signals_history`
-Archives daily signals before they are wiped.
-```sql
-CREATE TABLE signals_history (
-    id BIGSERIAL PRIMARY KEY,
-    scan_date DATE NOT NULL,
-    ticker VARCHAR(10) NOT NULL,
-    company_name VARCHAR(150),
-    industry VARCHAR(100),
-    price NUMERIC(10,2),
-    entry_price NUMERIC(10,2) NOT NULL,
-    stop_loss NUMERIC(10,2) NOT NULL,
-    exit_price NUMERIC(10,2) NOT NULL,
-    upside_pct NUMERIC(8,2),
-    risk_reward NUMERIC(5,2),
-    current_rsi NUMERIC(5,2),
-    volume_ratio NUMERIC(8,2),
-    score NUMERIC(8,4),
-    past_win_rate NUMERIC(5,2),
-    expectancy_pct NUMERIC(8,4),
-    total_trades INT,
-    regime VARCHAR(10),
-    composite_score FLOAT DEFAULT 0,
-    tier_label TEXT DEFAULT 'Speculative',
-    adx_value FLOAT DEFAULT NULL,
-    macd_histogram FLOAT DEFAULT NULL,
-    rsi_min_10d FLOAT DEFAULT NULL,
-    ema20 FLOAT DEFAULT NULL,
-    is_fallback BOOLEAN DEFAULT FALSE,
-    earnings_date DATE,
-    is_momentum_exception BOOLEAN DEFAULT FALSE,
-    distance_from_high_pct DECIMAL(5,2),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
-    UNIQUE (scan_date, ticker)
-);
-```
-
-### D. Table: `scan_log`
-Tracks nightly scan executions, gate failure distributions, and tier metrics.
-```sql
-CREATE TABLE scan_log (
-    scan_date DATE PRIMARY KEY,
-    tickers_scanned INT NOT NULL,
-    signals_generated INT NOT NULL,
-    signals_qualified INT DEFAULT 0,
-    signals_recommended INT DEFAULT 0,
-    scan_duration_secs NUMERIC(8,2) NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    error_message TEXT,
-    regime VARCHAR(10),
-    failed_rsi_gate INT DEFAULT 0,
-    failed_adx_gate INT DEFAULT 0,
-    failed_macd_gate INT DEFAULT 0,
-    failed_trend_gate INT DEFAULT 0,
-    failed_volume_gate INT DEFAULT 0,
-    failed_rr_gate INT DEFAULT 0,
-    failed_trades_gate INT DEFAULT 0,
-    rsi_breadth_pct NUMERIC(5,1) DEFAULT NULL,
-    failed_maxrisk_gate INT DEFAULT 0,
-    failed_minrisk_gate INT DEFAULT 0,
-    failed_maxgap_gate INT DEFAULT 0,
-    failed_earnings_gate INT DEFAULT 0,
-    momentum_exceptions INT DEFAULT 0,
-    failed_extended_high_gate INT DEFAULT 0,
-    signals_strong_buy INT DEFAULT 0,
-    signals_buy INT DEFAULT 0,
-    executed_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
-);
-```
-
-### E. View: `recommendations`
-Exposes the database to the Next.js frontend by joining `signals` with `ticker_metrics`.
-```sql
-CREATE OR REPLACE VIEW recommendations AS
-SELECT 
-    s.scan_date,
-    s.ticker,
-    s.company_name,
-    s.industry,
-    s.price,
-    s.entry_price,
-    s.stop_loss,
-    s.exit_price,
-    s.upside_pct,
-    s.risk_reward,
-    s.current_rsi,
-    s.volume_ratio,
-    s.adx_value,
-    s.macd_histogram,
-    s.ema20,
-    s.composite_score,
-    s.tier_label,
-    s.is_fallback,
-    s.is_momentum_exception,
-    s.distance_from_high_pct,
-    COALESCE(m.win_rate, 0) AS past_win_rate,
-    COALESCE(m.expectancy_pct, 0) AS expectancy_pct,
-    COALESCE(m.total_signals, 0) AS historical_signals,
-    COALESCE(m.median_win_return, 0) AS median_win_return
-FROM signals s
-LEFT JOIN ticker_metrics m ON s.ticker = m.ticker
-WHERE s.tier_label IN ('Strong Buy', 'Buy');
-```
+| Regime | Momentum ($w_{\text{mom}}$) | Expectancy ($w_{\text{exp}}$) | Win Rate ($w_{\text{wr}}$) | Regime ($w_{\text{reg}}$) | Context ($w_{\text{ctx}}$) | Total Weight |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **BULL** | **30%** | **30%** | **15%** | **10%** | **15%** | **100%** |
+| **SIDEWAYS** | **25%** | **35%** | **15%** | **10%** | **15%** | **100%** |
+| **BEAR** | **15%** | **35%** | **10%** | **10%** | **30%** | **100%** |
 
 ---
 
-## 5. Directory Structure & Key Files
+## 6. Risk Management & Position Sizing Architecture
 
-```
-stock-recommendation-engine/
-├── .github/workflows/
-│   └── nightly_scan.yml      # Run nightly cron (6:00 AM UTC Mon-Fri)
-├── frontend/                 # Next.js App
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── layout.tsx    # Inter font layout
-│   │   │   └── page.tsx      # Main server component loading data
-│   │   ├── components/
-│   │   │   └── recommendations-table.tsx # TanStack table with TradingView link
-│   │   ├── lib/
-│   │   │   └── supabase.ts   # Client initializer
-│   │   └── types/
-│   │       └── database.ts   # Typescript mappings (RSI, ADX, Exception, etc)
-├── jobs/                     # Python Scan Jobs
-│   ├── generate_signals.py   # Main nightly scan pipeline
-│   ├── seed_metrics.py       # Seeds backtest metrics into DB
-│   └── supabase_client.py    # Supabase authentication client
-├── src/                      # Underlying Math & Indicators
-│   ├── downloader.py         # Universe fetcher & cacher
-│   ├── indicators.py         # RSI pullbacks, ATR, DMA, swing low indicators
-│   ├── regime.py             # Regime detection (SPY Close > 200 SMA)
-│   └── ranker.py             # Gated composite ranker & selection logic
-├── verify_scan.py            # Local DB scan validation script
-```
+### A. 5.0% Single-Stock Allocation Hard Cap
+No single position may receive more than **5.0% of total portfolio value** ($PV$) at entry:
+$$\text{Max Single Stock Allocation} = 0.05 \times PV$$
+
+In [src/ranker.py](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/ranker.py#L495-L538) (`calculate_normalized_sizing`), double-capping is enforced:
+1. **Pre-normalization cap**: $\text{Raw Demand}_i = \min(PV \times \text{HalfKelly}_i, 0.05 \times PV)$
+2. **Post-normalization cap**: $\text{Final Dollar}_i = \min(\text{Raw Demand}_i \times \text{Multiplier}, 0.05 \times PV)$
+3. **Share floor**: $\text{Max Shares}_i = \lfloor \frac{\text{Final Dollar}_i}{\text{Entry Price}_i} \rfloor$. If $\text{Max Shares}_i == 0$, $\text{Final Dollar}_i$ is zeroed out.
+
+### B. Exit Architecture & Profit Scale-Outs
+* **$T_1$ Target ($1.5 \times \text{ATR}$)**: Sells **50% of position lot** and ratchets stop loss to **breakeven** (`entry_price`).
+* **$T_2$ Target ($2.5 \times \text{ATR}$)**: Sells **30% of position lot**.
+* **$T_3$ Target ($3.5 \times \text{ATR}$)**: Sells remaining **20% of position lot**.
+* **Trailing Stop Ratcheting**: Nightly job updates stop loss if price advances: $\text{Stop}_{\text{new}} = \max(\text{Stop}_{\text{current}}, \text{Price}_{\text{current}} - 2.0 \times \text{ATR})$.
+* **SQL RPC Procedure**: Database procedure `execute_position_exit()` performs atomic partial exits, lot splitting, and portfolio equity updates in Postgres.
 
 ---
 
-## 6. Frontend Specifications (Next.js)
+## 7. Database Schema & RPC Reference
 
-### recommendations-table.tsx Features
-* **TanStack Table Framework**: Fully sortable columns with client-side global filtering.
-* **TradingView Chart Integration**:
-  * Includes a `"Chart"` column next to the `"Tier"` column.
-  * Cell renders a **32x32px** custom blue button (`bg-blue-600 hover:bg-blue-700 text-white transition-colors duration-200`) containing a line-chart SVG.
-  * Opens a new tab pointing to: `https://www.tradingview.com/chart/?symbol={TICKER}`.
-  * Hover tooltip says: `"Open {ticker} on TradingView"`.
-* **Regime Banner**: Displays a dynamic colored alert corresponding to the detected market regime (Bull: Green, Bear: Red, Sideways: Blue).
-* **MACD Arrow Indicators**: Displays a green up-arrow `↑` if MACD Histogram is positive and a red down-arrow `↓` if negative next to the composite score.
-* **RSI Pullback Tooltip**: The current RSI value displays a dotted underline on hover, rendering a tooltip showing the lowest RSI value reached in the last 10 trading days.
-* **Momentum Badges**: Tickers qualifying under the Momentum Exception are flagged with an amber `"Breakout"` badge.
-
----
-
-## 7. Execution Commands
-
-### Run Local Dry Run
-```powershell
-.\venv\Scripts\Activate.ps1
-$env:PYTHONPATH="."
-python -m jobs.generate_signals --dry-run
-```
-
-### Run Live Nightly Scan
-```powershell
-.\venv\Scripts\Activate.ps1
-$env:PYTHONPATH="."
-python -m jobs.generate_signals
-```
-
-### Start Next.js Development Server
-```bash
-cd frontend
-npm run dev
-```
-
----
-
-## 8. Performance Overhaul, Caching & Cache Modes
-
-To optimize run times from **~20 minutes** down to **under 2 minutes** (and **under 30s** for dry-run scans) and prevent rate limits, a multi-tier caching and execution layer has been implemented:
-
-### A. Date‑Partitioned Daily Cache (`src/data/cache_manager.py`)
-- OHLCV price histories are saved in daily files (`data/cache/by_date/YYYY-MM-DD.parquet`) rather than per-ticker parquet files.
-- `preload_history()` loads the entire historical dataset into memory at start, reducing file operations from **125,000** down to **~250**.
-- The downloader performs bulk batch downloads using `yf.download(tickers)` in a single request instead of sequentially, and supports exponential backoff retries with chunking fallbacks (chunk size default 50).
-
-### B. Supabase Context Score Cache (`context_cache` table)
-- Computed FinBERT NLP, analyst recommendations, and metrics are cached in a new `context_cache` database table:
-```sql
-CREATE TABLE context_cache (
-    ticker VARCHAR(10) PRIMARY KEY,
-    context_score FLOAT NOT NULL,
-    components JSONB NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
-);
-```
-- Scans query `context_cache` first. Cache hits within `CONTEXT_CACHE_TTL_HOURS` (default 24 hours) bypass the expensive NLP/FinBERT and yfinance fundamentals pipeline.
-
-### C. Local Earnings Dates Cache (`src/utils/earnings_cache.py`)
-- Strategy check bottlenecks (which sequentially fetched yfinance earnings calendars for hundreds of tickers) are optimized via a local JSON cache (`data/cache/earnings_dates_cache.json`) with a 24-hour TTL.
-
-### D. Local Ticker Metrics Cache (`src/utils/metrics_cache.py`)
-- Offline/local scans load the seed backtest metrics from a local JSON cache (`data/cache/ticker_metrics_cache.json`) with a 24-hour TTL, completely bypassing the Supabase query.
-
-### E. Environment-Aware Cache Refresh Modes
-You can specify the data refresh behavior via `--cache-mode` CLI arguments or the `CACHE_MODE` environment variable:
-
-| Mode | Behavior | Primary Use Case |
+### `signals` Table
+| Column | Type | Description |
 | :--- | :--- | :--- |
-| **`local`** (default) | Skip downloading historical price bars if the cache is up-to-date (within 2 trading days). Uses pandas business-day logic (`BDay`) to correctly handle weekends and holidays. | Local testing, dry runs. |
-| **`incremental`** | Downloads only dates missing since the last cached date (highly optimized). | Nightly production cron runs. |
-| **`force`** | Completely clears the cache directory and does a full historical download. | Manual resets. |
+| `id` | `uuid` | Primary Key |
+| `scan_date` | `date` | Date of scan execution |
+| `ticker` | `text` | Stock ticker symbol |
+| `entry_price` | `numeric` | Execution trigger price |
+| `stop_loss` | `numeric` | Stop-loss price |
+| `target_1`, `target_2`, `target_3` | `numeric` | Scale-out profit targets |
+| `composite_score` | `numeric` | Overall 0–100 composite score |
+| `tier_label` | `text` | "Strong Buy", "Buy", "Watch", "Speculative" |
+| `allocated_dollars` | `numeric` | Dollar allocation (capped at 5% of portfolio) |
+| `max_shares` | `integer` | Number of shares allocated |
+| `status` | `text` | "pending", "open", "closed" |
 
-*Note: In GITHUB_ACTIONS environment, the default mode is automatically inferred as `incremental`. In `--dry-run` runs, `os.environ["SKIP_NLP"]` is set to `true` to skip HuggingFace model loading and query fallbacks.*
+### `portfolio_state` Table
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `id` | `uuid` | Primary Key |
+| `date` | `date` | Record date |
+| `portfolio_value` | `numeric` | Current total equity value |
+| `peak_value` | `numeric` | All-time high equity value |
+| `current_drawdown_pct` | `numeric` | Equity drawdown percentage from peak |
 
 ---
 
-## 9. Position Execution, Lot Splitting & P&L Ledger (Rev B Updates)
+## 8. Guide for Future LLMs: High-Impact Improvement Opportunities
 
-To prevent unrealized "Phantom P&L" inflation and maintain mathematically sound ledger math across the database, several key modifications have been made to the execution loops in both the Next.js intraday evaluator (`frontend/src/lib/market-evaluator.ts`) and Python nightly scanner (`jobs/generate_signals.py`):
+If you are an LLM reading this codebase to suggest architectural, quantitative, or engineering improvements, focus on these **5 high-impact areas**:
 
-### A. Position Lot Splitting (Partial Exits)
-When a target-based strategy hits partial targets, it scales out to secure profits:
-1. **Target 1 (Sell 50%)**: When price hits Target 1, 50% of the active position is sold. The Stop Loss of the remaining 50% is adjusted to the entry price (breakeven).
-2. **Target 2 (Sell 30%)**: When price hits Target 2, an additional 30% of the original position is sold.
-3. **Ledger Splitting**: 
-   - A new row is cloned and inserted into `signals_history` with the ticker symbol appended with ` (P)` (e.g. `MU (P)`). This represents the closed lot.
-   - The corresponding values for `allocated_dollars` and `max_shares` are calculated fractions of the original (e.g. $50\%$ or $30\%$).
-   - The active row in `signals` is updated in-place to contain the remaining $50\%$ or $20\%$ allocation (`max_shares` and `allocated_dollars` are reduced).
-   - This ensures the active dashboard and historical ledger preserve exact capital splits.
+### 1. Quantitative Strategy & Signal Generation
+* **Fractional Share Support for Expensive Equities**: Currently, stocks priced $> 5.0\% \times PV$ (e.g. $\$1,185$ stock on a $\$10,000$ account) receive $0$ shares due to whole-share rounding. Adding fractional share execution logic will enable trading high-priced mega-caps like LLY, NVD, or BKNG.
+* **Dynamic ATR Multiplier by Market Volatility**: Adjust profit target ATR multipliers ($T_1 = 1.5\text{ATR}$) dynamically based on VIX regime (e.g. expand to $2.0\text{ATR}$ in high-volatility regimes).
+* **Multi-Timeframe Trend Confirmation**: Require 1-hour or 4-hour EMA alignment before confirming daily pullback recovery.
 
-### B. Exit Price Rules (Stop Loss vs. Trailing Stop)
-- **Stop Loss Exits**: When an exit is triggered by a swing low Stop Loss (Category 1, has targets), the `exit_price` is set strictly to the exact `stop_loss` price, NOT a target price or current price.
-- **Trailing Stop Exits**: When triggered by a Trailing Stop (Category 2, trend-based, no targets), the `exit_price` is set to the live market price (`current_price` / `livePrice`) that breached the stop.
-- **Outcome Return**: `outcome_return_pct` and absolute P&L match the exact execution price.
+### 2. Context & NLP Aggregation
+* **Real-time News Sentiment Engine**: Enhance `src/providers/context/news_provider.py` with FinBERT / Llama-3 microservice to analyze news headlines with higher domain accuracy than standard VADER.
+* **Earnings Surprise Drift Scoring**: Incorporate 3-day post-earnings announcement drift (PEAD) momentum metrics into `earnings_provider.py`.
 
-### C. Realized Equity Sync
-- Upon closing any position (full exit or partial lot splitting), the system calculates the absolute dollar P&L:
-  $$\text{Realized PnL} = (\text{exit\_price} - \text{entry\_price}) \times \text{shares\_sold}$$
-- The `portfolio_state` table is updated by adding this realized P&L dollar amount to the `portfolio_value`. Peak value and drawdown percentage are updated accordingly.
+### 3. Risk Management & Portfolio Construction
+* **Sector Concentration Limits**: Implement a max **15% sector allocation cap** (e.g. max 3 Tech stocks concurrently) to prevent sector cluster risk.
+* **Correlation-Adjusted Sizing**: Reduce allocation sizes for candidates that exhibit $> 0.85$ 60-day price correlation with existing open positions.
 
-### D. Schema Widen & Ticker Compact Suffix
-- **Suffix Limit**: Tickers are limited to `VARCHAR(10)`. The suffix ` (Partial)` (10 chars) + ticker symbol exceeded this limit, causing database insertion crashes. The suffix was changed to ` (P)` (e.g., `ASML (P)` = 8 chars) to stay safely below 10 characters.
-- **Schema Widen**: A database migration (`supabase/migration_widen_columns.sql`) widens the `ticker` and `position_sizing` columns in both `signals` and `signals_history` to `VARCHAR(30)` as a permanent safety measure.
+### 4. Database & Backtesting Validation
+* **Vectorized Event-Driven Backtester**: Build an offline Python event-driven backtesting engine (`scripts/backtest_engine.py`) using historical date-partitioned parquet files to simulate 5-year strategy equity curves under the 5% cap.
+* **Supabase Real-Time Subscriptions**: Migrate frontend polling to WebSocket Supabase realtime channel (`supabase.channel('signals')`) for instant position exit updates.
 
-### E. Unified Frontend Fetching (Client-Side Union)
-- The Next.js dashboard queries both the active `recommendations` view (which filters active `signals`) and the historical `signals_history` table, merging them client-side in the loader. This ensures closed trades remain visible in the "Closed History" tab even after they are purged from the active `signals` table by nightly scanner sweeps.
+### 5. Frontend & Visual Analytics
+* **Interactive Equity Curve & Drawdown Chart**: Add a Recharts / Chart.js visual timeline of `portfolio_state` history showing equity progression vs. S&P 500 baseline.
+* **Trade Detail Modal**: Add a modal drawer in `recommendations-table.tsx` showing the full technical breakdown spider/radar chart (Momentum, Expectancy, Win Rate, Regime, Context).
 
+---
 
+## 9. Developer Verification Checklist
+
+When making changes to this codebase, always run:
+1. **Frontend Build Verification**: `cd frontend && npm run build` (Ensures zero TypeScript/JSX errors).
+2. **Backend Dry-Run Verification**: `python -m jobs.generate_signals --dry-run` (Validates indicator calculations and 5% sizing caps).
+3. **Allocation Cap Audit**: `python scratch/test_allocation_gate.py` (Confirms `allocated_dollars <= 0.05 * portfolio_value`).

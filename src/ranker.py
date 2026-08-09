@@ -492,26 +492,21 @@ class SignalRanker:
         return self.composite_rank(df, "bull", top_n)
 
 
-def calculate_normalized_sizing(signals, portfolio_value, available_cash):
+def calculate_normalized_sizing(signals: list, portfolio_value: float, available_cash: float) -> list:
     """
-    Applies Cash-Constrained Cross-Sectional Normalization to position sizing.
-    
-    Sequential Loop:
-    1. available_cash is passed from jobs/generate_signals.py (pre-calculated).
-    2. Sum raw new demand (portfolio_value * half_kelly_fraction).
-    3. Determine multiplier:
-       - If available_cash == 0.0: multiplier = 0.0
-       - If raw new demand > available_cash: multiplier = available_cash / raw new demand
-       - Else: multiplier = 1.0
-    4. For every signal, set allocated_dollars = raw dollar sizing * multiplier, and compute shares.
+    Apply cash-constrained normalization to position sizing.
+    Hard-caps every single-stock capital allocation at 5.0% of portfolio value.
     """
     safe_cash = max(0.0, float(available_cash))
+    pv = max(0.0, float(portfolio_value))
+    max_single_stock_dollars = 0.05 * pv
     
-    # Compute raw dollar allocations (Raw New Demand)
+    # Compute raw dollar allocations (Raw New Demand) capped at 5.0% per stock
     raw_allocs = []
     for sig in signals:
         hk_frac = max(0.0, float(sig.get("half_kelly_fraction", 0.0)))
-        raw_allocs.append(float(portfolio_value) * hk_frac)
+        raw_dollars = min(pv * hk_frac, max_single_stock_dollars)
+        raw_allocs.append(raw_dollars)
         
     total_needed = sum(raw_allocs)
     
@@ -527,14 +522,12 @@ def calculate_normalized_sizing(signals, portfolio_value, available_cash):
     result = []
     for i, sig in enumerate(signals):
         sig_copy = sig.copy()
-        final_dollar = raw_allocs[i] * multiplier
+        final_dollar = min(raw_allocs[i] * multiplier, max_single_stock_dollars)
         
         entry = float(sig_copy.get("entry_price", 0.0))
-        stop = float(sig_copy.get("stop_loss", 0.0))
-        risk_per_share = entry - stop
         
-        if risk_per_share > 0.0 and final_dollar > 0.0:
-            max_shares = int(math.floor(final_dollar / risk_per_share))
+        if entry > 0.0 and final_dollar > 0.0:
+            max_shares = int(math.floor(final_dollar / entry))
         else:
             max_shares = 0
             

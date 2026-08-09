@@ -843,7 +843,7 @@ def main():
                     half_kelly = max(0.0, kelly_f / 2.0)
                     
                     half_kelly_fraction = half_kelly * risk_multiplier * size_mult
-                    raw_dollar_sizing = portfolio_value * half_kelly_fraction
+                    raw_dollar_sizing = min(portfolio_value * half_kelly_fraction, 0.05 * portfolio_value)
                     total_raw_dollars_needed += raw_dollar_sizing
                 
                 # Sort weak holdings lowest score first to rotate the weakest ones first

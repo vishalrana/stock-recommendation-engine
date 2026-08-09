@@ -115,6 +115,21 @@ def update_portfolio_realized_pnl(pnl_dollars):
         print(f"[PORTFOLIO UPDATE] Failed to update portfolio state realized PNL: {e}")
 
 
+def execute_position_exit(signal_id, exit_price, outcome, reason, split_fraction=1, live_price=None):
+    if not supabase:
+        return None
+    res = supabase.rpc("execute_position_exit", {
+        "p_signal_id": str(signal_id),
+        "p_exit_price": exit_price,
+        "p_outcome": outcome,
+        "p_reason": reason,
+        "p_split_fraction": split_fraction,
+        "p_live_price": live_price if live_price is not None else exit_price,
+        "p_move_stop_to_entry": outcome == "hit_t1",
+    }).execute()
+    return res.data
+
+
 def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_dollars=None, max_shares=None):
     if not supabase:
         return
@@ -161,33 +176,54 @@ def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_do
 
 
 def get_latest_price(ticker):
+    bar = get_latest_bar(ticker)
+    if bar and "close" in bar:
+        return bar["close"]
+    return None
+
+
+def get_latest_bar(ticker):
     ticker = ticker.upper()
     try:
         from src.data.cache_manager import get_cache_manager
         cm = get_cache_manager()
-        # Check preloaded history cache
+        df = None
         if ticker in cm._history_cache and not cm._history_cache[ticker].empty:
             df = cm._history_cache[ticker]
-            close_col = "CLOSE" if "CLOSE" in df.columns else "Close"
-            return float(df[close_col].iloc[-1])
-        # Fallback to reading disk/download
-        import datetime
-        end_date = datetime.date.today()
-        start_date = end_date - datetime.timedelta(days=10)
-        df = cm.get_ticker_history(ticker, start_date.isoformat(), end_date.isoformat())
+        else:
+            import datetime
+            end_date = datetime.date.today()
+            start_date = end_date - datetime.timedelta(days=30)
+            df = cm.get_ticker_history(ticker, start_date.isoformat(), end_date.isoformat())
+            
         if df is not None and not df.empty:
             close_col = "CLOSE" if "CLOSE" in df.columns else "Close"
-            return float(df[close_col].iloc[-1])
-        # Direct yfinance fallback
+            high_col = "HIGH" if "HIGH" in df.columns else "High"
+            low_col = "LOW" if "LOW" in df.columns else "Low"
+            
+            c = float(df[close_col].iloc[-1])
+            h = float(df[high_col].iloc[-1]) if high_col in df.columns else c
+            l = float(df[low_col].iloc[-1]) if low_col in df.columns else c
+            
+            atr = c * 0.02
+            if len(df) >= 14 and high_col in df.columns and low_col in df.columns:
+                tr = (df[high_col] - df[low_col]).tail(14).mean()
+                if tr > 0:
+                    atr = float(tr)
+            return {"close": c, "high": h, "low": l, "atr": atr}
+
         import yfinance as yf
         ticker_obj = yf.Ticker(ticker)
-        fast_info = ticker_obj.fast_info
-        if fast_info and 'lastPrice' in fast_info:
-            return float(fast_info['lastPrice'])
-        history = ticker_obj.history(period="1d")
+        history = ticker_obj.history(period="14d")
         if not history.empty:
-            return float(history['Close'].iloc[-1])
+            c = float(history['Close'].iloc[-1])
+            h = float(history['High'].iloc[-1])
+            l = float(history['Low'].iloc[-1])
+            tr = (history['High'] - history['Low']).mean()
+            atr = float(tr) if tr > 0 else c * 0.02
+            return {"close": c, "high": h, "low": l, "atr": atr}
     except Exception as e:
-        print(f"Error fetching latest price for {ticker}: {e}")
+        print(f"Error fetching latest bar for {ticker}: {e}")
+        
     return None
 

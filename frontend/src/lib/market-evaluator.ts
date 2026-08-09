@@ -609,25 +609,26 @@ export async function evaluate_open_positions() {
             }
           }
         } else {
-          // 2d. Ratchet Trailing Stops for open momentum/trend trades
-          if (!hasTargets && tiingoKey) {
-            const currentATR = await calculateATR(ticker, tiingoKey);
-            if (currentATR !== null) {
-              const newStop = Math.round((livePrice - 3.0 * currentATR) * 100) / 100;
-              if (newStop > stopLoss) {
-                console.log(`[MONITOR] Ratcheting trailing stop for ${ticker}: ${stopLoss} -> ${newStop}`);
-                await supabase.from('signals').update({
-                  stop_loss: newStop,
-                  price: livePrice
-                }).eq('id', sig.id);
-                
-                await supabase.from('signals_history').update({
-                  stop_loss: newStop
-                }).eq('scan_date', sig.scan_date).eq('ticker', ticker);
-                
-                summary.ratchetedStops++;
-                continue; // skipped standard price update
-              }
+          // 2d. Ratchet Trailing Stops for open trades as price rises
+          if (livePrice > entryPrice) {
+            let currentATR = tiingoKey ? await calculateATR(ticker, tiingoKey) : null;
+            if (!currentATR) {
+              currentATR = livePrice * 0.02; // default 2% fallback
+            }
+            const newStop = Math.round((livePrice - 2.0 * currentATR) * 100) / 100;
+            if (newStop > stopLoss) {
+              console.log(`[MONITOR] Ratcheting trailing stop for ${ticker}: ${stopLoss} -> ${newStop}`);
+              await supabase.from('signals').update({
+                stop_loss: newStop,
+                price: livePrice
+              }).eq('id', sig.id);
+              
+              await supabase.from('signals_history').update({
+                stop_loss: newStop
+              }).eq('scan_date', sig.scan_date).eq('ticker', ticker);
+              
+              summary.ratchetedStops++;
+              continue;
             }
           }
           

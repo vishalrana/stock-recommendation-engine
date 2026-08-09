@@ -245,7 +245,7 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
 def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
     """Evaluate existing open positions, update their statuses, and archive outcomes."""
     try:
-        from jobs.supabase_client import get_latest_price, update_signals_status, update_signals_price, update_history_outcome, update_portfolio_realized_pnl
+        from jobs.supabase_client import get_latest_bar, update_signals_price, execute_position_exit
         
         # 1. Fetch current signals
         res = supabase.table("signals").select("*").execute()
@@ -265,148 +265,78 @@ def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
             ticker = existing['ticker']
             entry_price = float(existing['entry_price'])
             stop_loss = float(existing['stop_loss'])
-            # ponytail: targets can be None for trend/momentum strategies
             target_1 = float(existing['target_1']) if existing.get('target_1') is not None else None
             target_2 = float(existing['target_2']) if existing.get('target_2') is not None else None
             target_3 = float(existing['target_3']) if existing.get('target_3') is not None else None
             has_targets = target_1 is not None
             
-            current_price = get_latest_price(ticker)
-            if current_price is None:
-                logger.warning(f"Could not fetch latest price for {ticker}. Skipping evaluation.")
+            bar = get_latest_bar(ticker)
+            if bar is None or "close" not in bar:
+                logger.warning(f"Could not fetch latest bar for {ticker}. Skipping evaluation.")
                 continue
                 
+            current_price = float(bar["close"])
+            high_price = float(bar.get("high", current_price))
+            low_price = float(bar.get("low", current_price))
+            atr = float(bar.get("atr", current_price * 0.02))
+            
             # Determine status
-            status = 'open'
             exit_price = None
             sell_signal = None
             is_partial_exit = False
             partial_fraction = 0.0
-            partial_reason = ''
             exit_outcome = ''
             
-            if current_price <= stop_loss:
-                status = 'closed'
-                # Stop Loss sets exit_price strictly to stop_loss for Category 1 (has targets),
-                # but to current_price for Category 2 (trailing stop).
-                exit_price = stop_loss if has_targets else current_price
-                sell_signal = 'Stop loss hit' if has_targets else 'Trailing stop hit'
+            # 1. Stop loss check using low_price
+            if low_price <= stop_loss:
+                exit_price = min(stop_loss, low_price)
+                sell_signal = 'Stop loss hit'
                 exit_outcome = 'stopped'
-            elif has_targets and current_price >= target_3:
-                status = 'closed'
+            # 2. Target 3 check using high_price
+            elif has_targets and high_price >= target_3:
                 exit_price = target_3
                 sell_signal = 'Target 3 hit – full exit'
                 exit_outcome = 'hit_t3'
-            elif has_targets and current_price >= target_2:
-                # Check if T2 was already processed to avoid repeat triggers
+            # 3. Target 2 check using high_price
+            elif has_targets and high_price >= target_2:
                 if not (existing.get('sell_signal_reason') and 'Target 2' in existing['sell_signal_reason']):
-                    status = 'open'  # Partial exit — keep open
                     exit_price = target_2
                     sell_signal = 'Target 2 hit – sell 30%'
                     is_partial_exit = True
                     partial_fraction = 0.30
-                    partial_reason = 'Target 2 hit (Partial)'
                     exit_outcome = 'hit_t2'
-            elif has_targets and current_price >= target_1:
-                # Check if T1 was already processed to avoid repeat triggers
+            # 4. Target 1 check using high_price
+            elif has_targets and high_price >= target_1:
                 if not (existing.get('sell_signal_reason') and 'Target 1' in existing['sell_signal_reason']):
-                    status = 'open'  # Partial exit — keep open
                     exit_price = target_1
                     sell_signal = 'Target 1 hit – sell 50%'
                     is_partial_exit = True
                     partial_fraction = 0.50
-                    partial_reason = 'Target 1 hit (Partial)'
                     exit_outcome = 'hit_t1'
                 
             if sell_signal is not None:
                 logger.info(f"[SELL SIGNAL] {ticker} triggered {sell_signal} at {exit_price}")
-                
-                # Retrieve current allocation from active signals row
-                original_max_shares = int(existing.get("max_shares") or 0)
-                original_allocated = float(existing.get("allocated_dollars") or 0.0)
-                
-                if is_partial_exit:
-                    # ponytail: Position Lot Splitting logic
-                    import math
-                    shares_sold = int(math.floor(original_max_shares * partial_fraction))
-                    dollars_sold = original_allocated * partial_fraction
-                    
-                    if shares_sold > 0 and dollars_sold > 0:
-                        # 1. Insert CLOSED portion into signals_history with dynamic outcome
-                        return_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
-                        holding_days = 0
-                        scan_date_str = existing.get("scan_date")
-                        if scan_date_str:
-                            try:
-                                scan_date = datetime.strptime(scan_date_str, '%Y-%m-%d').date()
-                                holding_days = (datetime.now().date() - scan_date).days
-                            except Exception:
-                                pass
-                                
-                        hist_row = {
-                            "scan_date": existing.get("scan_date"),
-                            "ticker": f"{ticker} (P)",
-                            "company_name": existing.get("company_name"),
-                            "industry": existing.get("industry"),
-                            "price": exit_price,
-                            "entry_price": entry_price,
-                            "stop_loss": stop_loss,
-                            "exit_price": exit_price,
-                            "outcome": exit_outcome,
-                            "outcome_date": datetime.now().date().isoformat(),
-                            "outcome_return_pct": return_pct,
-                            "outcome_holding_days": holding_days,
-                            "allocated_dollars": dollars_sold,
-                            "max_shares": shares_sold,
-                            "strategy_name": existing.get("strategy_name") or existing.get("strategy")
-                        }
-                        
-                        logger.info(f"[ROTATION/MONITOR] Inserting partial closed history lot for {ticker}: {shares_sold} shares, ${dollars_sold:.2f}")
-                        supabase.table('signals_history').insert(hist_row).execute()
-                        
-                        # Realized Equity Sync: Update portfolio state realized P&L
-                        pnl_dollars = (exit_price - entry_price) * shares_sold
-                        update_portfolio_realized_pnl(pnl_dollars)
-                        
-                        # 2. UPDATE existing OPEN row in signals table
-                        remaining_shares = original_max_shares - shares_sold
-                        remaining_dollars = original_allocated - dollars_sold
-                        
-                        update_payload = {
-                            "max_shares": remaining_shares,
-                            "allocated_dollars": remaining_dollars,
-                            "sell_signal_reason": sell_signal,
-                            "sell_signal": True,
-                            "sell_price": exit_price,
-                            "price": current_price
-                        }
-                        
-                        if exit_outcome == 'hit_t1':
-                            logger.info(f"[MONITOR] Setting stop loss to breakeven: {entry_price}")
-                            update_payload["stop_loss"] = entry_price
-                            
-                        supabase.table('signals').update(update_payload).eq('id', existing['id']).execute()
-                else:
-                    if status == 'closed':
-                        # Full exit — update and archive
-                        update_signals_status(ticker, 'closed', exit_price, sell_signal, sell_signal_reason=sell_signal)
-                        update_history_outcome(ticker, exit_outcome, exit_price, sell_signal, allocated_dollars=original_allocated, max_shares=original_max_shares)
-                        
-                        # Realized Equity Sync: Update portfolio state realized P&L
-                        pnl_dollars = (exit_price - entry_price) * original_max_shares
-                        update_portfolio_realized_pnl(pnl_dollars)
-                    else:
-                        # Fallback standard update
-                        supabase.table('signals').update({
-                            'sell_signal': True,
-                            'sell_signal_reason': sell_signal,
-                            'sell_price': exit_price,
-                            'price': current_price,
-                        }).eq('ticker', ticker).eq('status', 'open').execute()
+                result = execute_position_exit(
+                    existing["id"],
+                    exit_price,
+                    exit_outcome,
+                    sell_signal,
+                    partial_fraction if is_partial_exit else 1,
+                    current_price,
+                )
+                logger.info(f"[POSITION EXIT] {ticker}: {result}")
             else:
-                logger.info(f"[POSITION HOLD] {ticker} remains open. Current price: {current_price:.2f}")
-                # Update current price in signals table
-                update_signals_price(ticker, current_price)
+                # Nightly Trailing Stop Ratcheting
+                # If stock price has risen, ratchet stop loss upwards to protect profits
+                new_stop = round(max(stop_loss, current_price - 2.0 * atr), 2)
+                if new_stop > stop_loss:
+                    logger.info(f"[MONITOR] Ratcheting trailing stop for {ticker}: {stop_loss} -> {new_stop}")
+                    supabase.table("signals").update({"stop_loss": new_stop, "price": current_price}).eq("id", existing["id"]).execute()
+                    supabase.table("signals_history").update({"stop_loss": new_stop}).eq("scan_date", existing["scan_date"]).eq("ticker", ticker).execute()
+                    stop_loss = new_stop
+                else:
+                    update_signals_price(ticker, current_price)
+                logger.info(f"[POSITION HOLD] {ticker} remains open. Current price: {current_price:.2f}, Stop Loss: {stop_loss:.2f}")
                 
         # Return list of active open tickers to skip in daily scan insertion
         res_updated = supabase.table("signals").select("ticker").eq("status", "open").execute()
@@ -920,7 +850,7 @@ def main():
                 weak_holdings = sorted(weak_holdings, key=lambda x: float(x.get("composite_score") or 0.0))
                 
                 # Pair them up and trigger rotation if cash-constrained
-                from jobs.supabase_client import update_signals_status, update_history_outcome, update_portfolio_realized_pnl
+                from jobs.supabase_client import execute_position_exit
                 
                 for t1_cand in tier1_candidates:
                     # Check cash constraint
@@ -941,19 +871,7 @@ def main():
                         logger.info(f"[ROTATION] Rotating out of weak holding {weak_pos['ticker']} (Score: {weak_pos['composite_score']}) "
                                     f"to fund {t1_cand['ticker']} (Score: {t1_cand['composite_score']}) | Spread: {spread:.2f}")
                         
-                        # Retrieve current allocation from active signals row
-                        allocated_dollars = float(weak_pos.get("allocated_dollars") or 0.0)
-                        max_shares = int(weak_pos.get("max_shares") or 0)
-                        
-                        # Execute database updates
-                        update_signals_status(weak_pos['ticker'], 'closed', exit_price, True, reason)
-                        update_history_outcome(weak_pos['ticker'], 'closed', exit_price, True, allocated_dollars=allocated_dollars, max_shares=max_shares)
-                        
-                        # Realized Equity Sync: Update portfolio state realized P&L
-                        entry_price = float(weak_pos.get("entry_price") or 0.0)
-                        if entry_price > 0:
-                            pnl_dollars = (exit_price - entry_price) * max_shares
-                            update_portfolio_realized_pnl(pnl_dollars)
+                        execute_position_exit(weak_pos["id"], exit_price, "closed", reason, 1, exit_price)
                         
                         # Deduct weak position allocated dollars from Occupied pool
                         allocated = weak_pos.get("allocated_dollars")
@@ -1032,41 +950,31 @@ def main():
 
             atr = float(sig.get("atr_14", 0.0))
 
-            if strategy_name in SHORT_TERM_STRATEGIES:
-                # ponytail: ATR-scaled T1/T2/T3 for cash-flow strategies
+            # 1. Enforce Hard Stop-Loss Risk Ceiling (Max 7.0% Max Loss)
+            min_stop = round(entry_price * 0.93, 2)
+            if stop_loss < min_stop:
+                stop_loss = min_stop
+                sig["stop_loss"] = stop_loss
+
+            # 2. Populate ATR-scaled Profit Targets for ALL strategies (No nullification)
+            if sig.get("target_1") is not None and float(sig["target_1"]) > entry_price:
+                target_1 = round(float(sig["target_1"]), 2)
+                target_2 = round(float(sig.get("target_2") or (entry_price * 1.12)), 2)
+                target_3 = round(float(sig.get("target_3") or (entry_price * 1.18)), 2)
+            else:
                 target_1 = round(entry_price + 1.5 * atr, 2) if atr > 0 else round(entry_price * 1.07, 2)
                 target_2 = round(entry_price + 2.5 * atr, 2) if atr > 0 else round(entry_price * 1.12, 2)
                 target_3 = round(entry_price + 3.5 * atr, 2) if atr > 0 else round(entry_price * 1.18, 2)
-                sig["target_1_pct"] = round((target_1 / entry_price - 1) * 100, 1)
-                sig["target_2_pct"] = round((target_2 / entry_price - 1) * 100, 1)
-                sig["target_3_pct"] = round((target_3 / entry_price - 1) * 100, 1)
-                risk = entry_price - stop_loss
-                reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
-                sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
-            else:
-                # ponytail: Trend/momentum — no profit caps, 3-ATR trailing stop
-                target_1 = None
-                target_2 = None
-                target_3 = None
-                sig["target_1_pct"] = None
-                sig["target_2_pct"] = None
-                sig["target_3_pct"] = None
-                # Override stop_loss to 3*ATR trailing stop
-                if atr > 0:
-                    stop_loss = round(entry_price - 3.0 * atr, 2)
-                    sig["stop_loss"] = stop_loss
-                risk = entry_price - stop_loss
-                # R:R approximation for trend: use 3*ATR as expected reward (conservative)
-                sig["weighted_rr"] = round((3.0 * atr) / risk, 2) if risk > 0 else 0.0
 
-            # Explicit target nullification for all Trend/Momentum strategies
-            if strategy_name in TREND_STRATEGIES:
-                target_1 = None
-                target_2 = None
-                target_3 = None
-                sig["target_1_pct"] = None
-                sig["target_2_pct"] = None
-                sig["target_3_pct"] = None
+            sig["target_1"] = target_1
+            sig["target_2"] = target_2
+            sig["target_3"] = target_3
+            sig["target_1_pct"] = round((target_1 / entry_price - 1) * 100, 1)
+            sig["target_2_pct"] = round((target_2 / entry_price - 1) * 100, 1)
+            sig["target_3_pct"] = round((target_3 / entry_price - 1) * 100, 1)
+            risk = entry_price - stop_loss
+            reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
+            sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
 
             # TASK 2 & 3: Sizing adjustments based on VIX override and drawdown controls
             win_p = 0.35

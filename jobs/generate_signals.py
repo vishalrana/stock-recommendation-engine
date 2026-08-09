@@ -88,7 +88,7 @@ REGIME_STRATEGY_MAP = {
 }
 
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
-TOP_N = 5
+TOP_N = 3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -714,13 +714,16 @@ def main():
 
         final_signals = deduplicate_by_ticker(all_signals)
         
-        # TASK 3: Filter candidates if drawdown is >= 10% (requires composite_score >= 80)
-        dd_pct = (peak_value - portfolio_value) / peak_value * 100 if peak_value > 0 else 0.0
-        if dd_pct >= 10.0:
-            logger.info(f"[RISK CONTROL] Drawdown is {dd_pct:.1f}% >= 10%. Filtering candidates to require composite_score >= 80.")
-            final_signals = [s for s in final_signals if float(s.get("composite_score", 0.0)) >= 80.0]
+        # High-Win-Probability Filter: Require composite_score >= 80.0 (Strong Buy) for top recommendations
+        logger.info("[QUALITY GATE] Filtering signals to high-confidence setups (composite_score >= 80.0)...")
+        strict_signals = [s for s in final_signals if float(s.get("composite_score", 0.0)) >= 80.0]
+        
+        if strict_signals:
+            final_signals = strict_signals
+        else:
+            logger.info("[QUALITY GATE] No setups met score >= 80.0; taking top available candidates.")
 
-        final_signals.sort(key=lambda x: x.get('quality_score', x['composite_score']), reverse=True)
+        final_signals.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
         final_signals = final_signals[:TOP_N]
 
         t1 = sum(1 for s in final_signals if s["tier_label"] == "Strong Buy")
@@ -781,6 +784,10 @@ def main():
                     except Exception as e:
                         logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
                         sig["context_score"] = 0.0
+
+            # Re-sort and enforce top 3 hard cap after context scoring
+            final_signals.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
+            final_signals = final_signals[:TOP_N]
 
         # ponytail: Hybrid exit architecture — short-term keeps ATR-scaled T1/T2/T3,
         # trend/momentum strategies get None targets + trailing stop

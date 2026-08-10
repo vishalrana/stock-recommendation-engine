@@ -527,16 +527,24 @@ def calculate_normalized_sizing(signals: list, portfolio_value: float, available
         entry = float(sig_copy.get("entry_price", 0.0))
         
         if entry > 0.0 and final_dollar > 0.0:
-            max_shares = int(math.floor(final_dollar / entry))
+            exact_shares = round(final_dollar / entry, 4)
+            int_shares = int(math.floor(exact_shares))
         else:
-            max_shares = 0
-        
-        # If we can't afford even 1 share, zero out the allocation entirely
-        if max_shares == 0:
+            exact_shares = 0.0
+            int_shares = 0
             final_dollar = 0.0
             
         sig_copy["allocated_dollars"] = round(final_dollar, 2)
-        sig_copy["max_shares"] = max_shares
+        sig_copy["exact_shares"] = exact_shares
+        sig_copy["max_shares"] = int_shares
+        
+        alloc_pct = (final_dollar / portfolio_value * 100.0) if portfolio_value > 0 else 0.0
+        if exact_shares > 0:
+            if exact_shares < 1.0:
+                sig_copy["position_sizing"] = f"K: {alloc_pct:.1f}% ({exact_shares:.2f} sh)"
+            else:
+                sig_copy["position_sizing"] = f"K: {alloc_pct:.1f}% ({int_shares} sh)"
+                
         result.append(sig_copy)
         
     return result

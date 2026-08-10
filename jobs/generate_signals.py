@@ -774,12 +774,21 @@ def main():
                                 from src.providers.context.aggregator import save_context_to_cache
                                 save_context_to_cache(sig["ticker"], sig["context_score"], ctx)
                                 
-                            # Adjust composite score by adding the context score contribution
-                            old_score = float(sig.get("composite_score", 50.0))
-                            context_score = float(sig["context_score"])
-                            new_score = old_score + context_score * 0.15
-                            sig["composite_score"] = round(new_score, 4)
-                            sig["quality_score"] = round(new_score, 4)
+                            # Recompute composite score properly using regime-dependent weights
+                            # (context_score is now on [0,100] scale after the scorer fix)
+                            row_dict = {
+                                "momentum_score": float(sig.get("momentum_score", 50.0)),
+                                "expectancy_score": float(sig.get("expectancy_score", 50.0)),
+                                "winrate_score": float(sig.get("winrate_score", 50.0)),
+                                "context_score": float(sig["context_score"]),
+                                "current_rsi": float(sig.get("current_rsi", 50.0)),
+                                "price": float(sig.get("price", sig.get("entry_price", 0.0))),
+                                "dma_50": float(sig.get("dma_50", sig.get("ema20", sig.get("price", 0.0)))),
+                                "industry": sig.get("industry", ""),
+                            }
+                            res = ranker.compute_composite_score(row_dict, regime_str)
+                            sig["composite_score"] = round(res["total"], 4)
+                            sig["quality_score"] = round(res["total"], 4)
                             logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']} (new composite: {sig['composite_score']:.1f})")
                     except Exception as e:
                         logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")

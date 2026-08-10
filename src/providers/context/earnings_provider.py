@@ -6,22 +6,28 @@ class EarningsProvider:
     def get_surprise(self, ticker: str) -> EarningsContext:
         try:
             stock = yf.Ticker(ticker)
-            # Fetch the latest earnings data
-            earnings = stock.earnings
-            if earnings is not None and not earnings.empty:
-                # Get the most recent quarter
-                latest = earnings.iloc[-1]
-                surprise = latest.get('surprise', 0)  # yfinance has a 'surprise' column
-                # If no surprise column, calculate it: (actual - estimate) / abs(estimate)
-                if 'surprise' not in latest and 'estimated' in latest and 'actual' in latest:
-                    est = latest['estimated']
-                    actual = latest['actual']
-                    if est and est != 0:
-                        surprise = (actual - est) / abs(est) * 100
-                return EarningsContext(
-                    surprise_percent=surprise,
-                    is_recent=True  # Assuming it's recent since we fetched latest
-                )
+            # Use modern yfinance API: .earnings_dates gives actual/estimate EPS
+            earnings_dates = stock.earnings_dates
+            if earnings_dates is not None and not earnings_dates.empty:
+                # Filter to rows that have both actual and estimated EPS (past quarters)
+                past = earnings_dates.dropna(subset=["Reported EPS", "EPS Estimate"])
+                if not past.empty:
+                    latest = past.iloc[0]  # Most recent completed quarter
+                    actual_eps = float(latest["Reported EPS"])
+                    estimated_eps = float(latest["EPS Estimate"])
+                    if estimated_eps != 0:
+                        surprise = (actual_eps - estimated_eps) / abs(estimated_eps) * 100
+                    else:
+                        surprise = 0.0
+                    # Also get the Surprise(%) column if available
+                    if "Surprise(%)" in past.columns:
+                        surprise_col = past.iloc[0].get("Surprise(%)")
+                        if pd.notna(surprise_col):
+                            surprise = float(surprise_col)
+                    return EarningsContext(
+                        surprise_percent=round(surprise, 2),
+                        is_recent=True
+                    )
         except Exception:
             pass
         return EarningsContext()

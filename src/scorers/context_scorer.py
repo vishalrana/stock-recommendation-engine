@@ -73,6 +73,9 @@ class ContextScorer:
             )
             score = max(score, min(15, fallback))
         
-        # Clamp to [0, 100] and apply global weight (15%)
+        # Clamp to [0, 100] — return raw score on same scale as other sub-scores.
+        # NOTE: The composite weight (e.g. 15% in bull) is applied downstream in
+        #   ranker.py::compute_composite_score() via `w["ctx"] * context_score`.
+        #   Do NOT pre-scale here to avoid double-discounting.
         raw_score = max(0, min(100, score))
-        return raw_score * self.config.get('global_multiplier', 0.15)
+        return raw_score

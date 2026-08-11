@@ -763,11 +763,7 @@ def main():
                                 'adx': sig.get("adx_value", 20),
                                 'volume_ratio': sig.get("volume_ratio", 1.0),
                             }
-                            sig["context_score"] = context_scorer.calculate(ctx, float(sig["entry_price"]), tech_data)
-                            sig["context_analyst"] = getattr(ctx, "context_analyst", 0.0)
-                            sig["context_earnings"] = getattr(ctx, "context_earnings", 0.0)
-                            sig["context_fundamental"] = getattr(ctx, "context_fundamental", 0.0)
-                            sig["context_news"] = getattr(ctx, "context_news", 0.0)
+                            sig["context_score"], sig["context_analyst"], sig["context_earnings"], sig["context_fundamental"], sig["context_news"] = context_scorer.calculate_with_breakdown(ctx, float(sig["entry_price"]), tech_data)
                             
                             # Save to context_cache table on cache miss
                             if ctx.cached_score is None:
@@ -1158,6 +1154,10 @@ def main():
                         "strategy_name": sig.get("strategy_name"),
                         "outcome": "open",
                         "context_score": sig.get("context_score", 0.0),
+                        "context_analyst": float(sig.get("context_analyst") or 0.0),
+                        "context_earnings": float(sig.get("context_earnings") or 0.0),
+                        "context_fundamental": float(sig.get("context_fundamental") or 0.0),
+                        "context_news": float(sig.get("context_news") or 0.0),
                         "allocated_dollars": sig.get("allocated_dollars"),
                         "max_shares": sig.get("max_shares"),
                     })

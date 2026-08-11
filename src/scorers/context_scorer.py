@@ -79,3 +79,47 @@ class ContextScorer:
         #   Do NOT pre-scale here to avoid double-discounting.
         raw_score = max(0, min(100, score))
         return raw_score
+
+    def calculate_with_breakdown(self, ctx: AggregatedContext, current_price: float, tech_data=None):
+        """Return (total_score, analyst_score, earnings_score, fundamental_score, news_score)."""
+        # ponytail: inline sub-score extraction mirroring calculate() logic
+        analyst_score = 0.0
+        earnings_score = 0.0
+        fundamental_score = 0.0
+        news_score = 0.0
+
+        # 1. Analyst (max 30)
+        if ctx.analyst.target_mean_price and current_price > 0:
+            upside = (ctx.analyst.target_mean_price - current_price) / current_price
+            if upside > self.config['analyst']['upside_threshold_bonus']:
+                analyst_score += 30
+            elif upside > 0:
+                analyst_score += 15
+            if ctx.analyst.recommendation in ["buy", "strong_buy"]:
+                analyst_score += self.config['analyst']['buy_bonus']
+        analyst_score = min(analyst_score, 40)  # cap
+
+        # 2. Earnings (max 30)
+        if ctx.earnings.surprise_percent is not None:
+            surprise = ctx.earnings.surprise_percent
+            if surprise > self.config['earnings']['surprise_beat_big']:
+                earnings_score += 30
+            elif surprise > self.config['earnings']['surprise_beat_small']:
+                earnings_score += 15
+            elif surprise < self.config['earnings']['surprise_miss_big']:
+                earnings_score -= 15
+
+        # 3. Fundamental (max 20)
+        if ctx.fundamental.debt_to_equity is not None and ctx.fundamental.debt_to_equity < self.config['fundamental']['debt_to_equity_max']:
+            fundamental_score += 10
+        if ctx.fundamental.current_ratio is not None and ctx.fundamental.current_ratio > self.config['fundamental']['current_ratio_min']:
+            fundamental_score += 10
+
+        # 4. News (max 20)
+        if ctx.news.headline_sentiment > self.config['news']['sentiment_positive_threshold']:
+            news_score += min(20, ctx.news.headline_sentiment * 50)
+        elif ctx.news.headline_sentiment < self.config['news']['sentiment_negative_threshold']:
+            news_score -= 10
+
+        total = self.calculate(ctx, current_price, tech_data)
+        return total, analyst_score, earnings_score, fundamental_score, news_score

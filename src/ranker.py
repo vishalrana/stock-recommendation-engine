@@ -250,11 +250,7 @@ class SignalRanker:
                         'adx': row.get('adx_value', 20),
                         'volume_ratio': row.get('volume_ratio', 1.0),
                     }
-                    c_score = self.context_scorer.calculate(ctx, float(current_price), tech_data)
-                    c_analyst = getattr(ctx, 'context_analyst', 0.0)
-                    c_earnings = getattr(ctx, 'context_earnings', 0.0)
-                    c_fundamental = getattr(ctx, 'context_fundamental', 0.0)
-                    c_news = getattr(ctx, 'context_news', 0.0)
+                    c_score, c_analyst, c_earnings, c_fundamental, c_news = self.context_scorer.calculate_with_breakdown(ctx, float(current_price), tech_data)
                     
                     # If it was a cache miss, save the computed score to cache
                     if ctx.cached_score is None:
@@ -425,16 +421,20 @@ class SignalRanker:
                                 'adx': row.get('adx_value', 20),
                                 'volume_ratio': row.get('volume_ratio', 1.0),
                             }
-                            c_score = self.context_scorer.calculate(ctx, float(current_price), tech_data)
+                            c_score, c_analyst, c_earnings, c_fundamental, c_news = self.context_scorer.calculate_with_breakdown(ctx, float(current_price), tech_data)
                     except Exception as e:
                         logger.warning("Failed context aggregation for fallback ticker %s: %s", ticker, e)
                         c_score = 0.0
+                        c_analyst = 0.0
+                        c_earnings = 0.0
+                        c_fundamental = 0.0
+                        c_news = 0.0
 
                     result.at[idx, "context_score"] = c_score
-                    result.at[idx, "context_analyst"] = getattr(ctx, "context_analyst", 0.0) if 'ctx' in locals() else 0.0
-                    result.at[idx, "context_earnings"] = getattr(ctx, "context_earnings", 0.0) if 'ctx' in locals() else 0.0
-                    result.at[idx, "context_fundamental"] = getattr(ctx, "context_fundamental", 0.0) if 'ctx' in locals() else 0.0
-                    result.at[idx, "context_news"] = getattr(ctx, "context_news", 0.0) if 'ctx' in locals() else 0.0
+                    result.at[idx, "context_analyst"] = c_analyst
+                    result.at[idx, "context_earnings"] = c_earnings
+                    result.at[idx, "context_fundamental"] = c_fundamental
+                    result.at[idx, "context_news"] = c_news
                     
                     # Recompute composite score
                     row_dict = result.loc[idx].to_dict()

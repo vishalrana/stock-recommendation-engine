@@ -1,8 +1,27 @@
--- Migration: Fix recommendations view
--- 1. Filter signals to status='open' only (closed signals come from signals_history)
--- 2. Pass through real context sub-scores from signals_history instead of hardcoding 0.0
+-- Migration: Fix recommendations view & context sub-score columns
 -- Run this in the Supabase SQL Editor
 
+-- 1. Add context sub-score columns to signals_history if missing (MUST BE AT TOP before View creation)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_analyst') THEN
+    ALTER TABLE signals_history ADD COLUMN context_analyst NUMERIC(6,2) DEFAULT 0.0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_earnings') THEN
+    ALTER TABLE signals_history ADD COLUMN context_earnings NUMERIC(6,2) DEFAULT 0.0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_fundamental') THEN
+    ALTER TABLE signals_history ADD COLUMN context_fundamental NUMERIC(6,2) DEFAULT 0.0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_news') THEN
+    ALTER TABLE signals_history ADD COLUMN context_news NUMERIC(6,2) DEFAULT 0.0;
+  END IF;
+END $$;
+
+-- 2. Clean up stale closed signals from signals table
+DELETE FROM signals WHERE status != 'open';
+
+-- 3. Create or Replace recommendations view
 DROP VIEW IF EXISTS recommendations;
 
 CREATE OR REPLACE VIEW recommendations AS
@@ -131,26 +150,6 @@ SELECT
   COALESCE(m.losses, 0) AS losses
 FROM unified_signals u
 LEFT JOIN ticker_metrics m ON u.ticker = m.ticker;
-
--- Also add context sub-score columns to signals_history if missing
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_analyst') THEN
-    ALTER TABLE signals_history ADD COLUMN context_analyst NUMERIC(6,2) DEFAULT 0.0;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_earnings') THEN
-    ALTER TABLE signals_history ADD COLUMN context_earnings NUMERIC(6,2) DEFAULT 0.0;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_fundamental') THEN
-    ALTER TABLE signals_history ADD COLUMN context_fundamental NUMERIC(6,2) DEFAULT 0.0;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals_history' AND column_name='context_news') THEN
-    ALTER TABLE signals_history ADD COLUMN context_news NUMERIC(6,2) DEFAULT 0.0;
-  END IF;
-END $$;
-
--- Clean up stale closed signals from signals table
-DELETE FROM signals WHERE status != 'open';
 
 -- Force PostgREST schema cache reload
 NOTIFY pgrst, 'reload schema';

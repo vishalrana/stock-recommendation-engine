@@ -253,10 +253,30 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const allocDollars = row.original.allocated_dollars 
             ? Number(row.original.allocated_dollars) 
             : (kellyPct / 100.0) * latestPortfolioValue;
-          const shares = row.original.max_shares ? Number(row.original.max_shares) : null;
-          const sharesLabel = shares && shares > 0
-            ? (shares === 1 ? '1 share' : `${shares} shares`)
+          const entryPriceVal = row.original.entry_price ? Number(row.original.entry_price) : 0;
+          let exactShares = row.original.max_shares && Number(row.original.max_shares) > 0 
+            ? Number(row.original.max_shares) 
             : null;
+
+          if ((!exactShares || exactShares === 0) && row.original.position_sizing && row.original.position_sizing.includes('sh')) {
+            const match = row.original.position_sizing.match(/\(([\d.]+)\s*sh\)/);
+            if (match && match[1]) {
+              exactShares = parseFloat(match[1]);
+            }
+          }
+
+          if ((!exactShares || exactShares === 0) && allocDollars > 0 && entryPriceVal > 0) {
+            exactShares = allocDollars / entryPriceVal;
+          }
+
+          let sharesLabel: string | null = null;
+          if (exactShares && exactShares > 0) {
+            if (Number.isInteger(exactShares)) {
+              sharesLabel = exactShares === 1 ? '1 share' : `${exactShares} shares`;
+            } else {
+              sharesLabel = `${exactShares.toFixed(2)} shares`;
+            }
+          }
 
           const getTierColor = (t: string | null) => {
             if (t === 'Strong Buy') return 'bg-green-50 text-green-700 border-green-200';

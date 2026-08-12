@@ -250,6 +250,13 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const score = row.original.composite_score || 50;
           const rr = row.original.weighted_rr || 2.0;
           const kellyPct = parseAllocationPct(row.original.position_sizing, score, rr);
+          const allocDollars = row.original.allocated_dollars 
+            ? Number(row.original.allocated_dollars) 
+            : (kellyPct / 100.0) * latestPortfolioValue;
+          const shares = row.original.max_shares ? Number(row.original.max_shares) : null;
+          const sharesLabel = shares !== null 
+            ? (Number.isInteger(shares) ? `${shares} sh` : `${shares.toFixed(2)} sh`) 
+            : null;
 
           const getTierColor = (t: string | null) => {
             if (t === 'Strong Buy') return 'bg-green-50 text-green-700 border-green-200';
@@ -268,8 +275,8 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
               <span className="text-[11px] text-gray-500 truncate max-w-[150px] font-medium leading-normal" title={company || ''}>
                 {company}
               </span>
-              <span className="text-[10px] text-gray-400 font-semibold mt-0.5">
-                Allocation: {kellyPct.toFixed(1)}%
+              <span className="text-[10px] text-gray-500 font-semibold mt-0.5">
+                Alloc: <span className="font-bold text-gray-900">${allocDollars.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> ({kellyPct.toFixed(1)}%{sharesLabel ? ` • ${sharesLabel}` : ''})
               </span>
             </div>
           );

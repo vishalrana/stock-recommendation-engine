@@ -111,14 +111,37 @@ async function fetchLivePrice(ticker: string, tiingoKey?: string, finnhubKey?: s
 
   // Final fallback to public Yahoo Chart endpoint
   try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1m`, { cache: 'no-store' });
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json'
+    };
+    const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1m`, {
+      cache: 'no-store',
+      headers
+    });
     if (res.status === 200) {
       const data = await res.json();
       const meta = data?.chart?.result?.[0]?.meta;
       if (meta) {
         const price = meta.regularMarketPrice ?? meta.chartPreviousClose ?? meta.previousClose;
-        if (price !== undefined && price !== null) {
+        if (price !== undefined && price !== null && Number(price) > 0) {
           return Number(price);
+        }
+      }
+    }
+    
+    // Backup Yahoo v7 quote endpoint
+    const res2 = await fetch(`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`, {
+      cache: 'no-store',
+      headers
+    });
+    if (res2.status === 200) {
+      const data2 = await res2.json();
+      const q = data2?.quoteResponse?.result?.[0];
+      if (q) {
+        const price2 = q.regularMarketPrice ?? q.postMarketPrice ?? q.preMarketPrice;
+        if (price2 !== undefined && price2 !== null && Number(price2) > 0) {
+          return Number(price2);
         }
       }
     }

@@ -388,7 +388,8 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const status = row.status || 'open';
           const currentPrice = row.price;
           const sell_price = row.sell_price;
-          const price = (status === 'closed' && sell_price) ? sell_price : currentPrice;
+          const exit_price = row.exit_price;
+          const price = (status === 'closed') ? (sell_price || exit_price || currentPrice) : currentPrice;
 
           if (!entry || !price || Number(entry) === 0) return 0;
           return ((Number(price) - Number(entry)) / Number(entry)) * 100;
@@ -399,7 +400,8 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const status = row.original.status || 'open';
           const currentPrice = row.original.price;
           const sell_price = row.original.sell_price;
-          const price = (status === 'closed' && sell_price) ? sell_price : currentPrice;
+          const exit_price = row.original.exit_price;
+          const price = (status === 'closed') ? (sell_price || exit_price || currentPrice) : currentPrice;
 
           if (!entry || !price) return <span className="text-gray-300">—</span>;
 
@@ -410,17 +412,18 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           const pnl = ((priceVal - entryVal) / entryVal) * 100;
           const isPos = pnl >= 0;
           
-          // Calculate absolute dollars
-          let allocationPct = 0.05;
-          if (row.original.position_sizing) {
-            const raw = row.original.position_sizing.replace('Kelly:', '').replace('K:', '').replace('%', '').trim();
-            const parsed = parseFloat(raw);
-            if (!isNaN(parsed)) {
-              allocationPct = parsed / 100.0;
-            }
+          // Calculate exact absolute dollars using max_shares or allocated_dollars
+          let pnlDollars = 0;
+          const shares = row.original.max_shares ? Number(row.original.max_shares) : null;
+          const alloc = row.original.allocated_dollars ? Number(row.original.allocated_dollars) : null;
+
+          if (shares && shares > 0) {
+            pnlDollars = (priceVal - entryVal) * shares;
+          } else if (alloc && alloc > 0) {
+            pnlDollars = alloc * (pnl / 100);
+          } else {
+            pnlDollars = (0.05 * latestPortfolioValue) * (pnl / 100);
           }
-          const tradeSize = allocationPct * latestPortfolioValue;
-          const pnlDollars = tradeSize * (pnl / 100);
           
           const sign = isPos ? '+' : '';
           const colorClass = isPos ? 'text-green-600' : 'text-red-600';

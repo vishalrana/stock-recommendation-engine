@@ -115,8 +115,11 @@ async function fetchLivePrice(ticker: string, tiingoKey?: string, finnhubKey?: s
     if (res.status === 200) {
       const data = await res.json();
       const meta = data?.chart?.result?.[0]?.meta;
-      if (meta && meta.regularMarketPrice) {
-        return Number(meta.regularMarketPrice);
+      if (meta) {
+        const price = meta.regularMarketPrice ?? meta.chartPreviousClose ?? meta.previousClose;
+        if (price !== undefined && price !== null) {
+          return Number(price);
+        }
       }
     }
   } catch (e) {

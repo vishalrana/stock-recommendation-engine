@@ -18,24 +18,17 @@ export default function PortfolioSummary({ latestPortfolioValue, openPositions }
     
     if (entry > 0 && price > 0) {
       const returnPct = ((price - entry) / entry) * 100;
+      const shares = pos.max_shares ? Number(pos.max_shares) : null;
+      const alloc = pos.allocated_dollars ? Number(pos.allocated_dollars) : null;
       
-      // Prefer allocated_dollars from DB (already capped at 5%), otherwise parse position_sizing
-      let allocationDollars = 0;
-      if (pos.allocated_dollars && Number(pos.allocated_dollars) > 0) {
-        allocationDollars = Number(pos.allocated_dollars);
+      let unrealizedPnlDollars = 0;
+      if (shares && shares > 0) {
+        unrealizedPnlDollars = (price - entry) * shares;
+      } else if (alloc && alloc > 0) {
+        unrealizedPnlDollars = alloc * (returnPct / 100);
       } else {
-        let allocationPct = 0.05;
-        if (pos.position_sizing) {
-          const raw = pos.position_sizing.replace('Kelly:', '').replace('K:', '').replace('%', '').trim();
-          const parsed = parseFloat(raw);
-          if (!isNaN(parsed)) {
-            allocationPct = Math.min(parsed / 100.0, 0.05); // Hard cap at 5.0%
-          }
-        }
-        allocationDollars = allocationPct * latestPortfolioValue;
+        unrealizedPnlDollars = (0.05 * latestPortfolioValue) * (returnPct / 100);
       }
-      
-      const unrealizedPnlDollars = allocationDollars * (returnPct / 100);
       totalUnrealizedPnlDollars += unrealizedPnlDollars;
     }
   }

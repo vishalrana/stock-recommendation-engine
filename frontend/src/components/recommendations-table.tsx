@@ -254,8 +254,8 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
             ? Number(row.original.allocated_dollars) 
             : (kellyPct / 100.0) * latestPortfolioValue;
           const shares = row.original.max_shares ? Number(row.original.max_shares) : null;
-          const sharesLabel = shares !== null 
-            ? (Number.isInteger(shares) ? `${shares} sh` : `${shares.toFixed(2)} sh`) 
+          const sharesLabel = shares && shares > 0
+            ? (shares === 1 ? '1 share' : `${shares} shares`)
             : null;
 
           const getTierColor = (t: string | null) => {

@@ -19,8 +19,9 @@ import { useRouter } from 'next/navigation';
 function getDaysHeld(entryDateStr: string | null | undefined, exitDateStr: string | null | undefined): string {
   if (!entryDateStr) return '-';
   try {
-    const entry = new Date(entryDateStr + 'T00:00:00');
-    const exit = exitDateStr ? new Date(exitDateStr + 'T00:00:00') : new Date();
+    const parseDate = (d: string) => new Date(d.includes('T') ? d : `${d}T00:00:00`);
+    const entry = parseDate(entryDateStr);
+    const exit = exitDateStr ? parseDate(exitDateStr) : new Date();
     const diffTime = exit.getTime() - entry.getTime();
     const diffDays = Math.max(0, Math.floor(diffTime / (1000 * 60 * 60 * 24)));
     return `${diffDays}d`;
@@ -32,8 +33,9 @@ function getDaysHeld(entryDateStr: string | null | undefined, exitDateStr: strin
 function getDaysHeldNumeric(entryDateStr: string | null | undefined, exitDateStr: string | null | undefined): number {
   if (!entryDateStr) return 0;
   try {
-    const entry = new Date(entryDateStr + 'T00:00:00');
-    const exit = exitDateStr ? new Date(exitDateStr + 'T00:00:00') : new Date();
+    const parseDate = (d: string) => new Date(d.includes('T') ? d : `${d}T00:00:00`);
+    const entry = parseDate(entryDateStr);
+    const exit = exitDateStr ? parseDate(exitDateStr) : new Date();
     const diffTime = exit.getTime() - entry.getTime();
     return Math.max(0, Math.floor(diffTime / (1000 * 60 * 60 * 24)));
   } catch {
@@ -400,9 +402,9 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
 
           return (
             <div className="flex flex-col gap-0.5 font-mono text-[10px]">
-              <span className="text-green-600 font-semibold">T1: ${t1 ? Number(t1).toFixed(0) : '-'}</span>
-              <span className="text-green-600 font-semibold">T2: ${t2 ? Number(t2).toFixed(0) : '-'}</span>
-              <span className="text-green-700 font-bold">T3: ${t3 ? Number(t3).toFixed(0) : '-'}</span>
+              <span className="text-green-600 font-semibold">T1: ${t1 ? Number(t1).toFixed(2) : '-'}</span>
+              <span className="text-green-600 font-semibold">T2: ${t2 ? Number(t2).toFixed(2) : '-'}</span>
+              <span className="text-green-700 font-bold">T3: ${t3 ? Number(t3).toFixed(2) : '-'}</span>
             </div>
           );
         },
@@ -452,7 +454,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
             pnlDollars = (0.05 * latestPortfolioValue) * (pnl / 100);
           }
           
-          const sign = isPos ? '+' : '';
+          const sign = isPos ? '+' : pnl < 0 ? '-' : '';
           const colorClass = isPos ? 'text-green-600' : 'text-red-600';
 
           if (Math.abs(pnl) < 0.005 && status !== 'closed') {
@@ -471,7 +473,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
           return (
             <div className="flex flex-col">
               <span className={`font-mono text-xs font-bold ${colorClass}`}>
-                {sign}${pnlDollars.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({sign}{pnl.toFixed(2)}%)
+                {sign}${Math.abs(pnlDollars).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({sign}{Math.abs(pnl).toFixed(2)}%)
               </span>
               {status === 'closed' && (
                 <span className="text-[9px] text-gray-400 font-semibold uppercase tracking-wider leading-none mt-0.5">
@@ -540,7 +542,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
         <button
           onClick={() => {
             setActiveTab('closed');
-            setSorting([{ id: 'price', desc: true }]); // exit_date is within exit price accessor
+            setSorting([{ id: 'entry_date', desc: true }]); // sort closed trades by date, most recent first
             setExpanded({});
           }}
           className={`py-2 px-4 font-bold text-sm border-b-2 transition-all duration-200 ${

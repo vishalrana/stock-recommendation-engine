@@ -18,8 +18,10 @@ class MetadataProvider:
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
+            raw_de = info.get('debtToEquity')
+            debt_to_equity = (raw_de / 100.0) if raw_de is not None else None
             return FundamentalContext(
-                debt_to_equity=info.get('debtToEquity'),
+                debt_to_equity=debt_to_equity,
                 current_ratio=info.get('currentRatio'),
                 trailing_pe=info.get('trailingPE')
             )

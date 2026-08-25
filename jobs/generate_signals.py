@@ -721,7 +721,8 @@ def main():
         if strict_signals:
             final_signals = strict_signals
         else:
-            logger.info("[QUALITY GATE] No setups met score >= 80.0; taking top available candidates.")
+            logger.info("[QUALITY GATE] No setups met score >= 80.0; recommending NOTHING tonight.")
+            final_signals = []
 
         final_signals.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
         final_signals = final_signals[:TOP_N]
@@ -967,6 +968,13 @@ def main():
             if stop_loss < min_stop:
                 stop_loss = min_stop
                 sig["stop_loss"] = stop_loss
+
+            # Minimum stop distance floor: ensure at least 4.0% buffer
+            max_tight_stop = round(entry_price * 0.96, 2)
+            if stop_loss > max_tight_stop:
+                logger.info(f"[STOP FLOOR] {sig['ticker']}: widening tight stop from ${stop_loss} to ${max_tight_stop} (4.0% minimum)")
+                stop_loss = max_tight_stop
+                sig['stop_loss'] = stop_loss
 
             # 2. Populate ATR-scaled Profit Targets for ALL strategies (No nullification)
             if sig.get("target_1") is not None and float(sig["target_1"]) > entry_price:

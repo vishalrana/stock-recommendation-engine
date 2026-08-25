@@ -113,7 +113,7 @@ class PEADStrategy(StrategyInterface):
 
         # === SIGNAL CONSTRUCTION ===
         entry_price = price
-        stop_loss = max(sma50 * 0.98, gap_low * 1.02)  # Below 50 DMA or gap low
+        stop_loss = min(sma50 * 0.98, gap_low * 1.02)  # Below 50 DMA or gap low
         risk = entry_price - stop_loss
         risk_pct = (risk / entry_price) * 100 if entry_price > 0 else 0
 

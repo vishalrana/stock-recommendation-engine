@@ -47,10 +47,12 @@ class ContextAggregator:
                         analyst = AnalystContext(target_mean_price=analyst_target)
                         earnings = EarningsContext(surprise_percent=earnings_surprise)
                         news = NewsContext(headline_sentiment=news_sentiment or 0.0)
+                        fundamental = self.metadata.get_fundamentals(ticker)
                         
                         logger.info(f"Context cache HIT for {ticker} (age: {age_hours:.1f}h). Reusing cached score: {cache_row['context_score']}")
                         return AggregatedContext(
                             analyst=analyst,
+                            fundamental=fundamental,
                             earnings=earnings,
                             news=news,
                             cached_score=cache_row["context_score"]

@@ -65,7 +65,7 @@ export default function PortfolioSummary({ latestPortfolioValue, openPositions }
           <div className="flex flex-col">
             <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Net P&L</span>
             <span className={`text-base font-bold tracking-tight ${returnColorClass}`}>
-              {returnSign}${(totalValue - STARTING_PRINCIPAL).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {returnSign}${Math.abs(totalValue - STARTING_PRINCIPAL).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
           </div>
         </div>

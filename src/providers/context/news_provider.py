@@ -18,8 +18,9 @@ class FinBERTNewsProvider:
     def fetch_and_score(self, ticker: str) -> NewsContext:
         try:
             import feedparser
-            # Scrape Google News RSS
-            rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+            # Clean ticker (e.g. remove exchange suffix if present)
+            clean_ticker = ticker.split('.')[0]
+            rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock&hl=en-US&gl=US&ceid=US:en"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             response = requests.get(rss_url, headers=headers, timeout=10)
             feed = feedparser.parse(response.text)
@@ -41,7 +42,11 @@ class FinBERTNewsProvider:
                         score = 0.0
                     sentiments.append(score)
             
-            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
+            non_neutral = [s for s in sentiments if s != 0.0]
+            if non_neutral:
+                avg_sentiment = sum(non_neutral) / len(non_neutral)
+            else:
+                avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
             
             return NewsContext(
                 headline_sentiment=avg_sentiment,

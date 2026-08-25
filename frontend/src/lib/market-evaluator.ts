@@ -360,14 +360,21 @@ export async function evaluate_open_positions() {
           summary.cancelledGapDown++;
         } else {
           // Gate passed: Transition to open
+          
+          // Preserve original stop distance when adjusting entry to open price
+          const originalRisk = entryPrice - stopLoss; // original dollar risk
+          const adjustedStop = Math.round((openPrice - originalRisk) * 100) / 100;
+
           await supabase.from('signals').update({
             status: 'open',
             entry_price: openPrice,
-            price: openPrice
+            price: openPrice,
+            stop_loss: adjustedStop
           }).eq('id', sig.id);
           
           await supabase.from('signals_history').update({
-            entry_price: openPrice
+            entry_price: openPrice,
+            stop_loss: adjustedStop
           }).eq('scan_date', sig.scan_date).eq('ticker', ticker);
           
           summary.openedPending++;
@@ -527,10 +534,10 @@ export async function evaluate_open_positions() {
           
           if (isPartialExit) {
             // ponytail: Position Lot Splitting logic
-            const originalMaxShares = sig.max_shares ? parseInt(sig.max_shares) : 0;
+            const originalMaxShares = sig.max_shares ? parseFloat(sig.max_shares) : 0;
             const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
             
-            const sharesSold = Math.floor(originalMaxShares * partialFraction);
+            const sharesSold = Math.round(originalMaxShares * partialFraction * 10000) / 10000;
             const dollarsSold = originalAllocated * partialFraction;
             
             if (sharesSold > 0 && dollarsSold > 0) {
@@ -591,7 +598,7 @@ export async function evaluate_open_positions() {
             }
           } else {
             // Retrieve current allocation from active signals row
-            const originalMaxShares = sig.max_shares ? parseInt(sig.max_shares) : 0;
+            const originalMaxShares = sig.max_shares ? parseFloat(sig.max_shares) : 0;
             const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
             
             // Full exit — update signals row and signals_history row

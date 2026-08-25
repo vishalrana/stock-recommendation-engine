@@ -76,7 +76,7 @@ WITH unified_signals AS (
     s.allocated_dollars,
     s.max_shares
   FROM signals s
-  WHERE s.status = 'open'
+  WHERE s.status IN ('open', 'pending')
   UNION ALL
   SELECT
     h.scan_date,
@@ -118,7 +118,6 @@ WITH unified_signals AS (
     h.scan_date AS entry_date,
     h.outcome_date AS exit_date,
     CASE 
-      WHEN h.outcome = 'open' THEN 'open'
       WHEN h.outcome IN ('stopped', 'stop_loss') THEN 'closed'
       WHEN h.outcome IN ('hit_t3', 'hit_t2', 'hit_t1', 'closed') THEN 'closed'
       ELSE h.outcome
@@ -139,7 +138,7 @@ WITH unified_signals AS (
     h.allocated_dollars,
     h.max_shares
   FROM signals_history h
-  WHERE h.outcome != 'open'
+  WHERE h.outcome IS NOT NULL AND h.outcome != 'open'
 )
 SELECT
   u.*,

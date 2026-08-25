@@ -66,9 +66,9 @@ class TrendFollowingStrategy(StrategyInterface):
         # ATR-Based Stop Loss (Task 6.3)
         atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else 0.0
         if atr > 0:
-            stop_loss = max(low_10, entry_price - 2.5 * atr)
+            stop_loss = min(low_10, entry_price - 2.5 * atr)
         else:
-            stop_loss = max(low_10, sma200 * 0.98)
+            stop_loss = min(low_10, sma200 * 0.98)
             
         risk = entry_price - stop_loss
         risk_pct = (risk / entry_price) * 100 if entry_price > 0 else 0

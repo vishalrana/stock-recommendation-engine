@@ -22,5 +22,5 @@ fundamental:
   current_ratio_min: 1.5
 
 news:
-  sentiment_positive_threshold: 0.2
-  sentiment_negative_threshold: -0.2
+  sentiment_positive_threshold: 0.1
+  sentiment_negative_threshold: -0.1

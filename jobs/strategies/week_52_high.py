@@ -65,7 +65,7 @@ class Week52HighStrategy(StrategyInterface):
 
         # === SIGNAL CONSTRUCTION ===
         entry_price = price
-        stop_loss = max(sma50 * 0.97, high_52w * 0.95)  # Below 50 DMA or 5% off 52w high
+        stop_loss = min(sma50 * 0.97, high_52w * 0.95)  # Below 50 DMA or 5% off 52w high
         risk = entry_price - stop_loss
         risk_pct = (risk / entry_price) * 100 if entry_price > 0 else 0
 

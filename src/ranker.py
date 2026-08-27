@@ -528,10 +528,10 @@ def calculate_normalized_sizing(signals: list, portfolio_value: float, available
         
         if entry > 0.0 and final_dollar > 0.0:
             exact_shares = round(final_dollar / entry, 4)
-            int_shares = round(final_dollar / entry, 4)
+            int_shares = int(math.floor(exact_shares))
         else:
             exact_shares = 0.0
-            int_shares = 0.0
+            int_shares = 0
             final_dollar = 0.0
             
         sig_copy["allocated_dollars"] = round(final_dollar, 2)

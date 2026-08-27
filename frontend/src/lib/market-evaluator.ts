@@ -534,8 +534,10 @@ export async function evaluate_open_positions() {
           
           if (isPartialExit) {
             // ponytail: Position Lot Splitting logic
-            const originalMaxShares = sig.max_shares ? parseFloat(sig.max_shares) : 0;
             const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
+            const originalMaxShares = (sig.max_shares && parseFloat(sig.max_shares) > 0)
+              ? parseFloat(sig.max_shares)
+              : (entryPrice > 0 ? (originalAllocated / entryPrice) : 0);
             
             const sharesSold = Math.round(originalMaxShares * partialFraction * 10000) / 10000;
             const dollarsSold = originalAllocated * partialFraction;
@@ -598,8 +600,10 @@ export async function evaluate_open_positions() {
             }
           } else {
             // Retrieve current allocation from active signals row
-            const originalMaxShares = sig.max_shares ? parseFloat(sig.max_shares) : 0;
             const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
+            const originalMaxShares = (sig.max_shares && parseFloat(sig.max_shares) > 0)
+              ? parseFloat(sig.max_shares)
+              : (entryPrice > 0 ? (originalAllocated / entryPrice) : 0);
             
             // Full exit — update signals row and signals_history row
             const updatePayload: any = {

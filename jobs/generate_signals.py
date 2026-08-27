@@ -714,14 +714,14 @@ def main():
 
         final_signals = deduplicate_by_ticker(all_signals)
         
-        # High-Win-Probability Filter: Require composite_score >= 80.0 (Strong Buy) for top recommendations
-        logger.info("[QUALITY GATE] Filtering signals to high-confidence setups (composite_score >= 80.0)...")
-        strict_signals = [s for s in final_signals if float(s.get("composite_score", 0.0)) >= 80.0]
+        # High-Win-Probability Filter: Require Strong Buy or Buy tier for top recommendations
+        logger.info("[QUALITY GATE] Filtering signals to high-confidence setups (Strong Buy and Buy only)...")
+        strict_signals = [s for s in final_signals if s.get("tier_label") in ("Strong Buy", "Buy")]
         
         if strict_signals:
             final_signals = strict_signals
         else:
-            logger.info("[QUALITY GATE] No setups met score >= 80.0; recommending NOTHING tonight.")
+            logger.info("[QUALITY GATE] No setups met Strong Buy or Buy tier; recommending NOTHING tonight.")
             final_signals = []
 
         final_signals.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
@@ -960,6 +960,10 @@ def main():
                 sig["tier_label"] = "Watch"
             else:
                 sig["tier_label"] = "Speculative"
+
+            if sig["tier_label"] not in ("Strong Buy", "Buy"):
+                logger.info(f"[TIER FILTER] Skipping {sig['ticker']} as it is tier {sig['tier_label']} (only Strong Buy and Buy allowed)")
+                continue
 
             atr = float(sig.get("atr_14", 0.0))
 

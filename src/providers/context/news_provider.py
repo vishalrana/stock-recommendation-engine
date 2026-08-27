@@ -17,22 +17,36 @@ class FinBERTNewsProvider:
     
     def fetch_and_score(self, ticker: str) -> NewsContext:
         try:
-            import feedparser
-            # Clean ticker (e.g. remove exchange suffix if present)
-            clean_ticker = ticker.split('.')[0]
-            rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock&hl=en-US&gl=US&ceid=US:en"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            response = requests.get(rss_url, headers=headers, timeout=10)
-            feed = feedparser.parse(response.text)
-            
+            titles = []
+            # 1. Primary source: yfinance native news
+            try:
+                import yfinance as yf
+                t = yf.Ticker(ticker)
+                for n in (t.news or []):
+                    title = n.get("title") or (n.get("content", {}).get("title") if isinstance(n.get("content"), dict) else None)
+                    if title:
+                        titles.append(title)
+            except Exception:
+                pass
+
+            # 2. Fallback: Google News RSS
+            if not titles:
+                import feedparser
+                clean_ticker = ticker.split('.')[0]
+                rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                response = requests.get(rss_url, headers=headers, timeout=10)
+                feed = feedparser.parse(response.text)
+                for entry in feed.entries[:10]:
+                    if entry.title:
+                        titles.append(entry.title)
+
             sentiments = []
             # Limit to first 10 articles to save compute
-            for entry in feed.entries[:10]:
-                if entry.title:
-                    # Only run FinBERT if we have articles
-                    self._load_model()
-                    result = self.sentiment_pipeline(entry.title)[0]
-                    # Map label to score (handle positive, negative, neutral)
+            if titles:
+                self._load_model()
+                for title in titles[:10]:
+                    result = self.sentiment_pipeline(title)[0]
                     label = result['label'].lower()
                     if label == 'positive':
                         score = result['score']

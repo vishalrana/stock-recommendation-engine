@@ -10,21 +10,73 @@ export const revalidate = 0;
 async function getRecommendations() {
   const supabase = getSupabase();
   
-  // ponytail: recommendations view already unions active signals + closed history
-  const { data, error } = await supabase
-    .from('recommendations')
-    .select('*');
+  // 1. Fetch active signals (both 'open' and 'pending') directly from signals table
+  const { data: activeSignals, error: activeError } = await supabase
+    .from('signals')
+    .select('*')
+    .in('status', ['open', 'pending']);
 
-  if (error) {
-    console.error('Error fetching recommendations:', error);
-    throw new Error(error.message);
+  if (activeError) {
+    console.error('Error fetching active signals:', activeError);
   }
 
-  const result = (data || []).map((r: any) => ({
-    ...r,
-    status: r.status || 'open',
-    entry_date: r.entry_date || r.scan_date,
-  }));
+  // 2. Fetch closed trades from signals_history table
+  const { data: closedHistory, error: historyError } = await supabase
+    .from('signals_history')
+    .select('*')
+    .neq('outcome', 'open');
+
+  if (historyError) {
+    console.error('Error fetching closed history:', historyError);
+  }
+
+  // Also fetch ticker metrics to attach past win rates and trade counts
+  const { data: metricsData } = await supabase.from('ticker_metrics').select('*');
+  const metricsMap = new Map((metricsData || []).map((m: any) => [m.ticker?.toUpperCase(), m]));
+
+  const activeFormatted = (activeSignals || []).map((s: any) => {
+    const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
+    return {
+      ...s,
+      status: s.status || 'pending',
+      entry_date: s.entry_date || s.scan_date,
+      past_win_rate: m.win_rate ?? 0,
+      total_trades: (m.wins ?? 0) + (m.losses ?? 0),
+      expectancy_pct: m.expectancy_pct ?? 0,
+      wins: m.wins ?? 0,
+      losses: m.losses ?? 0,
+    };
+  });
+
+  const closedFormatted = (closedHistory || []).map((h: any) => {
+    const m = metricsMap.get(h.ticker?.replace(' (P)', '').toUpperCase()) || {};
+    let status = h.outcome;
+    if (['stopped', 'stop_loss', 'hit_t3', 'hit_t2', 'hit_t1', 'closed'].includes(h.outcome)) {
+      status = 'closed';
+    }
+    let reason = 'Closed';
+    if (h.outcome === 'stopped') reason = 'Stop loss hit';
+    else if (h.outcome === 'hit_t3') reason = 'Target 3 hit – full exit';
+    else if (h.outcome === 'hit_t2') reason = 'Target 2 hit – sell 30%';
+    else if (h.outcome === 'hit_t1') reason = 'Target 1 hit – sell 50%';
+
+    return {
+      ...h,
+      entry_date: h.scan_date,
+      exit_date: h.outcome_date,
+      status: status || 'closed',
+      sell_signal: true,
+      sell_signal_reason: reason,
+      sell_price: h.exit_price || h.price,
+      past_win_rate: m.win_rate ?? 0,
+      total_trades: (m.wins ?? 0) + (m.losses ?? 0),
+      expectancy_pct: m.expectancy_pct ?? 0,
+      wins: m.wins ?? 0,
+      losses: m.losses ?? 0,
+    };
+  });
+
+  const result = [...activeFormatted, ...closedFormatted];
 
   // Sort by scan_date descending
   result.sort((a: any, b: any) => {

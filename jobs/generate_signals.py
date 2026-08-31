@@ -40,6 +40,7 @@ from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
 from src.data.cache_manager import get_cache_manager
 from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
+from src.strategies.target_calculator import calculate_targets
 
 
 def get_cache_mode(args) -> str:
@@ -949,25 +950,42 @@ def main():
                 stop_loss = max_tight_stop
                 sig['stop_loss'] = stop_loss
 
-            # 2. Populate ATR-scaled Profit Targets for ALL strategies (No nullification)
-            if sig.get("target_1") is not None and float(sig["target_1"]) > entry_price:
-                target_1 = round(float(sig["target_1"]), 2)
-                target_2 = round(float(sig.get("target_2") or (entry_price * 1.12)), 2)
-                target_3 = round(float(sig.get("target_3") or (entry_price * 1.18)), 2)
-            else:
-                target_1 = round(entry_price + 1.5 * atr, 2) if atr > 0 else round(entry_price * 1.07, 2)
-                target_2 = round(entry_price + 2.5 * atr, 2) if atr > 0 else round(entry_price * 1.12, 2)
-                target_3 = round(entry_price + 3.5 * atr, 2) if atr > 0 else round(entry_price * 1.18, 2)
+            # 2. Strategy-Specific ATR Targets with Reach Probability Filtering
+            ticker_df = None
+            if cache_manager:
+                try:
+                    ticker_df = cache_manager.get_ticker_history(ticker, preload_start_str, preload_end_str)
+                except Exception as e:
+                    logger.debug("Could not fetch ticker history for %s: %s", ticker, e)
 
-            sig["target_1"] = target_1
-            sig["target_2"] = target_2
-            sig["target_3"] = target_3
-            sig["target_1_pct"] = round((target_1 / entry_price - 1) * 100, 1)
-            sig["target_2_pct"] = round((target_2 / entry_price - 1) * 100, 1)
-            sig["target_3_pct"] = round((target_3 / entry_price - 1) * 100, 1)
-            risk = entry_price - stop_loss
-            reward = (target_1 - entry_price) * 0.5 + (target_2 - entry_price) * 0.3 + (target_3 - entry_price) * 0.2
-            sig["weighted_rr"] = round(reward / risk, 2) if risk > 0 else 0.0
+            calc_res = calculate_targets(
+                ticker=ticker,
+                entry_price=entry_price,
+                atr_14=atr,
+                stop_loss=stop_loss,
+                strategy_name=strategy_name,
+                price_df=ticker_df,
+            )
+
+            if not calc_res.is_valid:
+                logger.info(f"[REACH PROB FILTER] Dropping {ticker} ({strategy_name}): {calc_res.rejection_reason}")
+                continue
+
+            sig["target_1"] = calc_res.target_1
+            sig["target_2"] = calc_res.target_2
+            sig["target_3"] = calc_res.target_3
+            sig["target_1_atr"] = calc_res.target_1_atr
+            sig["target_2_atr"] = calc_res.target_2_atr
+            sig["target_3_atr"] = calc_res.target_3_atr
+            sig["target_1_pct"] = calc_res.target_1_pct
+            sig["target_2_pct"] = calc_res.target_2_pct
+            sig["target_3_pct"] = calc_res.target_3_pct
+            sig["reach_prob_t1"] = calc_res.reach_prob_t1
+            sig["reach_prob_t2"] = calc_res.reach_prob_t2
+            sig["reach_prob_t3"] = calc_res.reach_prob_t3
+            sig["scale_out_weights"] = calc_res.scale_out_weights
+            sig["weighted_rr"] = calc_res.weighted_rr_honest
+            sig["weighted_rr_honest"] = calc_res.weighted_rr_honest
 
             # TASK 2 & 3: Sizing adjustments based on VIX override and drawdown controls
             win_p = 0.35
@@ -977,17 +995,12 @@ def main():
             elif score >= 60.0: win_p = 0.52
             elif score >= 50.0: win_p = 0.45
             
-            rr_val = sig.get('weighted_rr') if sig.get('weighted_rr', 0) > 0 else 2.0
+            rr_val = calc_res.weighted_rr_honest if calc_res.weighted_rr_honest > 0 else 2.0
             kelly_f = win_p - (1.0 - win_p) / rr_val
             half_kelly = max(0.0, kelly_f / 2.0)
             
             # Pre-calculate half kelly fraction
             sig["half_kelly_fraction"] = half_kelly * risk_multiplier * size_mult
-            
-            # Store temporary attributes needed for final build
-            sig["target_1"] = target_1
-            sig["target_2"] = target_2
-            sig["target_3"] = target_3
             
             candidates_to_size.append(sig)
 
@@ -1030,13 +1043,21 @@ def main():
                     "strategy": sig["strategy"],
                     "regime": regime_str,
                     "is_fallback": bool(sig.get("is_fallback", False)),
-                    "target_1": sig["target_1"],
-                    "target_2": sig["target_2"],
-                    "target_3": sig["target_3"],
+                    "target_1": sig.get("target_1"),
+                    "target_2": sig.get("target_2"),
+                    "target_3": sig.get("target_3"),
+                    "target_1_atr": sig.get("target_1_atr"),
+                    "target_2_atr": sig.get("target_2_atr"),
+                    "target_3_atr": sig.get("target_3_atr"),
                     "target_1_pct": sig.get("target_1_pct"),
                     "target_2_pct": sig.get("target_2_pct"),
                     "target_3_pct": sig.get("target_3_pct"),
+                    "reach_prob_t1": sig.get("reach_prob_t1"),
+                    "reach_prob_t2": sig.get("reach_prob_t2"),
+                    "reach_prob_t3": sig.get("reach_prob_t3"),
+                    "scale_out_weights": sig.get("scale_out_weights", "50/30/20"),
                     "weighted_rr": sig.get("weighted_rr"),
+                    "weighted_rr_honest": sig.get("weighted_rr_honest"),
                     "position_sizing": position_sizing_str,
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig["strategy"],
@@ -1126,10 +1147,18 @@ def main():
                         "target_1": sig.get("target_1"),
                         "target_2": sig.get("target_2"),
                         "target_3": sig.get("target_3"),
+                        "target_1_atr": sig.get("target_1_atr"),
+                        "target_2_atr": sig.get("target_2_atr"),
+                        "target_3_atr": sig.get("target_3_atr"),
                         "target_1_pct": sig.get("target_1_pct"),
                         "target_2_pct": sig.get("target_2_pct"),
                         "target_3_pct": sig.get("target_3_pct"),
+                        "reach_prob_t1": sig.get("reach_prob_t1"),
+                        "reach_prob_t2": sig.get("reach_prob_t2"),
+                        "reach_prob_t3": sig.get("reach_prob_t3"),
+                        "scale_out_weights": sig.get("scale_out_weights", "50/30/20"),
                         "weighted_rr": sig.get("weighted_rr"),
+                        "weighted_rr_honest": sig.get("weighted_rr_honest"),
                         "position_sizing": sig.get("position_sizing", "50/30/20"),
                         "narrative": sig.get("narrative"),
                         "strategy_name": sig.get("strategy_name"),
@@ -1143,10 +1172,28 @@ def main():
                         "max_shares": sig.get("max_shares"),
                     })
                 
-                supabase.table("signals_history").upsert(
-                    history_rows,
-                    on_conflict="scan_date,ticker"
-                ).execute()
+                # Attempt insertion with full schema; fall back to base columns if DB migration is pending
+                new_cols = ("target_1_atr", "target_2_atr", "target_3_atr", "reach_prob_t1", "reach_prob_t2", "reach_prob_t3", "scale_out_weights", "weighted_rr_honest")
+                try:
+                    supabase.table("signals").insert(ranked_signals).execute()
+                except Exception as sig_err:
+                    if any(col in str(sig_err) for col in new_cols) or "42703" in str(sig_err):
+                        logger.warning("Pending DB schema migration detected for 'signals'. Stripping new columns for insertion.")
+                        stripped_signals = [{k: v for k, v in row.items() if k not in new_cols} for row in ranked_signals]
+                        supabase.table("signals").insert(stripped_signals).execute()
+                    else:
+                        raise sig_err
+
+                try:
+                    supabase.table("signals_history").upsert(history_rows, on_conflict="scan_date,ticker").execute()
+                except Exception as hist_err:
+                    if any(col in str(hist_err) for col in new_cols) or "42703" in str(hist_err):
+                        logger.warning("Pending DB schema migration detected for 'signals_history'. Stripping new columns for upsert.")
+                        stripped_history = [{k: v for k, v in row.items() if k not in new_cols} for row in history_rows]
+                        supabase.table("signals_history").upsert(stripped_history, on_conflict="scan_date,ticker").execute()
+                    else:
+                        raise hist_err
+
                 logger.info("Signals inserted and archived successfully.")
             else:
                 logger.info("No signals to insert.")

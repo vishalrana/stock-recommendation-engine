@@ -927,40 +927,7 @@ def main():
             stop_loss = float(sig["stop_loss"])
             strategy_name = sig["strategy"]
 
-            # Re-evaluate tier label based on the actual final composite score and metrics
-            score = float(sig.get("composite_score", 0.0))
-            # TASK 4: Regime-Aware Tier 1 Threshold
-            TIER1_THRESHOLDS = {
-                "bull":     80,
-                "sideways": 75,
-                "bear":     75,   # also require ctx_score > 50
-            }
-            current_regime = regime_str.lower()
-            threshold = TIER1_THRESHOLDS.get(current_regime, 75)
-            ctx_score = float(sig.get("context_score", 0.0))
-            
-            if current_regime == "bear":
-                tier1_pass = (score >= threshold) and (ctx_score > 50.0)
-            else:
-                tier1_pass = score >= threshold
-
-            exp = float(sig.get("expectancy_pct") or 0.0)
-            wr = float(sig.get("past_win_rate") or sig.get("win_rate") or 0.0)
-            trades = int(sig.get("total_trades") or 0)
-
-            is_t1 = tier1_pass and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
-            is_t2 = (score >= 50.0) and (exp >= 0.0) and (wr >= 25.0) and (trades >= 10)
-            is_t3 = (score >= 40.0) and (exp >= -2.0)
-
-            if is_t1:
-                sig["tier_label"] = "Strong Buy"
-            elif is_t2:
-                sig["tier_label"] = "Buy"
-            elif is_t3:
-                sig["tier_label"] = "Watch"
-            else:
-                sig["tier_label"] = "Speculative"
-
+            # ponytail: tier_label already set by quality gate (line 719) — no re-tiering needed
             if sig["tier_label"] not in ("Strong Buy", "Buy"):
                 logger.info(f"[TIER FILTER] Skipping {sig['ticker']} as it is tier {sig['tier_label']} (only Strong Buy and Buy allowed)")
                 continue

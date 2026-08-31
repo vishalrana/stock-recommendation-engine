@@ -117,6 +117,10 @@ class CacheManager:
     def save_data_for_date(self, date_str: str, df: pd.DataFrame) -> None:
         """Save MultiIndex DataFrame for a specific date."""
         cache_path = self._get_cache_path(date_str)
+        # Validation: do not write empty or mostly-null data
+        if df.empty or "CLOSE" not in df.columns or df["CLOSE"].isna().mean() > 0.5:
+            logger.warning(f"Rejecting save for {date_str}: >50% NaN values in CLOSE")
+            return
         try:
             df.to_parquet(cache_path, engine="pyarrow")
         except Exception as e:
@@ -242,6 +246,10 @@ class CacheManager:
                 file_dt = pd.to_datetime(bname)
                 if start_dt <= file_dt <= end_dt:
                     df = pd.read_parquet(fpath)
+                    # Skip corrupt or all-NaN files
+                    if "CLOSE" in df.columns and df["CLOSE"].isna().mean() > 0.5:
+                        logger.warning(f"Skipping corrupt daily file {fpath} (>50% NaNs in CLOSE)")
+                        continue
                     loaded_dfs.append(df)
             except Exception as e:
                 logger.warning(f"Skipping invalid/corrupt daily file {fpath}: {e}")

@@ -927,6 +927,8 @@ def main():
             stop_loss = float(sig["stop_loss"])
             strategy_name = sig["strategy"]
 
+            score = float(sig.get("composite_score", sig.get("score", 0.0)))
+
             # ponytail: tier_label already set by quality gate (line 719) — no re-tiering needed
             if sig["tier_label"] not in ("Strong Buy", "Buy"):
                 logger.info(f"[TIER FILTER] Skipping {sig['ticker']} as it is tier {sig['tier_label']} (only Strong Buy and Buy allowed)")

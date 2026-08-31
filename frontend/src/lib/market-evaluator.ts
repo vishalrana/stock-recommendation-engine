@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { parseScaleOut } from './position-utils';
 
 // Market Holiday List 2025-2027
 const MARKET_HOLIDAYS = new Set([
@@ -469,6 +470,8 @@ export async function evaluate_open_positions() {
         const t3 = sig.target_3 ? parseFloat(sig.target_3) : null;
         const hasTargets = t1 !== null;
         
+        const [w1, w2, w3] = parseScaleOut(sig.scale_out_weights);
+        
         let sellTriggered = false;
         let isPartialExit = false;
         let partialFraction = 0.0;
@@ -480,35 +483,35 @@ export async function evaluate_open_positions() {
         
         if (hasTargets) {
           // Category 1: Targets-based scale outs
-          if (livePrice >= (t3 || 999999)) {
+          if (t3 !== null && livePrice >= t3) {
             sellTriggered = true;
             reason = 'Target 3 hit – full exit';
             status = 'closed';
             exitOutcome = 'hit_t3';
-            exitPrice = t3 || livePrice;
-          } else if (livePrice >= (t2 || 999999)) {
+            exitPrice = t3;
+          } else if (t2 !== null && livePrice >= t2) {
             // Check if T2 was already processed to avoid repeat triggers
             if (!sig.sell_signal_reason?.includes('Target 2')) {
               sellTriggered = true;
               isPartialExit = true;
-              partialFraction = 0.30;
-              reason = 'Target 2 hit – sell 30%';
-              partialReason = 'Target 2 hit (Partial)';
+              partialFraction = w2 / 100.0;
+              reason = `Target 2 hit – sell ${w2}%`;
+              partialReason = `Target 2 hit (Partial ${w2}%)`;
               status = 'open';
               exitOutcome = 'hit_t2';
-              exitPrice = t2 || livePrice;
+              exitPrice = t2;
             }
-          } else if (livePrice >= (t1 || 999999)) {
+          } else if (t1 !== null && livePrice >= t1) {
             // Check if T1 was already processed to avoid repeat triggers
             if (!sig.sell_signal_reason?.includes('Target 1')) {
               sellTriggered = true;
               isPartialExit = true;
-              partialFraction = 0.50;
-              reason = 'Target 1 hit – sell 50%';
-              partialReason = 'Target 1 hit (Partial)';
+              partialFraction = w1 / 100.0;
+              reason = `Target 1 hit – sell ${w1}%`;
+              partialReason = `Target 1 hit (Partial ${w1}%)`;
               status = 'open';
               exitOutcome = 'hit_t1';
-              exitPrice = t1 || livePrice;
+              exitPrice = t1;
             }
           } else if (livePrice <= stopLoss) {
             sellTriggered = true;
@@ -533,14 +536,20 @@ export async function evaluate_open_positions() {
           console.log(`[MONITOR ALERT] Triggered for ${ticker}: ${reason} at ${exitPrice}`);
           
           if (isPartialExit) {
-            // ponytail: Position Lot Splitting logic
+            // Position Lot Splitting logic using dynamic scale-out fractions
             const originalAllocated = sig.allocated_dollars ? parseFloat(sig.allocated_dollars) : 0.0;
             const originalMaxShares = (sig.max_shares && parseFloat(sig.max_shares) > 0)
               ? parseFloat(sig.max_shares)
               : (entryPrice > 0 ? (originalAllocated / entryPrice) : 0);
             
-            const sharesSold = Math.round(originalMaxShares * partialFraction * 10000) / 10000;
-            const dollarsSold = originalAllocated * partialFraction;
+            let sharesSold = Math.floor(originalMaxShares * partialFraction);
+            if (originalMaxShares > 0 && originalMaxShares < 1) {
+              sharesSold = Math.round(originalMaxShares * partialFraction * 10000) / 10000;
+            } else if (sharesSold === 0 && originalMaxShares >= 1 && partialFraction > 0) {
+              sharesSold = 1;
+            }
+
+            const dollarsSold = Math.round(originalAllocated * partialFraction * 100) / 100;
             
             if (sharesSold > 0 && dollarsSold > 0) {
               const returnPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;

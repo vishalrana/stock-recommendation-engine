@@ -30,10 +30,18 @@ export interface Recommendation {
   target_1?: number | null;
   target_2?: number | null;
   target_3?: number | null;
+  target_1_atr?: number | null;
+  target_2_atr?: number | null;
+  target_3_atr?: number | null;
   target_1_pct?: number | null;
   target_2_pct?: number | null;
   target_3_pct?: number | null;
+  reach_prob_t1?: number | null;
+  reach_prob_t2?: number | null;
+  reach_prob_t3?: number | null;
+  scale_out_weights?: string | null;
   weighted_rr?: number | null;
+  weighted_rr_honest?: number | null;
   position_sizing?: string | null;
   allocated_dollars?: number | null;
   max_shares?: number | null;
@@ -52,6 +60,13 @@ export interface Recommendation {
   context_earnings?: number | null;
   context_news?: number | null;
   context_fundamental?: number | null;
+  exit_dollars_t1?: number | null;
+  exit_dollars_t2?: number | null;
+  exit_dollars_t3?: number | null;
+  exit_price_t1?: number | null;
+  exit_price_t2?: number | null;
+  exit_price_t3?: number | null;
+  unrealized_pnl?: number | null;
 }
 
 export interface ScanLog {

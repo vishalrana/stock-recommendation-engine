@@ -15,6 +15,8 @@ import {
 import { Recommendation, ScanLog } from '../types/database';
 import { ArrowUpDown, ArrowUp, ArrowDown, Search, Info, RefreshCw } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import SignalExitPlan from './SignalExitPlan';
+import { getDollarExits } from '../lib/position-utils';
 
 function getDaysHeld(entryDateStr: string | null | undefined, exitDateStr: string | null | undefined): string {
   if (!entryDateStr) return '-';
@@ -109,7 +111,7 @@ function RegimeBanner({ scanLog }: { scanLog: ScanLog | null }) {
   );
 }
 
-function ExpandableDetails({ row }: { row: any }) {
+function ExpandableDetails({ row, latestPortfolioValue }: { row: any; latestPortfolioValue?: number }) {
   const ticker = row.original.ticker;
   const company = row.original.company_name;
   const industry = row.original.industry;
@@ -133,8 +135,11 @@ function ExpandableDetails({ row }: { row: any }) {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left column: Metadata & Context */}
+        {/* Left column: Exit Plan, Metadata & Context */}
         <div className="space-y-4 lg:col-span-1">
+          {/* Visual Dollar Exit Plan */}
+          <SignalExitPlan recommendation={row.original} latestPortfolioValue={latestPortfolioValue} />
+
           {/* Context Score Breakdown */}
           <div className="bg-white p-4 border border-gray-200 rounded-xl shadow-sm">
             <h5 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3">📋 Context Breakdown</h5>
@@ -183,8 +188,41 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
   
   const router = useRouter();
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isRecalculating, setIsRecalculating] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<{ text: string; isError: boolean } | null>(null);
+
+  // Recalculate and reconcile all active/pending signals
+  const handleRecalculateAll = async () => {
+    setIsRecalculating(true);
+    setSyncMessage(null);
+    try {
+      const res = await fetch('/api/signals/recalculate', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        const s = data.summary;
+        const msg = `${s.updatedCount} signals updated: ${s.openCount} open, ${s.hitT1Count} hit T1, ${s.hitT2Count} hit T2, ${s.hitT3Count} hit T3, ${s.stoppedCount} stopped.`;
+        setSyncMessage({
+          text: msg,
+          isError: false,
+        });
+        router.refresh();
+      } else {
+        setSyncMessage({
+          text: `Recalculation error: ${data.error || 'Failed'}`,
+          isError: true,
+        });
+      }
+    } catch (e: any) {
+      setSyncMessage({
+        text: `Recalculation failed: ${e.message || e}`,
+        isError: true,
+      });
+    } finally {
+      setIsRecalculating(false);
+      setTimeout(() => setSyncMessage(null), 8000);
+    }
+  };
 
   // Centralized evaluation loop HTTP trigger
   const handleSyncMarket = async () => {
@@ -411,6 +449,36 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
         size: 90,
       },
       {
+        id: 'exit_dollars',
+        header: 'Exit $ (Scale)',
+        cell: ({ row }) => {
+          const rec = row.original;
+          const alloc = rec.allocated_dollars 
+            ? Number(rec.allocated_dollars) 
+            : 500;
+          const breakdown = getDollarExits(alloc, rec.scale_out_weights, {
+            target_1: rec.target_1,
+            target_2: rec.target_2,
+            target_3: rec.target_3,
+          });
+
+          return (
+            <div className="flex flex-col gap-0.5 font-mono text-[10px]">
+              <span className="text-emerald-700 font-semibold">T1: ${breakdown.t1.dollars.toFixed(0)}</span>
+              {!breakdown.isT2Removed ? (
+                <span className="text-blue-700 font-semibold">T2: ${breakdown.t2.dollars.toFixed(0)}</span>
+              ) : null}
+              {!breakdown.isT3Removed && breakdown.t3.dollars > 0 ? (
+                <span className="text-purple-700 font-bold">T3: ${breakdown.t3.dollars.toFixed(0)}</span>
+              ) : breakdown.runner.dollars > 0 ? (
+                <span className="text-slate-600 font-medium">Runner: ${breakdown.runner.dollars.toFixed(0)}</span>
+              ) : null}
+            </div>
+          );
+        },
+        size: 110,
+      },
+      {
         id: 'pnl_pct',
         accessorFn: (row) => {
           const entry = row.entry_price;
@@ -585,6 +653,14 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
                 </span>
               )}
               <button
+                onClick={handleRecalculateAll}
+                disabled={isRecalculating}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-blue-200 rounded-lg text-sm font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 text-blue-600 ${isRecalculating ? 'animate-spin' : ''}`} />
+                <span>{isRecalculating ? 'Recalculating...' : '🔄 Recalculate All'}</span>
+              </button>
+              <button
                 onClick={handleSyncMarket}
                 disabled={isRefreshing}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 bg-white hover:bg-gray-50 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
@@ -628,11 +704,11 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
                             {header.column.getCanSort() && (
                               <span>
                                 {sortDirection === 'asc' ? (
-                                  <ArrowUp className="w-3.5 h-3.5 text-blue-600" />
+                                   <ArrowUp className="w-3.5 h-3.5 text-blue-600" />
                                 ) : sortDirection === 'desc' ? (
-                                  <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
+                                   <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
                                 ) : (
-                                  <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />
+                                   <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />
                                 )}
                               </span>
                             )}
@@ -663,7 +739,7 @@ export default function RecommendationsTable({ data, scanLog, latestPortfolioVal
                     {row.getIsExpanded() && (
                       <tr className="bg-gray-50/30">
                         <td colSpan={row.getVisibleCells().length} className="px-0 py-0">
-                          <ExpandableDetails row={row} />
+                          <ExpandableDetails row={row} latestPortfolioValue={latestPortfolioValue} />
                         </td>
                       </tr>
                     )}

@@ -15,19 +15,18 @@ export default function PortfolioSummary({ latestPortfolioValue, openPositions }
   for (const pos of openPositions) {
     const entry = pos.entry_price ? Number(pos.entry_price) : 0;
     const price = pos.price ? Number(pos.price) : 0;
+    const alloc = pos.allocated_dollars ? Number(pos.allocated_dollars) : 0;
     
-    if (entry > 0 && price > 0) {
+    // Strictly isolate P&L to positions with real allocated capital (allocated_dollars > 0)
+    if (entry > 0 && price > 0 && alloc > 0) {
       const returnPct = ((price - entry) / entry) * 100;
       const shares = pos.max_shares ? Number(pos.max_shares) : null;
-      const alloc = pos.allocated_dollars ? Number(pos.allocated_dollars) : null;
       
       let unrealizedPnlDollars = 0;
       if (shares && shares > 0) {
         unrealizedPnlDollars = (price - entry) * shares;
-      } else if (alloc && alloc > 0) {
-        unrealizedPnlDollars = alloc * (returnPct / 100);
       } else {
-        unrealizedPnlDollars = (0.05 * latestPortfolioValue) * (returnPct / 100);
+        unrealizedPnlDollars = alloc * (returnPct / 100);
       }
       totalUnrealizedPnlDollars += unrealizedPnlDollars;
     }
@@ -89,7 +88,9 @@ export default function PortfolioSummary({ latestPortfolioValue, openPositions }
         </div>
         <div>
           <span className="text-slate-500 block font-medium">Active Allocations</span>
-          <span className="text-slate-300 font-mono font-bold">{openPositions.length} positions</span>
+          <span className="text-slate-300 font-mono font-bold">
+            {openPositions.filter(p => (Number(p.allocated_dollars) || 0) > 0).length} positions
+          </span>
         </div>
       </div>
     </div>

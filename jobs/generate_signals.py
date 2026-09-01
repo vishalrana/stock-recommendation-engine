@@ -1108,7 +1108,6 @@ def main():
         try:
             if ranked_signals:
                 logger.info("Inserting %d ranked signals...", len(ranked_signals))
-                supabase.table("signals").insert(ranked_signals).execute()
                 
                 # Also archive new signals to signals_history as open outcomes
                 history_rows = []
@@ -1169,7 +1168,7 @@ def main():
                         "context_fundamental": float(sig.get("context_fundamental") or 0.0),
                         "context_news": float(sig.get("context_news") or 0.0),
                         "allocated_dollars": sig.get("allocated_dollars"),
-                        "max_shares": sig.get("max_shares"),
+                        "max_shares": int(sig.get("max_shares", 0)) if sig.get("max_shares") is not None else None,
                     })
                 
                 # Attempt insertion with full schema; fall back to base columns if DB migration is pending
@@ -1177,9 +1176,9 @@ def main():
                 try:
                     supabase.table("signals").insert(ranked_signals).execute()
                 except Exception as sig_err:
-                    if any(col in str(sig_err) for col in new_cols) or "42703" in str(sig_err):
+                    if any(col in str(sig_err) for col in new_cols) or "42703" in str(sig_err) or "PGRST204" in str(sig_err):
                         logger.warning("Pending DB schema migration detected for 'signals'. Stripping new columns for insertion.")
-                        stripped_signals = [{k: v for k, v in row.items() if k not in new_cols} for row in ranked_signals]
+                        stripped_signals = [{k: (int(v) if k == "max_shares" and v is not None else v) for k, v in row.items() if k not in new_cols} for row in ranked_signals]
                         supabase.table("signals").insert(stripped_signals).execute()
                     else:
                         raise sig_err
@@ -1187,9 +1186,9 @@ def main():
                 try:
                     supabase.table("signals_history").upsert(history_rows, on_conflict="scan_date,ticker").execute()
                 except Exception as hist_err:
-                    if any(col in str(hist_err) for col in new_cols) or "42703" in str(hist_err):
+                    if any(col in str(hist_err) for col in new_cols) or "42703" in str(hist_err) or "PGRST204" in str(hist_err):
                         logger.warning("Pending DB schema migration detected for 'signals_history'. Stripping new columns for upsert.")
-                        stripped_history = [{k: v for k, v in row.items() if k not in new_cols} for row in history_rows]
+                        stripped_history = [{k: (int(v) if k == "max_shares" and v is not None else v) for k, v in row.items() if k not in new_cols} for row in history_rows]
                         supabase.table("signals_history").upsert(stripped_history, on_conflict="scan_date,ticker").execute()
                     else:
                         raise hist_err

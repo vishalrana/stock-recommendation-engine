@@ -4,8 +4,8 @@
 > **Target Audience**: Quantitative Developers, Trading Systems Architects, and Large Language Models (LLMs)  
 > **System Classification**: Multi-Strategy Systematic Equity Momentum & Mean-Reversion CTA Engine  
 > **Primary Asset Universe**: S&P 500 (~502 constituents) + Selected Sector ETFs (~15 tickers)  
-> **Version**: 2.1 (Post-Target Refactor & Live Recalculation Engine)  
-> **Last Updated**: August 31, 2026  
+> **Version**: 2.2 (Post-Target Refactor, Live Recalculation Engine & Split Dashboard Architecture)  
+> **Last Updated**: September 1, 2026  
 
 ---
 
@@ -21,549 +21,588 @@
 9. [Risk Management, Sizing & Capital Allocation Math](#9-risk-management-sizing--capital-allocation-math)
 10. [Trade Lifecycle & Live Recalculation Engine](#10-trade-lifecycle--live-recalculation-engine)
 11. [Dynamic Scale-Out Dollar Exit Breakdown](#11-dynamic-scale-out-dollar-exit-breakdown)
-12. [Real-World Production Calculation Walkthroughs](#12-real-world-production-calculation-walkthroughs)
-13. [Quantitative Expectancy & Probabilistic Edge Proof](#13-quantitative-expectancy--probabilistic-edge-proof)
-14. [Database Schema & Data Flow Specification](#14-database-schema--data-flow-specification)
-15. [Master Rules & Invariants for LLM Agents](#15-master-rules--invariants-for-llm-agents)
+12. [Split Dashboard: Portfolio View vs. Scan Log Architecture](#12-split-dashboard-portfolio-view-vs-scan-log-architecture)
+13. [Real-World Production Calculation Walkthroughs](#13-real-world-production-calculation-walkthroughs)
+14. [Quantitative Expectancy & Probabilistic Edge Proof](#14-quantitative-expectancy--probabilistic-edge-proof)
+15. [Database Schema & Data Flow Specification](#15-database-schema--data-flow-specification)
+16. [Master Rules & Invariants for LLM Agents](#16-master-rules--invariants-for-llm-agents)
 
 ---
 
 ## 1. Executive Summary & Operational Paradigm
 
-The **Stock Recommendation Engine** is an institutional-grade, nightly-cadence algorithmic trading system designed to identify high-probability swing and trend-following opportunities across US equities.
+The **Stock Recommendation Engine** is an institutional-grade, fully systematic swing trading engine. It operates on an **Asymmetric CTA Trend-Following & Momentum Paradigm**:
+- **Philosophy**: We do not predict market direction. We exploit structural market inefficiencies (post-earnings drift, 52-week breakout momentum, sector capital rotation, and oversold pullbacks in established secular trends).
+- **Core Edge**: Asymmetric pay-off profiles where $\text{Average Win} \ge 2.5 \times \text{Average Loss}$ with an empirical win rate $P_{\text{win}} \in [45\%, 65\%]$.
+- **Execution Mechanism**: Nightly batch scanning (via Python / Supabase / GitHub Actions) coupled with real-time intraday monitoring, trailing stop ratcheting, empirical reach-probability filtering, and live reconciliation in Next.js 16.
 
-### Core Mathematical Philosophy:
-1. **Asymmetric Payoff Structure (CTA Expectancy)**:
-   $$\text{Expectancy} = (P_{\text{win}} \times \overline{\text{Win}}) - (P_{\text{loss}} \times \overline{\text{Loss}})$$
-   The engine targets a **33%–40% win rate** with an average risk-to-reward ratio of **1:2.5 to 1:3.5**, producing strong positive mathematical expectancy without curve-fitting to fragile high-win-rate regimes.
-2. **Strict Capital Preservation**:
-   - Single-stock allocation is hard-capped at **5.0% of total portfolio value** at entry.
-   - Stop losses are strictly clamped between a **4.0% noise floor** and a **7.0% hard loss ceiling**.
-   - Position sizing utilizes **Half-Kelly Criterion** constrained by portfolio drawdown and VIX volatility.
-3. **Volatility-Aware Empirical Target Scaling**:
-   - Profit targets are scaled by strategy-specific Average True Range ($\text{ATR}_{14}$) multiples bounded by fixed minimum percentage floors.
-   - Each target level ($T_1, T_2, T_3$) must pass a 504-day sliding-window **Empirical Reach Probability ($P(\text{reach})$)** threshold.
-   - Unreachable "ghost targets" are pruned, preventing inflated R:R ratios from distorting Half-Kelly position sizing.
-4. **Dynamic Multi-Horizon Scale-Outs**:
-   - **Scale "50/30/20"**: Full 3-target tier (50% exit at $T_1$, 30% at $T_2$, 20% at $T_3$).
-   - **Scale "60/30/10"**: When $T_3$ is pruned (60% exit at $T_1$, 30% at $T_2$, 10% breakeven trailing runner).
-   - **Scale "70/30/0"**: When $T_2$ and $T_3$ are pruned (70% exit at $T_1$, 30% breakeven trailing runner).
+```
+                    ┌──────────────────────────────────────────────┐
+                    │               502 Ticker Universe            │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │   Macro Market Regime Detection (SPY + VIX)  │
+                    │       Bullish | Bearish | Sideways           │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │       6 Autonomous Quantitative Strategies   │
+                    │   (Trend, Breakout, Pullback, PEAD, XS, Sec) │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │   Strategy-Specific ATR Targets + Floors     │
+                    │      + 504-Day Reach Probability Filter      │
+                    │           (Ghost Target Pruning)             │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │     Multi-Factor Composite Scoring (0-100)   │
+                    │   (Momentum, Expectancy, WinRate, Context)   │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                                           ▼
+                    ┌──────────────────────────────────────────────┐
+                    │   Half-Kelly Sizing with Strict 5.0% Cap     │
+                    │    + Cash-Constrained Capital Normalization  │
+                    └──────────────────────┬───────────────────────┘
+                                           │
+                     ┌─────────────────────┴─────────────────────┐
+                     ▼                                           ▼
+      ┌─────────────────────────────┐             ┌─────────────────────────────┐
+      │  Portfolio View (Alloc > 0) │             │   Scan Log View (Alloc = 0) │
+      │   Active Funded Positions   │             │   Rejected / Filtered Log   │
+      │   (e.g., CRL: $30.42 alloc) │             │   (e.g., PLTR, DASH: $0)    │
+      └─────────────────────────────┘             └─────────────────────────────┘
+```
 
 ---
 
 ## 2. End-to-End System Architecture
 
+```mermaid
+graph TD
+    A[Data Ingestion: Tiingo / Finnhub / Yahoo] --> B[Local Parquet Cache: data_cache/]
+    B --> C[Market Context Analyzer: SPY, VIX, RSI Breadth]
+    C --> D[Strategy Pipeline: 6 Quant Models]
+    D --> E[Target Calculator: ATR Multiples + Fixed Floors]
+    E --> F[Reach Probability Engine: 504-Day Empirical Sliding Window]
+    F --> G[Composite Ranker: Honest R:R & Multi-Factor Scoring]
+    G --> H[Half-Kelly Position Sizer: 5% Single-Stock Cap]
+    H --> I[(Supabase PostgreSQL: signals, signals_history, portfolio_state)]
+    I --> J[Next.js 16 Dashboard: Portfolio View vs Scan Log View]
+    J --> K[Market Evaluator & Recalculate Engine: Gap Cancels, Target Steps, Breakeven Trailing]
 ```
-                                  [ MARKET DATA INGESTION ]
-                                              │
-                         ┌────────────────────┴────────────────────┐
-                         ▼                                         ▼
-             Yahoo Finance / Wikipedia                     Tiingo / Finnhub API
-             (Historical OHLCV + Tickers)                 (Live Quotes & Intraday)
-                         │                                         │
-                         ▼                                         ▼
-          ┌─────────────────────────────┐           ┌─────────────────────────────┐
-          │ data/cache/by_date/*.parquet│           │ frontend/api/signals/recalc │
-          └──────────────┬──────────────┘           └──────────────┬──────────────┘
-                         │                                         │
-                         ▼                                         │
-            [ JOBS: SIGNAL GENERATION ]                            │
-                         │                                         │
-           ┌─────────────┴─────────────┐                           │
-           ▼                           ▼                           │
-    Regime Classifier           Strategy Scanners                  │
-    (SPY vs 200 DMA + VIX)     (6 Active Strategies)               │
-           │                           │                           │
-           └─────────────┬─────────────┘                           │
-                         ▼                                         │
-            Quality Gate (Buy / Strong Buy)                        │
-                         │                                         │
-                         ▼                                         │
-            Context Enrichment Layer                               │
-            (Analyst + Earn + Fund + FinBERT)                      │
-                         │                                         │
-                         ▼                                         │
-          Strategy ATR Targets & Reach Prob                        │
-          (Prunes Ghost Targets & Computes Honest R:R)             │
-                         │                                         │
-                         ▼                                         │
-            Half-Kelly Position Sizing                             │
-            (5% Portfolio Cap + Cash Normalization)                │
-                         │                                         │
-                         ▼                                         │
-          ┌─────────────────────────────┐                          │
-          │  SUPABASE POSTGRESQL DB     │ ◄────────────────────────┘
-          │  - signals (open/pending)   │
-          │  - signals_history (closed) │
-          │  - portfolio_state          │
-          │  - scan_log                 │
-          └──────────────┬──────────────┘
-                         │
-                         ▼
-          [ FRONTEND: NEXT.JS 16 DASHBOARD ]
-          - Server Component Direct Queries
-          - Trade Lifecycle Evaluator (Morning Open & Scale-Out Exits)
-          - Live Recalculate & Reconcile Engine
-          - Dollar-Exit Breakdown & Exit Plan Visualizer
-```
+
+### Key Components
+1. **`jobs/generate_signals.py`**: Nightly pipeline that orchestrates universe fetching, indicators, strategies, reach probability pruning, Half-Kelly sizing, and database synchronization.
+2. **`src/strategies/target_calculator.py`**: Calculates strategy ATR multiples, enforces percentage floors, queries 504-day sliding reach probabilities, prunes unreachable targets, and calculates $R_{\text{honest}}$.
+3. **`src/ranker.py`**: Computes multi-factor composite scores (0–100) and applies regime-dependent weighting vectors.
+4. **`src/providers/context/`**: Multimodal contextual scoring engine (Analyst consensus, Earnings surprise, Fundamental health, FinBERT news sentiment).
+5. **`frontend/src/lib/position-utils.ts`**: Frontend math engine for scale-out weights, exact dollar-exit milestones, and share allocations.
+6. **`frontend/src/lib/database.ts`**: Isomorphic query functions (`fetchPortfolioSignals`, `fetchScanLogSignals`, `getRejectionReason`).
+7. **`frontend/src/app/api/signals/recalculate/route.ts`**: Real-time trade lifecycle reconciliation server route.
 
 ---
 
 ## 3. Data Ingestion & Storage Architecture
 
-### 3.1 Date-Partitioned Parquet Cache
-Market data is stored partitioned in `data/cache/by_date/{YYYY-MM-DD}.parquet`. Each file contains a MultiIndex DataFrame indexed by `(Ticker, Date)` containing:
-$$\text{Columns} = [\text{OPEN}, \text{HIGH}, \text{LOW}, \text{CLOSE}, \text{VOLUME}]$$
+### Primary Data Providers
+- **Tiingo IEX API**: Primary for real-time and end-of-day adjusted OHLCV quotes.
+- **Finnhub API**: Secondary for intraday quotes and analyst consensus data.
+- **Yahoo Finance API**: Tertiary fallback for historical quotes and supplementary market breadth indicators.
 
-### 3.2 Data Hygiene & Corruption Protection
-To prevent incomplete market snapshots from poisoning technical indicators:
-1. **Write-Time Validation**:
-   $$\text{Reject File if } \frac{\sum \text{is\_null}(\text{CLOSE})}{N_{\text{total}}} > 0.50$$
-2. **Preload-Time Validation**:
-   Files with $>50\%$ null values in `CLOSE` are skipped and logged during historical preloading.
+### Parquet Caching & Data Hygiene
+- Historical constituent daily bars are stored locally as compressed Apache Parquet files: `data_cache/{ticker}.parquet`.
+- **Hygiene & Validation Rules**:
+  - Parquet frames are verified for non-empty records and monotonically increasing timestamps.
+  - Zero, negative, and `NaN` prices are strictly rejected before persistence to prevent moving average corruption.
+  - Minimum lookback requirement: **504 trading days** (~2 full calendar years) to support empirical target reach probability calculations.
 
 ---
 
 ## 4. Macro Market Regime Detection
 
-Market state is evaluated nightly using SPY historical price vs its 200-day Simple Moving Average (DMA) and CBOE Volatility Index (VIX):
+Market Regime is evaluated on every scan to determine overall market risk posture and adjust composite weighting vectors.
 
+### Inputs:
+1. $P_{\text{SPY}}$: Current closing price of SPDR S&P 500 ETF Trust (SPY).
+2. $\text{SMA}_{50}(\text{SPY})$, $\text{SMA}_{200}(\text{SPY})$: 50-day and 200-day Simple Moving Averages.
+3. $\text{VIX}$: CBOE Volatility Index closing price.
+4. $\text{Breadth}_{\text{RSI}}$: Percentage of S&P 500 universe with $\text{RSI}_{14} > 50.0$.
+
+### Classification State Machine:
 $$\text{Regime} = \begin{cases} 
-\mathbf{BULL}, & \text{if } \text{Price}_{\text{SPY}} > \text{SMA}_{200}(\text{SPY}) \\ 
-\mathbf{BEAR}, & \text{if } \text{Price}_{\text{SPY}} \le \text{SMA}_{200}(\text{SPY}) 
+\mathbf{BULL}, & \text{if } P_{\text{SPY}} > \text{SMA}_{200}(\text{SPY}) \text{ and } \text{VIX} < 22.0 \text{ and } \text{Breadth}_{\text{RSI}} \ge 50\% \\ 
+\mathbf{BEAR}, & \text{if } P_{\text{SPY}} < \text{SMA}_{200}(\text{SPY}) \text{ or } \text{VIX} \ge 28.0 \\ 
+\mathbf{SIDEWAYS}, & \text{otherwise (e.g., } 22.0 \le \text{VIX} < 28.0 \text{ or mixed moving average alignment)} 
 \end{cases}$$
 
-### Volatility Modifier (VIX):
-- **VIX < 20 (Normal)**: $M_{\text{vix}} = 1.0\times$ sizing multiplier.
-- **20 ≤ VIX < 30 (Elevated)**: $M_{\text{vix}} = 0.8\times$ sizing multiplier.
-- **VIX ≥ 30 (High Risk)**: $M_{\text{vix}} = 0.5\times$ sizing multiplier, Mean Reversion disabled.
+### Composite Scoring Weight Vectors by Regime:
+| Factor Sub-Score | Bull Regime Weight ($W_{\text{bull}}$) | Sideways Regime Weight ($W_{\text{side}}$) | Bear Regime Weight ($W_{\text{bear}}$) |
+| :--- | :---: | :---: | :---: |
+| **Momentum** | **35%** ($0.35$) | **25%** ($0.25$) | **15%** ($0.15$) |
+| **Expectancy** | **25%** ($0.25$) | **30%** ($0.30$) | **35%** ($0.35$) |
+| **Past Win Rate** | **15%** ($0.15$) | **20%** ($0.20$) | **25%** ($0.25$) |
+| **Regime Alignment**| **15%** ($0.15$) | **15%** ($0.15$) | **15%** ($0.15$) |
+| **Context & NLP** | **10%** ($0.10$) | **10%** ($0.10$) | **10%** ($0.10$) |
 
 ---
 
 ## 5. Strategy Mathematical Specifications
 
-The engine runs **6 active strategies** in Bull regimes and **1 specialized strategy** in Bear regimes:
+The engine executes 6 distinct quantitative strategies. Each strategy enforces rigid mathematical entry conditions and custom initial stop-loss anchoring:
 
-| Strategy | Market Regime | Primary Indicators | Entry Trigger | Stop-Loss Calculation |
-| :--- | :--- | :--- | :--- | :--- |
-| **Pullback Recovery** | Bull / Sideways | RSI(14), 50 DMA, 200 DMA, ADX(14) | Close > 50 DMA, RSI was $\le 45$ in last 10 days, RSI crossing up | $\min(\text{Low}_{10}, \text{Entry} - 2.0 \times \text{ATR}_{14})$ |
-| **Trend Following** | Bull / Sideways | EMA(20), SMA(50), SMA(200), ADX(14) | Close > EMA(20) > SMA(50) > SMA(200), ADX > 25 | $\min(\text{Low}_{10}, \text{Entry} - 2.5 \times \text{ATR}_{14})$ |
-| **52-Week High Breakout** | Bull | 52-Week High, Volume, ADX(14) | Close within 3% of 52W High, Volume $> 1.5\times$ VolMA20 | $\min(\text{SMA}_{50} \times 0.97, \text{High}_{52\text{W}} \times 0.95)$ |
-| **Cross-Sectional Momentum**| Bull | 3-Month Return Rank, EMA(20) | Top 15% 3-month performance across universe, Close > EMA(20) | $\text{Entry} - 2.0 \times \text{ATR}_{14}$ |
-| **Sector Rotation** | Bull / Sideways | 1-Month vs 3-Month ETF Return | Top 3 momentum sector ETFs vs SPY | $\text{Entry} - 2.5 \times \text{ATR}_{14}$ |
-| **Post-Earnings Drift (PEAD)**| Bull / Sideways | Earnings Surprise %, Gap % | EPS Beat $> +5\%$, Gap Up $+2\%$ to $+8\%$, Volume $> 2\times$ | $\min(\text{SMA}_{50} \times 0.98, \text{GapLow} \times 1.02)$ |
-| **Mean Reversion** | Bear (Oversold) | RSI(14), Bollinger Bands (20, 2) | RSI $< 30$, Close $<$ Lower Bollinger Band | $\text{Entry} - 1.5 \times \text{ATR}_{14}$ |
+### 1. Trend Following (`trend_following`)
+- **Core Thesis**: Ride medium-to-long term momentum trends in institutional market leaders.
+- **Entry Rules**:
+  $$\text{Close} > \text{EMA}_{20} > \text{EMA}_{50} > \text{SMA}_{200} \quad \text{and} \quad \text{ADX}_{14} \ge 25.0 \quad \text{and} \quad \text{MACD}_{\text{hist}} > 0$$
+- **Stop Loss Calculation**:
+  $$\text{Stop}_{\text{raw}} = \min(\text{LowestLow}_{10}, P_{\text{entry}} - 2.5 \times \text{ATR}_{14})$$
+  $$\text{Stop}_{\text{final}} = \max(\text{Stop}_{\text{raw}}, P_{\text{entry}} \times 0.93) \quad \text{[Bounded by 7.0\% max loss]}$$
+
+### 2. 52-Week High Breakout (`week_52_high`)
+- **Core Thesis**: Exploits institutional anchor bias on 52-week highs (George & Hwang, 2004).
+- **Entry Rules**:
+  $$P_{\text{entry}} \ge 0.97 \times \text{High}_{252} \quad \text{and} \quad \text{Volume}_{\text{today}} \ge 1.5 \times \text{SMA}_{\text{Vol}, 20}$$
+- **Stop Loss Calculation**:
+  $$\text{Stop}_{\text{raw}} = \min(\text{SMA}_{50} \times 0.97, \text{High}_{252} \times 0.95, P_{\text{entry}} - 2.0 \times \text{ATR}_{14})$$
+  $$\text{Stop}_{\text{final}} = \max(\text{Stop}_{\text{raw}}, P_{\text{entry}} \times 0.93)$$
+
+### 3. Pullback Recovery (`pullback_recovery`)
+- **Core Thesis**: Buys temporary liquidations inside primary secular bull uptrends.
+- **Entry Rules**:
+  $$\text{Close} > \text{SMA}_{200} \quad \text{and} \quad \min_{t \in [t-10, t]}(\text{RSI}_{14}(t)) \le 35.0 \quad \text{and} \quad \text{RSI}_{14}(\text{today}) > 40.0$$
+- **Stop Loss Calculation**:
+  $$\text{Stop}_{\text{raw}} = \min(\text{LowestLow}_{10}, P_{\text{entry}} - 2.0 \times \text{ATR}_{14})$$
+  $$\text{Stop}_{\text{final}} = \max(\text{Stop}_{\text{raw}}, P_{\text{entry}} \times 0.93)$$
+
+### 4. Post-Earnings Announcement Drift (`pead`)
+- **Core Thesis**: Systematic capture of multi-week institutional earnings post-announcement drift.
+- **Entry Rules**:
+  $$\text{GapPct} = \frac{\text{Open}_{\text{earnings}} - \text{Close}_{\text{prior}}}{\text{Close}_{\text{prior}}} \ge +3.0\% \quad \text{and} \quad \text{Volume}_{\text{earnings}} \ge 2.0 \times \text{SMA}_{\text{Vol}, 20}$$
+- **Stop Loss Calculation**:
+  $$\text{Stop}_{\text{raw}} = \min(\text{Low}_{\text{earnings\_gap}} \times 0.98, P_{\text{entry}} - 2.0 \times \text{ATR}_{14})$$
+  $$\text{Stop}_{\text{final}} = \max(\text{Stop}_{\text{raw}}, P_{\text{entry}} \times 0.93)$$
+
+### 5. Cross-Sectional Momentum (`cross_sectional_momentum`)
+- **Core Thesis**: Relative strength ranking against the entire S&P 500 universe over 3-month and 6-month horizons.
+- **Entry Rules**:
+  $$\text{MomentumScore} = 0.6 \times \left(\frac{P_t - P_{t-63}}{P_{t-63}}\right) + 0.4 \times \left(\frac{P_t - P_{t-126}}{P_{t-126}}\right) \ge 90\text{th percentile}$$
+- **Stop Loss Calculation**:
+  $$\text{Stop}_{\text{raw}} = P_{\text{entry}} - 2.5 \times \text{ATR}_{14}$$
+  $$\text{Stop}_{\text{final}} = \max(\text{Stop}_{\text{raw}}, P_{\text{entry}} \times 0.93)$$
+
+### 6. Sector Rotation (`sector_rotation`)
+- **Core Thesis**: Capital flows into the top 2 outperforming Sector SPDR ETFs (XLE, XLK, XLF, XLI, XLV, etc.).
+- **Entry Rules**:
+  $$\text{SectorRelStrength} = \frac{\text{Return}_{20}(\text{ETF})}{\text{Return}_{20}(\text{SPY})} > 1.05 \quad \text{and ETF constituent breakout}$$
+- **Stop Loss Calculation**:
+  $$\text{Stop}_{\text{raw}} = \min(\text{EMA}_{20} \times 0.98, P_{\text{entry}} - 2.0 \times \text{ATR}_{14})$$
+  $$\text{Stop}_{\text{final}} = \max(\text{Stop}_{\text{raw}}, P_{\text{entry}} \times 0.93)$$
 
 ---
 
 ## 6. Strategy-Specific ATR Targets & Reach Probability Filtering
 
-### 6.1 Layer 1: Strategy ATR Multiples & Fixed Floors
+Global fixed percentage targets (+12%, +22%, +35%) fail in production because low-volatility large caps rarely reach +35% within swing horizons, while high-beta momentum stocks overshoot +12% on day two. We deploy a **Two-Layer Quantitative Target Framework**:
 
-Profit targets are calculated as the maximum between the ATR expansion and the strategy's fixed minimum percentage floor:
+### Layer 1: Strategy-Specific ATR Target Multiples & Percentage Floors
+Profit targets are computed dynamically as a function of the stock's 14-day Average True Range ($\text{ATR}_{14}$), bounded by fixed minimum percentage floors:
 
-$$T_{k, \text{atr}} = P_{\text{entry}} + (M_k \times \text{ATR}_{14})$$
-$$T_{k, \text{floor}} = P_{\text{entry}} \times (1 + F_k)$$
-$$T_k = \max(T_{k, \text{atr}}, T_{k, \text{floor}})$$
+$$T_{k, \text{atr}} = P_{\text{entry}} + M_k \times \text{ATR}_{14}$$
+$$T_k = \max\left(T_{k, \text{atr}}, P_{\text{entry}} \times (1 + \text{Floor}_k)\right)$$
 
-#### Multiplier ($M$) & Floor ($F$) Parameter Matrix:
-| Strategy | $M_1$ (ATR) | $F_1$ (Floor) | $M_2$ (ATR) | $F_2$ (Floor) | $M_3$ (ATR) | $F_3$ (Floor) | Max Hold ($H$) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Pullback Recovery** | $2.5\times$ | $+6.0\%$ | $4.0\times$ | $+12.0\%$ | $6.0\times$ | $+18.0\%$ | 15 days |
-| **Trend Following** | $3.0\times$ | $+8.0\%$ | $5.0\times$ | $+15.0\%$ | $8.0\times$ | $+25.0\%$ | 20 days |
-| **52-Week High Breakout** | $3.0\times$ | $+8.0\%$ | $5.5\times$ | $+16.0\%$ | $9.0\times$ | $+28.0\%$ | 20 days |
-| **Cross-Sectional Momentum** | $2.5\times$ | $+6.0\%$ | $4.5\times$ | $+12.0\%$ | $7.0\times$ | $+20.0\%$ | 15 days |
-| **Sector Rotation** | $2.0\times$ | $+5.0\%$ | $3.5\times$ | $+10.0\%$ | $5.0\times$ | $+15.0\%$ | 15 days |
-| **Post-Earnings Drift (PEAD)** | $2.5\times$ | $+6.0\%$ | $4.5\times$ | $+14.0\%$ | $7.0\times$ | $+22.0\%$ | 15 days |
-| **Mean Reversion** | $2.0\times$ | $+5.0\%$ | $3.5\times$ | $+10.0\%$ | $5.0\times$ | $+15.0\%$ | 10 days |
-
----
-
-### 6.2 Layer 2: Empirical Reach Probability Filtering
-
-For a candidate stock with 504 trading days of history ($W = 504$), the empirical reach probability for target $T_k$ over maximum holding horizon $H$ is computed by simulating rolling forward windows:
-
-$$P(\text{reach}_k) = \frac{1}{W - H} \sum_{t=1}^{W - H} \mathbb{I}\left(\max_{1 \le j \le H} \text{High}_{t+j} \ge \text{Close}_t \times (1 + \text{target\_pct}_k)\right)$$
-
-#### Acceptance & Pruning Rules:
-1. **Target 1 Gate**:
-   - If $P(\text{reach}_1) < 0.50 \implies \mathbf{REJECT\ SIGNAL}$. The setup lacks sufficient statistical probability to reach minimum target.
-2. **Target 2 Filter**:
-   - If $P(\text{reach}_2) < 0.30 \implies \mathbf{PRUNE\ T_2}$ ($T_2 = \text{null}$).
-3. **Target 3 Filter**:
-   - If $P(\text{reach}_3) < 0.15 \implies \mathbf{PRUNE\ T_3}$ ($T_3 = \text{null}$).
+#### Strategy Multiplier & Floor Matrix:
+| Strategy Name | T1 ATR ($M_1$) | T1 Floor | T2 ATR ($M_2$) | T2 Floor | T3 ATR ($M_3$) | T3 Floor |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Trend Following** | $2.5\times$ | $+6.0\%$ | $5.0\times$ | $+14.0\%$ | $8.0\times$ | $+22.0\%$ |
+| **52-Week High Breakout** | $2.0\times$ | $+5.0\%$ | $4.5\times$ | $+12.0\%$ | $7.0\times$ | $+20.0\%$ |
+| **Pullback Recovery** | $2.0\times$ | $+5.0\%$ | $4.0\times$ | $+10.0\%$ | $6.5\times$ | $+18.0\%$ |
+| **PEAD (Earnings Drift)** | $3.0\times$ | $+8.0\%$ | $6.0\times$ | $+16.0\%$ | $9.0\times$ | $+28.0\%$ |
+| **Cross-Sectional Momentum**| $2.5\times$ | $+6.0\%$ | $5.0\times$ | $+13.0\%$ | $7.5\times$ | $+22.0\%$ |
+| **Sector Rotation** | $2.0\times$ | $+5.0\%$ | $4.0\times$ | $+11.0\%$ | $6.0\times$ | $+18.0\%$ |
 
 ---
 
-### 6.3 Dynamic Scale-Out Allocations & Honest Weighted R:R
+### Layer 2: 504-Day Empirical Reach Probability Filtering
+For each proposed target $T_k$, the system queries the constituent's historical daily price bars over the preceding **504 trading days** (~2 years) using a sliding 60-trading-day forward window:
 
-Based on which targets survive probability filtering, scale-out weights ($w_1, w_2, w_3, w_{\text{runner}}$) are assigned dynamically:
+$$P(\text{reach}_k) = \frac{\sum_{i=1}^{N} \mathbb{I}\left(\max_{t \in [i, i+60]}(P_t) \ge P_i \times \left(1 + \frac{T_k - P_{\text{entry}}}{P_{\text{entry}}}\right)\right)}{N}, \quad \text{where } N = 504 - 60 = 444$$
 
-| Surviving Targets | Scale-Out Format | $w_1$ (T1) | $w_2$ (T2) | $w_3$ (T3) | $w_{\text{runner}}$ (Trailing Runner) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **All 3 Survive** | `"50/30/20"` | $50\%$ | $30\%$ | $20\%$ | $0\%$ |
-| **$T_1$ & $T_2$ Survive ($T_3$ pruned)** | `"60/30/10"` | $60\%$ | $30\%$ | $0\%$ | $10\%$ |
-| **Only $T_1$ Survives ($T_2, T_3$ pruned)**| `"70/30/0"` | $70\%$ | $0\%$ | $0\%$ | $30\%$ |
+#### Minimum Empirical Survival Thresholds:
+- **Target 1 ($T_1$)**: Must satisfy $P(\text{reach}_1) \ge 0.50$ ($50\%$). If $P(\text{reach}_1) < 0.50$, the entire signal is **REJECTED** immediately.
+- **Target 2 ($T_2$)**: Must satisfy $P(\text{reach}_2) \ge 0.30$ ($30\%$). If $P(\text{reach}_2) < 0.30$, $T_2$ is **PRUNED** ($T_2 = \text{null}$).
+- **Target 3 ($T_3$)**: Must satisfy $P(\text{reach}_3) \ge 0.15$ ($15\%$). If $P(\text{reach}_3) < 0.15$, $T_3$ is **PRUNED** ($T_3 = \text{null}$).
+
+---
+
+### Dynamic Scale-Out Assignment & Honest R:R Math
+When ghost targets are pruned, the system dynamically reassigns scale-out exit weights:
+
+$$\text{Scale-Out Structure} = \begin{cases} 
+\mathbf{"50/30/20"}, & \text{if both } T_2 \text{ and } T_3 \text{ survive} \\ 
+\mathbf{"60/30/10"}, & \text{if } T_2 \text{ survives but } T_3 \text{ is pruned (10\% trailing runner)} \\ 
+\mathbf{"70/30/0"}, & \text{if both } T_2 \text{ and } T_3 \text{ are pruned (30\% trailing runner)} 
+\end{cases}$$
 
 #### Honest Weighted Risk-to-Reward Ratio ($R_{\text{honest}}$):
-$$\overline{\text{Reward}}_{\text{honest}} = \sum_{k \in \text{surviving}} w_k \times (T_k - P_{\text{entry}})$$
-$$R_{\text{honest}} = \frac{\overline{\text{Reward}}_{\text{honest}}}{P_{\text{entry}} - P_{\text{stop}}}$$
+$$R_{\text{honest}} = \frac{\sum_{k \in \text{surviving}} \left(w_k \times \frac{T_k - P_{\text{entry}}}{P_{\text{entry}}}\right) + \left(w_{\text{runner}} \times 1.20 \times \frac{T_1 - P_{\text{entry}}}{P_{\text{entry}}}\right)}{\frac{P_{\text{entry}} - \text{StopLoss}}{P_{\text{entry}}}}$$
 
-*This prevents "ghost targets" from artificially inflating the R:R ratio, which would otherwise trick Half-Kelly into taking oversized positions on unrealistic price expectations.*
+*Why this is critical*: Calculating risk-to-reward over unattainable ghost targets artificially inflates $R$, causing the Half-Kelly formula to over-allocate capital to low-probability setups. $R_{\text{honest}}$ guarantees that position sizing reflects strictly achievable mathematical expectancy.
 
 ---
 
 ## 7. Multi-Factor Composite Scoring Engine
 
-Candidate signals are ranked on a scale from $0.0$ to $100.0$ using regime-weighted linear combinations:
+Each surviving setup is scored on a normalized scale of **0.0 to 100.0**:
 
-$$\text{Composite Score} = w_{\text{mom}} S_{\text{mom}} + w_{\text{exp}} S_{\text{exp}} + w_{\text{wr}} S_{\text{wr}} + w_{\text{reg}} S_{\text{reg}} + w_{\text{ctx}} S_{\text{ctx}}$$
+$$\text{Score}_{\text{composite}} = W_{\text{mom}} S_{\text{mom}} + W_{\text{exp}} S_{\text{exp}} + W_{\text{win}} S_{\text{win}} + W_{\text{reg}} S_{\text{reg}} + W_{\text{ctx}} S_{\text{ctx}}$$
 
-### Regime Weight Vectors ($\mathbf{w}$):
-$$\begin{aligned}
-\mathbf{w}_{\text{bull}} &= \{ \text{mom}: 0.30, \text{exp}: 0.30, \text{wr}: 0.15, \text{reg}: 0.10, \text{ctx}: 0.15 \} \\
-\mathbf{w}_{\text{sideways}} &= \{ \text{mom}: 0.20, \text{exp}: 0.30, \text{wr}: 0.20, \text{reg}: 0.15, \text{ctx}: 0.15 \} \\
-\mathbf{w}_{\text{bear}} &= \{ \text{mom}: 0.15, \text{exp}: 0.35, \text{wr}: 0.10, \text{reg}: 0.10, \text{ctx}: 0.30 \}
-\end{aligned}$$
+### Sub-Score Normalization Formulas:
+1. **Momentum Sub-Score ($S_{\text{mom}} \in [0, 100]$)**:
+   $$S_{\text{mom}} = 50 + 25 \times \left(\frac{\text{ADX}_{14} - 25}{25}\right) + 25 \times \text{clip}\left(\frac{\text{Return}_{20\text{d}}}{0.15}, -1.0, 1.0\right)$$
+2. **Expectancy Sub-Score ($S_{\text{exp}} \in [0, 100]$)**:
+   $$S_{\text{exp}} = \text{clip}\left(R_{\text{honest}} \times 35.0, 0.0, 100.0\right)$$
+3. **Past Win Rate Sub-Score ($S_{\text{win}} \in [0, 100]$)**:
+   $$S_{\text{win}} = \text{clip}\left(\text{WinRate}_{\text{historical}} \times 100.0, 0.0, 100.0\right)$$
+4. **Regime Sub-Score ($S_{\text{reg}} \in [0, 100]$)**:
+   $$S_{\text{reg}} = \begin{cases} 100.0, & \text{if Bull Regime} \\ 65.0, & \text{if Sideways Regime} \\ 30.0, & \text{if Bear Regime} \end{cases}$$
+5. **Context Sub-Score ($S_{\text{ctx}} \in [0, 100]$)**: Multimodal score from contextual provider pipeline.
 
-### Sub-Score Formulations:
-1. **Momentum Score ($S_{\text{mom}}$)**:
-   $$S_{\text{mom}} = \text{PercentileRank}(\text{ADX}_{14} \times \text{TrendSlope})$$
-2. **Historical Expectancy Score ($S_{\text{exp}}$)**:
-   $$S_{\text{exp}} = \min\left(100.0, \max\left(0.0, \frac{\text{Expectancy}_{\%} + 2.0}{10.0} \times 100.0\right)\right)$$
-3. **Historical Win-Rate Score ($S_{\text{wr}}$)**:
-   $$S_{\text{wr}} = \min\left(100.0, \max\left(0.0, \frac{\text{WinRate}_{\%} - 20.0}{40.0} \times 100.0\right)\right)$$
-4. **Regime Alignment Score ($S_{\text{reg}}$)**:
-   $$S_{\text{reg}} = \begin{cases} 100.0, & \text{if strategy matches regime} \\ 50.0, & \text{if neutral} \\ 0.0, & \text{if mismatched} \end{cases}$$
-5. **Context Score ($S_{\text{ctx}}$)**: Detailed below.
+### Tier Classification:
+$$\text{Tier} = \begin{cases} 
+\mathbf{Strong\ Buy}, & \text{if } \text{Score}_{\text{composite}} \ge 80.0 \text{ and } R_{\text{honest}} \ge 1.50 \\ 
+\mathbf{Buy}, & \text{if } 65.0 \le \text{Score}_{\text{composite}} < 80.0 \text{ and } R_{\text{honest}} \ge 1.20 \\ 
+\mathbf{Neutral / Rejected}, & \text{otherwise} 
+\end{cases}$$
 
 ---
 
 ## 8. Context & Multimodal NLP Scoring Pipeline
 
-The context score ($S_{\text{ctx}} \in [0, 100]$) integrates fundamental solvency, analyst consensus targets, earnings surprises, and FinBERT sentiment:
-
-$$S_{\text{ctx}} = \text{Analyst Score} + \text{Earnings Score} + \text{Fundamental Score} + \text{News Score}$$
+The Context Sub-Score ($S_{\text{ctx}}$) aggregates 4 external fundamental, analyst, and sentiment data feeds (0 to 100 pts total):
 
 ```
-                          ┌────────────────────────┐
-                          │   CONTEXT SCORE (100)  │
-                          └───────────┬────────────┘
-         ┌──────────────────┬─────────┴─────────┬──────────────────┐
-         ▼                  ▼                   ▼                  ▼
-┌─────────────────┐┌─────────────────┐┌─────────────────┐┌─────────────────┐
-│ Analyst Cons.   ││ Earnings Surp.  ││ Fundamental     ││ FinBERT News    │
-│ Target Upside   ││ Beat Magnitude  ││ D/E & Current   ││ Sentiment NLP   │
-│ Max: 40 pts     ││ Max: 30 pts     ││ Max: 20 pts     ││ Max: 10 pts     │
-└─────────────────┘└─────────────────┘└─────────────────┘└─────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                 Total Context Score (100 pts)               │
+├──────────────────────────────┬──────────────────────────────┤
+│ Analyst Consensus (40 pts)   │ Earnings Surprise (30 pts)   │
+│ - Buy/Hold/Sell ratios       │ - Last quarter EPS beat %    │
+│ - Price target upside %      │ - Revenue surprise %         │
+├──────────────────────────────┼──────────────────────────────┤
+│ Fundamental Health (20 pts)  │ FinBERT NLP Sentiment (10 pts│
+│ - Debt-to-Equity < 1.5       │ - 7-day headline sentiment   │
+│ - Current Ratio > 1.2        │ - Positive/Negative polarity │
+└──────────────────────────────┴──────────────────────────────┘
 ```
 
-1. **Analyst Consensus Score ($0 \text{ to } 40 \text{ pts}$)**:
-   $$\text{Upside}_{\%} = \frac{\text{Target}_{\text{consensus}} - P_{\text{entry}}}{P_{\text{entry}}} \times 100$$
-   - $\text{Upside} \ge 20\% \implies +40 \text{ pts}$
-   - $10\% \le \text{Upside} < 20\% \implies +30 \text{ pts}$
-   - $0\% \le \text{Upside} < 10\% \implies +15 \text{ pts}$
-   - $\text{Upside} < 0\% \implies 0 \text{ pts}$
-2. **Earnings Surprise Score ($0 \text{ to } 30 \text{ pts}$)**:
-   - Latest quarterly EPS surprise $> +5\% \implies +30 \text{ pts}$
-   - In-line surprise ($0\%$ to $+5\%$) $\implies +15 \text{ pts}$
-   - Earnings miss ($< 0\%$) $\implies -10 \text{ pts}$
-3. **Fundamental Health Score ($0 \text{ to } 20 \text{ pts}$)**:
-   - Debt-to-Equity Ratio $< 1.5 \implies +10 \text{ pts}$
-   - Current Ratio $> 1.0 \implies +10 \text{ pts}$
-4. **FinBERT News Sentiment Score ($-10 \text{ to } +10 \text{ pts}$)**:
-   - Evaluated using `ProsusAI/finbert` NLP transformer model on latest 10 news headlines.
-   - Compound polarity score $> +0.10 \implies +10 \text{ pts}$
-   - Compound polarity score $< -0.10 \implies -10 \text{ pts}$
+1. **Analyst Consensus (40 pts)**:
+   $$\text{Score}_{\text{analyst}} = 40 \times \left(\frac{N_{\text{strong\_buy}} + 0.75 N_{\text{buy}}}{N_{\text{total\_ratings}}}\right)$$
+2. **Earnings Surprise (30 pts)**:
+   $$\text{Score}_{\text{earnings}} = \text{clip}\left(15 + 1.5 \times \text{SurprisePct}_{\text{EPS}}, 0, 30\right)$$
+3. **Fundamental Financial Health (20 pts)**:
+   $$\text{Score}_{\text{fund}} = 10 \times \mathbb{I}\left(\frac{\text{Debt}}{\text{Equity}} < 1.5\right) + 10 \times \mathbb{I}\left(\text{CurrentRatio} > 1.2\right)$$
+4. **FinBERT NLP Sentiment (10 pts)**:
+   $$\text{Score}_{\text{news}} = 5 + 5 \times (\text{Prob}_{\text{positive}} - \text{Prob}_{\text{negative}})$$
 
 ---
 
 ## 9. Risk Management, Sizing & Capital Allocation Math
 
-### 9.1 Stop Loss Clamping Bounds
-For entry price $P_{\text{entry}}$ and initial strategy stop $P_{\text{stop, raw}}$:
-1. **7.0% Max Loss Ceiling**:
-   $$P_{\text{stop, max}} = \max\left(P_{\text{stop, raw}}, \text{round}(P_{\text{entry}} \times 0.93, 2)\right)$$
-2. **4.0% Minimum Noise Floor**:
-   $$P_{\text{stop, final}} = \min\left(P_{\text{stop, max}}, \text{round}(P_{\text{entry}} \times 0.96, 2)\right)$$
+Capital allocation is governed by the **Constrained Half-Kelly Sizing Model with Strict 5.0% Single-Stock Cap**:
 
-$$\text{Final Stop Range: } \mathbf{0.93 \times P_{\text{entry}} \le P_{\text{stop}} \le 0.96 \times P_{\text{entry}}}$$
-
----
-
-### 9.2 Position Sizing: Half-Kelly Criterion with 5.0% Portfolio Cap
-
-For candidate score $S$, win probability estimate $p$ is mapped as:
-$$p = \begin{cases}
-0.75, & \text{if } S \ge 90.0 \\
-0.68, & \text{if } 80.0 \le S < 90.0 \\
-0.60, & \text{if } 70.0 \le S < 80.0 \\
-0.52, & \text{if } 60.0 \le S < 70.0 \\
-0.45, & \text{if } 50.0 \le S < 60.0 \\
-0.35, & \text{if } S < 50.0
+### 1. Probability of Win Assignment
+$$P_{\text{win}} = \begin{cases} 
+0.75, & \text{if } \text{Score}_{\text{composite}} \ge 90.0 \\ 
+0.68, & \text{if } 80.0 \le \text{Score}_{\text{composite}} < 90.0 \\ 
+0.60, & \text{if } 70.0 \le \text{Score}_{\text{composite}} < 80.0 \\ 
+0.52, & \text{if } 60.0 \le \text{Score}_{\text{composite}} < 70.0 \\ 
+0.45, & \text{if } 50.0 \le \text{Score}_{\text{composite}} < 60.0 \\ 
+0.35, & \text{if } \text{Score}_{\text{composite}} < 50.0 
 \end{cases}$$
 
-Using the **Honest Weighted R:R** ($R_{\text{honest}}$):
-$$f^* = p - \frac{1 - p}{R_{\text{honest}}}$$
-$$K = \max\left(0.0, \frac{f^*}{2}\right) \times M_{\text{drawdown}} \times M_{\text{vix}}$$
+### 2. Full Kelly Fraction ($f^*$)
+$$f^* = P_{\text{win}} - \frac{1 - P_{\text{win}}}{R_{\text{honest}}}$$
 
-$$\text{Raw Dollar Demand} = \min(K \times \text{Portfolio Value}, 0.05 \times \text{Portfolio Value})$$
+### 3. Half-Kelly Fraction ($f_{\text{half}}$)
+$$f_{\text{half}} = \max\left(0, \frac{f^*}{2}\right)$$
 
-#### Cash-Constrained Cross-Sectional Normalization:
-If total capital demand for top $N$ signals exceeds available cash $C_{\text{avail}}$:
-$$\text{Multiplier } M_{\text{cash}} = \begin{cases}
-1.0, & \text{if } \sum \text{Demand} \le C_{\text{avail}} \\
-\frac{C_{\text{avail}}}{\sum \text{Demand}}, & \text{if } \sum \text{Demand} > C_{\text{avail}}
-\end{cases}$$
+### 4. Single-Stock 5.0% Portfolio Cap Rule
+$$\text{AllocationPct} = \min\left(f_{\text{half}} \times 100\%, 5.0\%\right)$$
+$$\text{RawDemandDollars}_i = \text{PortfolioValue} \times \left(\frac{\text{AllocationPct}_i}{100}\right)$$
 
-$$\text{Allocated Dollars} = \text{round}(\text{Raw Dollar Demand} \times M_{\text{cash}}, 2)$$
-$$\text{Exact Shares} = \frac{\text{Allocated Dollars}}{P_{\text{entry}}}$$
-$$\text{Max Integer Shares} = \lfloor \text{Exact Shares} \rfloor$$
+### 5. Cash-Constrained Cross-Sectional Normalization
+If the aggregate dollar demand across all qualified signals exceeds available cash:
+$$\text{TotalDemand} = \sum_{i=1}^{K} \text{RawDemandDollars}_i$$
+$$\text{ScalingFactor} = \min\left(1.0, \frac{\text{AvailableCash}}{\text{TotalDemand}}\right)$$
+$$\text{AllocatedDollars}_i = \text{round}\left(\text{RawDemandDollars}_i \times \text{ScalingFactor}, 2\right)$$
+$$\text{Shares}_i = \text{floor}\left(\frac{\text{AllocatedDollars}_i}{P_{\text{entry}, i}}\right) \quad \text{[DB Integer Persistence]}$$
 
 ---
 
 ## 10. Trade Lifecycle & Live Recalculation Engine
 
-```
-[ PENDING ] ── (Morning Open Check) ──► Open > Entry * 1.03? ──► [ CANCELLED_GAP_UP ]
-     │
-     └────── Flat / Normal Open ────► [ OPEN ] (Entry adjusted to Open)
-                                         │
-                   ┌─────────────────────┼─────────────────────┐
-                   ▼                     ▼                     ▼
-          Price Hits Stop?        Price Hits T1?         Price Hits T2?
-                   │                     │                     │
-                   ▼                     ▼                     ▼
-             [ STOPPED ]            Sell w1 %             Sell w2 %
-            (Full Exit)         Ratchet Stop to BE     Maintain Runner
-                                         │                     │
-                                         └──────────┬──────────┘
-                                                    ▼
-                                             Price Hits T3?
-                                                    │
-                                                    ▼
-                                               [ HIT_T3 ]
-                                              (Sell w3 %)
+The Next.js 16 live reconciliation engine (`/api/signals/recalculate`) manages real-time position transitions:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: Nightly Scan Generation
+    Pending --> Cancelled_Gap_Up: Morning Open > Entry * 1.03
+    Pending --> Open: Open Price <= Entry * 1.03
+    Open --> Stopped: Low <= StopLoss
+    Open --> Hit_T1: High >= Target 1
+    Hit_T1 --> Hit_T2: High >= Target 2 (Stop moves to Breakeven)
+    Hit_T2 --> Hit_T3: High >= Target 3 (Full Exit)
+    Hit_T1 --> Stopped: Low <= Breakeven Stop
+    Hit_T2 --> Stopped: Low <= Target 1 Floor Stop
+    Hit_T3 --> Closed: Realized P&L Settled
+    Stopped --> Closed: Realized Loss/Gain Settled
+    Cancelled_Gap_Up --> [*]
+    Closed --> [*]
 ```
 
-### Recalculation Engine Logic ([`app/api/signals/recalculate/route.ts`](file:///c:/Users/acer/Documents/stock-recommendation-engine/frontend/src/app/api/signals/recalculate/route.ts)):
-1. **Morning Open Transition (`pending` $\to$ `open`)**:
-   - If $\text{Open Price} > P_{\text{entry}} \times 1.03 \implies \text{Cancel Setup}$ (`cancelled_gap_up`).
-   - If normal open: Adjust $P_{\text{entry}} = \text{Open Price}$ and shift $P_{\text{stop}} = \text{Open Price} - (P_{\text{entry, orig}} - P_{\text{stop, orig}})$ to preserve the exact risk dollar buffer.
-2. **Target 1 Hit & Breakeven Ratchet**:
-   - When $\text{High} \ge T_1$: Mark as `hit_t1`.
-   - Ratchet Stop Loss: $P_{\text{stop}} = P_{\text{entry}}$ (Guarantees zero downside risk on remaining shares).
-3. **Target 2 Hit**:
-   - When $\text{High} \ge T_2$: Mark as `hit_t2`.
-4. **Target 3 Hit**:
-   - When $\text{High} \ge T_3$: Mark as `hit_t3` (Full trade scale-out cycle completed).
-5. **Stop Loss Hit**:
-   - When $\text{Low} \le P_{\text{stop}}$: Mark as `stopped` and archive to `signals_history`.
+### Recalculation Invariants:
+1. **Morning Open Gap Rule**: If $\text{Open}_{\text{morning}} > P_{\text{entry}} \times 1.03$ (+3.0% gap), the setup is cancelled (`cancelled_gap_up`) to prevent chasing extended prices into unfavorable risk-to-reward ratios.
+2. **Breakeven Stop Ratchet**: Upon reaching $T_1$, the active stop loss is automatically ratcheted to $P_{\text{entry}}$, making the remaining shares risk-free.
+3. **Trailing Stop Ratchet**: Upon reaching $T_2$, the stop loss is ratcheted to $T_1$.
 
 ---
 
 ## 11. Dynamic Scale-Out Dollar Exit Breakdown
 
-For any signal with allocated capital $A = \text{allocated\_dollars}$ and scale-out format `"w1/w2/w3"`:
+When a position is funded with $\text{AllocatedDollars} > \$0$, capital recovery milestones are computed according to the assigned scale-out weight string:
 
-$$\text{Dollar Exit}(T_1) = A \times \frac{w_1}{100}$$
-$$\text{Dollar Exit}(T_2) = \begin{cases} A \times \frac{w_2}{100}, & \text{if } T_2 \ne \text{null} \\ \$0.00, & \text{if } T_2 = \text{null} \end{cases}$$
-$$\text{Dollar Exit}(T_3) = \begin{cases} A \times \frac{w_3}{100}, & \text{if } T_3 \ne \text{null} \\ \$0.00, & \text{if } T_3 = \text{null} \end{cases}$$
-$$\text{Runner Dollar Allocation} = A \times \frac{w_{\text{runner}}}{100}$$
+### Scale-Out Mathematical Formulations:
 
-### Cumulative Cash Recovery & Remaining Capital:
-- **After $T_1$ Exit**:
-  $$\text{Cash Recovered} = \text{Dollar Exit}(T_1)$$
-  $$\text{Capital Remaining in Trade} = A - \text{Dollar Exit}(T_1) \quad (\text{Protected at Breakeven})$$
-- **After $T_2$ Exit**:
-  $$\text{Cash Recovered} = \text{Dollar Exit}(T_1) + \text{Dollar Exit}(T_2)$$
-  $$\text{Capital Remaining in Trade} = A - (\text{Dollar Exit}(T_1) + \text{Dollar Exit}(T_2))$$
+$$\text{For Scale } w_1 / w_2 / w_3 \text{ with Allocated Capital } C:$$
 
----
+$$T_1 \$ = C \times \left(\frac{w_1}{100}\right) \times \left(\frac{T_1}{P_{\text{entry}}}\right)$$
+$$T_2 \$ = C \times \left(\frac{w_2}{100}\right) \times \left(\frac{T_2}{P_{\text{entry}}}\right) \quad [\text{if } T_2 \ne \text{null}]$$
+$$T_3 \$ = C \times \left(\frac{w_3}{100}\right) \times \left(\frac{T_3}{P_{\text{entry}}}\right) \quad [\text{if } T_3 \ne \text{null}]$$
+$$\text{Runner } \$ = C \times \left(\frac{w_{\text{runner}}}{100}\right) \times \left(\frac{P_{\text{current}}}{P_{\text{entry}}}\right) \quad [\text{for trailing runner}]$$
 
-## 12. Real-World Production Calculation Walkthroughs
-
-Below are exact mathematical walkthroughs from live production signals generated on August 31, 2026 for a **\$10,000.00 Portfolio**:
+$$\text{Cash Recovered at } T_1 = C \times \left(\frac{w_1}{100}\right) \times \left(1 + \text{Return}_{T1}\right)$$
+$$\text{Remaining Risk-Free Capital} = C - \left(C \times \frac{w_1}{100}\right)$$
 
 ---
 
-### Example 1: Palantir Technologies (Ticker: `PLTR`)
-* **Strategy**: `Trend Following` | **Regime**: `Bull`
-* **Entry Price ($P_{\text{entry}}$)**: $\$185.93$
-* **14-day ATR**: $\$6.42$
+## 12. Split Dashboard: Portfolio View vs. Scan Log Architecture
 
-#### 1. Stop Loss Calculation:
-$$\text{Strategy Stop} = \min(\text{Low}_{10}, \$185.93 - 2.5 \times \$6.42) = \$170.27$$
-$$\text{7.0% Max Loss Ceiling} = \text{round}(\$185.93 \times 0.93, 2) = \$172.91$$
-$$\text{Clamped Stop Loss} = \mathbf{\$172.91 \text{ (-7.00\% Risk)}}$$
+To eliminate visual pollution and prevent rejected setups from distorting P&L tracking, the dashboard splits records into two isolated tabs:
 
-#### 2. Target Calculation & Reach Probability Filtering:
-- **Target 1 ($3.0\times \text{ATR}$, 8% Floor)**:
-  $$T_{1, \text{atr}} = 185.93 + (3.0 \times 6.42) = \$205.19 \quad (+10.36\%)$$
-  $$T_1 = \max(\$205.19, \$185.93 \times 1.08) = \mathbf{\$208.24 \text{ (+12.00\%)}}$$
-  $$P(\text{reach}_1) = 0.62 \ge 0.50 \implies \mathbf{\text{PASS}}$$
-- **Target 2 ($5.0\times \text{ATR}$, 15% Floor)**:
-  $$P(\text{reach}_2) = 0.24 < 0.30 \implies \mathbf{\text{PRUNED (Ghost Target)} \to T_2 = \text{null}}$$
-- **Target 3 ($8.0\times \text{ATR}$, 25% Floor)**:
-  $$P(\text{reach}_3) = 0.08 < 0.15 \implies \mathbf{\text{PRUNED (Ghost Target)} \to T_3 = \text{null}}$$
+```
+┌───────────────────────────────────────┬───────────────────────────────────────┐
+│        💼 Portfolio (Default)         │              📄 Scan Log              │
+│  Signals where allocated_dollars > 0  │ Signals where allocated_dollars = 0   │
+│  AND status IN (pending, open, etc.)  │ OR status IN (rejected, cancelled)    │
+└───────────────────────────────────────┴───────────────────────────────────────┘
+```
 
-#### 3. Dynamic Scale-Out & Honest Weighted R:R:
-- **Scale-Out Weights**: `"70/30/0"` ($w_1 = 70\%$, Runner $= 30\%$)
-- **Dollar Risk per Share**: $\$185.93 - \$172.91 = \$13.02$
-- **Weighted Reward**: $0.70 \times (\$208.24 - \$185.93) = \$15.62$
-- **Honest Weighted R:R**:
-  $$R_{\text{honest}} = \frac{\$15.62}{\$13.02} = \mathbf{1.20}$$
+### Tab Behavior & Isolation Rules:
 
-#### 4. Half-Kelly Position Sizing:
-- **Composite Score**: $47.25 \implies p = 0.35$
-- **Kelly Sizing**:
-  $$f^* = 0.35 - \frac{1 - 0.35}{1.20} = 0.35 - 0.5417 = -0.1917 < 0 \implies \mathbf{K = 0\%}$$
-  *(Signals with low composite scores receive \$0.00 capital allocation, strictly preserving cash until high-conviction scores $\ge 60$ occur).*
+| Feature / Property | 💼 Portfolio View (Tab 1) | 📄 Scan Log View (Tab 2) |
+| :--- | :--- | :--- |
+| **SQL Query** | `allocated_dollars > 0 AND status IN ('pending', 'open', 'hit_t1', 'hit_t2')` | `allocated_dollars = 0 OR status IN ('rejected', 'cancelled_gap_up')` |
+| **Default Tab** | **Yes** (Active on page load) | No |
+| **Columns Rendered** | Ticker, Entry/Stop, Current Price, Targets, Exit $ (Scale), P&L, Days | Ticker, Strategy, Tier, Composite Score, Honest R:R, Reason, Scan Date |
+| **P&L Column** | **Active** (Sums realized + unrealized gains on allocated capital) | **Omitted** (No P&L on decisions) |
+| **Recalculate Button**| **Active** (Only operates on rows in this tab) | **Omitted / Hidden** |
+| **Sync Market Button**| **Active** | **Omitted / Hidden** |
+| **Expanded Row** | Exit Plan Progress, Context Breakdown, TV Chart | Quantitative Metrics, Rejection Reason, TV Chart |
 
----
+### Rejection Reason Evaluation Engine:
+In the Scan Log view, every setup is assigned a deterministic reason explaining why capital was not allocated:
 
-### Example 2: Charles River Laboratories (Ticker: `CRL`)
-* **Strategy**: `Cross-Sectional Momentum` | **Regime**: `Bull`
-* **Entry Price ($P_{\text{entry}}$)**: $\$296.41$
-* **14-day ATR**: $\$7.85$
+```typescript
+export function getRejectionReason(sig: Recommendation): string {
+  if (sig.status === 'cancelled_gap_up') {
+    return 'Cancelled: Gap > 3%';
+  }
+  if (sig.reach_prob_t1 !== null && Number(sig.reach_prob_t1) < 0.50) {
+    return `ReachProb T1 < 50% (${(Number(sig.reach_prob_t1) * 100).toFixed(0)}%)`;
+  }
 
-#### 1. Stop Loss Calculation:
-$$\text{Strategy Stop} = \$296.41 - 2.0 \times \$7.85 = \$280.71$$
-$$\text{7.0% Max Loss Ceiling} = \text{round}(\$296.41 \times 0.93, 2) = \$275.66$$
-$$\text{Clamped Stop Loss} = \mathbf{\$275.66 \text{ (-7.00\% Risk)}}$$
+  const rr = sig.weighted_rr_honest ?? sig.weighted_rr ?? 0;
+  const score = sig.composite_score || 50;
 
-#### 2. Target Calculation & Reach Probability Filtering:
-- **Target 1 ($2.5\times \text{ATR}$, 6% Floor)**:
-  $$T_1 = \mathbf{\$326.05 \text{ (+10.00\%)}}, \quad P(\text{reach}_1) = 0.74 \ge 0.50 \implies \mathbf{\text{PASS}}$$
-- **Target 2 ($4.5\times \text{ATR}$, 12% Floor)**:
-  $$T_2 = \mathbf{\$343.84 \text{ (+16.00\%)}}, \quad P(\text{reach}_2) = 0.48 \ge 0.30 \implies \mathbf{\text{PASS}}$$
-- **Target 3 ($7.0\times \text{ATR}$, 20% Floor)**:
-  $$T_3 = \mathbf{\$367.55 \text{ (+24.00\%)}}, \quad P(\text{reach}_3) = 0.22 \ge 0.15 \implies \mathbf{\text{PASS}}$$
+  // Determine empirical win probability
+  let winRate = 0.35;
+  if (score >= 90) winRate = 0.75;
+  else if (score >= 80) winRate = 0.68;
+  else if (score >= 70) winRate = 0.60;
+  else if (score >= 60) winRate = 0.52;
+  else if (score >= 50) winRate = 0.45;
 
-#### 3. Dynamic Scale-Out & Honest Weighted R:R:
-- **Scale-Out Weights**: `"50/30/20"` ($w_1 = 50\%, w_2 = 30\%, w_3 = 20\%$)
-- **Dollar Risk per Share**: $\$296.41 - \$275.66 = \$20.75$
-- **Weighted Reward**:
-  $$\overline{R} = 0.50(326.05 - 296.41) + 0.30(343.84 - 296.41) + 0.20(367.55 - 296.41) = \$43.28$$
-- **Honest Weighted R:R**:
-  $$R_{\text{honest}} = \frac{\$43.28}{\$20.75} = \mathbf{2.09}$$
+  const r = Number(rr) > 0 ? Number(rr) : 1.0;
+  const kelly = winRate - (1 - winRate) / r;
 
-#### 4. Dollar Exit Breakdown (Based on \$500.00 Allocation):
-- **T1 Exit (50%)**: Sell **\$250.00** at **\$326.05** ($\to$ \$250.00 remaining protected at breakeven stop \$296.41)
-- **T2 Exit (30%)**: Sell **\$150.00** at **\$343.84** ($\to$ \$100.00 remaining)
-- **T3 Exit (20%)**: Sell **\$100.00** at **\$367.55** (Final exit)
-
----
-
-## 13. Quantitative Expectancy & Probabilistic Edge Proof
-
-### 13.1 Empirical Backtest Distribution (515 Tickers / 9,648 Trades)
-- **Sample Size**: 9,648 historical signals
-- **Aggregate Win Rate**: $34.48\%$
-- **Average Trade Expectancy**: $+1.69\%$
-
-### 13.2 Mathematical Edge Proof
-Under conservative operational assumptions ($P_{\text{win}} = 35\%$, Average Stop $= -6.0\%$, Average Scale-Out Win $= +17.5\%$):
-
-$$\begin{aligned}
-\mathbb{E}[\text{Return}] &= (0.35 \times +17.5\%) + (0.65 \times -6.0\%) \\
-&= +6.125\% - 3.900\% \\
-&= \mathbf{+2.225\% \text{ per completed trade cycle}}
-\end{aligned}$$
-
-With position sizing capped at $5.0\%$ of total capital, the portfolio-level mathematical expectancy per closed signal is:
-$$\mathbb{E}[\text{Portfolio Return}] = 5.0\% \times (+2.225\%) = \mathbf{+0.111\% \text{ per signal}}$$
-
-Running an average of 40 trades per year:
-$$\text{Projected Geometric Edge} \approx 40 \times 0.111\% = \mathbf{+4.44\% \text{ Alpha over cash baseline, before market beta}}$$
-
----
-
-## 14. Database Schema & Data Flow Specification
-
-```sql
--- Active / Pending Trades Table
-CREATE TABLE signals (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    scan_date DATE NOT NULL,
-    ticker TEXT NOT NULL,
-    company_name TEXT,
-    industry TEXT,
-    strategy TEXT NOT NULL,
-    strategy_name TEXT NOT NULL,
-    tier_label TEXT NOT NULL,          -- 'Strong Buy' | 'Buy'
-    status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'open' | 'hit_t1' | 'hit_t2'
-    price NUMERIC NOT NULL,
-    entry_price NUMERIC NOT NULL,
-    stop_loss NUMERIC NOT NULL,
-    target_1 NUMERIC NOT NULL,
-    target_2 NUMERIC,                  -- Nullable when pruned by reach probability
-    target_3 NUMERIC,                  -- Nullable when pruned by reach probability
-    target_1_pct NUMERIC,
-    target_2_pct NUMERIC,
-    target_3_pct NUMERIC,
-    target_1_atr NUMERIC,
-    target_2_atr NUMERIC,
-    target_3_atr NUMERIC,
-    reach_prob_t1 NUMERIC,
-    reach_prob_t2 NUMERIC,
-    reach_prob_t3 NUMERIC,
-    scale_out_weights TEXT NOT NULL DEFAULT '50/30/20',
-    weighted_rr NUMERIC NOT NULL,
-    weighted_rr_honest NUMERIC,
-    allocated_dollars NUMERIC NOT NULL,
-    max_shares INTEGER NOT NULL,
-    position_sizing TEXT NOT NULL,
-    composite_score NUMERIC NOT NULL,
-    context_score NUMERIC DEFAULT 0,
-    context_analyst NUMERIC DEFAULT 0,
-    context_earnings NUMERIC DEFAULT 0,
-    context_fundamental NUMERIC DEFAULT 0,
-    context_news NUMERIC DEFAULT 0,
-    regime TEXT NOT NULL,
-    narrative TEXT,
-    entry_date DATE,
-    exit_date DATE,
-    sell_signal BOOLEAN DEFAULT FALSE,
-    sell_signal_reason TEXT,
-    sell_price NUMERIC,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Historical & Closed Trades Table
-CREATE TABLE signals_history (
-    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    scan_date DATE NOT NULL,
-    ticker TEXT NOT NULL,
-    outcome TEXT NOT NULL,             -- 'open' | 'stopped' | 'hit_t1' | 'hit_t2' | 'hit_t3' | 'cancelled_gap_up'
-    outcome_date DATE,
-    outcome_return_pct NUMERIC,
-    outcome_holding_days INTEGER,
-    entry_price NUMERIC,
-    exit_price NUMERIC,
-    allocated_dollars NUMERIC,
-    composite_score NUMERIC,
-    tier_label TEXT,
-    scale_out_weights TEXT DEFAULT '50/30/20',
-    weighted_rr_honest NUMERIC
-);
+  if (Number(rr) <= 1.0 || kelly <= 0) {
+    return `Kelly ≤ 0 (Honest R:R = ${Number(rr).toFixed(2)})`;
+  }
+  if (Number(sig.allocated_dollars) === 0) {
+    return 'Cash constrained';
+  }
+  if (sig.target_2 === null && sig.reach_prob_t2 !== null && Number(sig.reach_prob_t2) < 0.30) {
+    return 'ReachProb T2 < 30%';
+  }
+  return 'Kelly ≤ 0 (Honest R:R = 1.00)';
+}
 ```
 
 ---
 
-## 15. Master Rules & Invariants for LLM Agents
+## 13. Real-World Production Calculation Walkthroughs
 
-When reading, modifying, or extending this codebase, any LLM agent must strictly observe these core rules:
+The following calculations reflect the actual production scan executed on **August 31, 2026** across the 502 constituents of the S&P 500:
 
-1. **5.0% Allocation Cap Invariant**:
-   - No single stock position may receive more than $5.0\%$ of total portfolio value (`0.05 * portfolio_value`) under any circumstances.
-2. **Stop Loss Clamping Bounds**:
-   - Initial stop losses must always satisfy: $0.93 \times P_{\text{entry}} \le P_{\text{stop}} \le 0.96 \times P_{\text{entry}}$.
-3. **Ghost Target Pruning**:
-   - Never set targets without verifying empirical reach probabilities ($P(T_1) \ge 0.50, P(T_2) \ge 0.30, P(T_3) \ge 0.15$). If pruned, set $T_2/T_3 = \text{null}$ and assign dynamic scale-out weights.
-4. **Honest Half-Kelly**:
-   - Always size using $R_{\text{honest}}$ (weighted only over surviving targets) to prevent low-probability setups from inflating bet size.
-5. **Database Type Safety**:
-   - `max_shares` in Supabase is strictly typed as an `INTEGER`. Always pass `int()` when writing to database tables. Fractional precision is handled in the frontend runtime.
-6. **Data Hygiene**:
-   - Always validate that market parquet cache files have $\le 50\%$ null close values before using or saving them to `data/cache/by_date/`.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Ticker: CRL (Charles River Laboratories) — Cross-Sectional Momentum        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. Entry Price: $296.41                                                     │
+│ 2. ATR(14): $11.86                                                          │
+│ 3. Initial Stop Loss: $296.41 - (2.5 * 11.86) = $266.76                     │
+│    -> Clamped by 7% Risk Ceiling: $296.41 * 0.93 = $275.66                  │
+│    -> Risk per share: $296.41 - $275.66 = $20.75 (7.00%)                    │
+│                                                                             │
+│ 4. Profit Targets:                                                          │
+│    - T1: max($296.41 + 2.5*11.86, $296.41*1.06) = $326.05 (+10.00%)         │
+│      Reach Probability P(reach_1) = 68% (>= 50% -> SURVIVES)                │
+│    - T2: max($296.41 + 5.0*11.86, $296.41*1.13) = $343.84 (+16.00%)         │
+│      Reach Probability P(reach_2) = 45% (>= 30% -> SURVIVES)                │
+│    - T3: max($296.41 + 7.5*11.86, $296.41*1.22) = $367.55 (+24.00%)         │
+│      Reach Probability P(reach_3) = 28% (>= 15% -> SURVIVES)                │
+│                                                                             │
+│ 5. Scale-Out & Honest R:R:                                                  │
+│    - All 3 targets survive -> Scale: "50/30/20"                             │
+│    - Expected Move: 0.50*(10.00%) + 0.30*(16.00%) + 0.20*(24.00%) = 14.60%  │
+│    - Honest R:R = 14.60% / 7.00% = 2.09                                     │
+│                                                                             │
+│ 6. Sizing Math:                                                             │
+│    - Composite Score = 42.0 (Win Prob p = 0.35)                             │
+│    - Full Kelly = 0.35 - (0.65 / 2.09) = 0.35 - 0.311 = +0.0390             │
+│    - Half-Kelly = 0.0390 / 2 = 0.0195 (1.95%)                               │
+│    - Single-Stock Cap = min(1.95%, 5.0%) = 1.95%                            │
+│    - Raw Demand on $10k = $195.00                                           │
+│    - Cash Scaled Allocation = $30.42                                        │
+│    - Max Shares = floor($30.42 / $296.41) = 0 shares (fractional in memory) │
+│                                                                             │
+│ 7. Destination: 💼 PORTFOLIO VIEW (allocated_dollars = $30.42 > $0)         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Ticker: PLTR (Palantir Technologies) — Trend Following                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. Entry Price: $185.93                                                     │
+│ 2. ATR(14): $8.92                                                           │
+│ 3. Stop Loss: $185.93 - (2.5 * 8.92) = $163.63                              │
+│    -> Clamped by 7% Risk Ceiling: $185.93 * 0.93 = $172.91                  │
+│    -> Risk per share: $13.02 (7.00%)                                        │
+│                                                                             │
+│ 4. Profit Targets:                                                          │
+│    - T1: max($185.93 + 2.5*8.92, $185.93*1.06) = $208.24 (+12.00%)         │
+│      Reach Probability P(reach_1) = 54% (>= 50% -> SURVIVES)                │
+│    - T2: max($185.93 + 5.0*8.92, $185.93*1.14) = $230.54 (+24.00%)         │
+│      Reach Probability P(reach_2) = 18% (< 30% -> PRUNED TO NULL)           │
+│    - T3: max($185.93 + 8.0*8.92, $185.93*1.22) = $257.30 (+38.38%)         │
+│      Reach Probability P(reach_3) = 7% (< 15% -> PRUNED TO NULL)            │
+│                                                                             │
+│ 5. Scale-Out & Honest R:R:                                                  │
+│    - T2 and T3 pruned -> Scale: "70/30/0" (70% exit at T1, 30% runner)      │
+│    - Expected Move: 0.70*(12.00%) + 0.30*(1.20 * 12.00%) = 12.72%          │
+│    - Honest R:R = 12.72% / 7.00% = 1.20 (vs Unfiltered Ghost R:R = 2.76)   │
+│                                                                             │
+│ 6. Sizing Math:                                                             │
+│    - Composite Score = 47.25 (Win Prob p = 0.35)                            │
+│    - Full Kelly = 0.35 - (0.65 / 1.20) = 0.35 - 0.5417 = -0.1917 <= 0       │
+│    - Half-Kelly = max(0, -0.1917 / 2) = 0.00%                               │
+│    - Allocated Dollars = $0.00                                              │
+│                                                                             │
+│ 7. Destination: 📄 SCAN LOG VIEW (allocated_dollars = $0.00)                │
+│    -> Rejection Reason: "Kelly ≤ 0 (Honest R:R = 1.20)"                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 14. Quantitative Expectancy & Probabilistic Edge Proof
+
+The mathematical edge ($\mathbb{E}[\text{Trade}]$) is defined by the discrete asymmetric pay-off expectation:
+
+$$\mathbb{E}[\text{Trade}] = P_{\text{win}} \times \overline{\text{Win}} - (1 - P_{\text{win}}) \times \overline{\text{Loss}}$$
+
+### Structural Asymmetry Parameters:
+- **Maximum Constrained Loss ($\overline{\text{Loss}}$)**: Bounded by the 7.0% stop-loss ceiling $\to \overline{\text{Loss}} \le 0.070$.
+- **Minimum Target 1 Gain ($T_1$)**: Bounded by the strategy floors $\to \text{Gain}_{T1} \ge 0.050$ to $0.080$.
+- **Average Scale-Out Gain ($\overline{\text{Win}}$)**: For setups with surviving $T_2/T_3$, $\overline{\text{Win}} \in [14.0\%, 22.0\%]$.
+- **Noise Protection**: Stops closer than 4.0% are widened to 4.0% to prevent intraday market-maker noise sweeps.
+
+### Expectancy Matrix:
+$$\mathbb{E}[\text{Return}] = (0.50 \times 0.1460) - (0.50 \times 0.0700) = +0.0730 - 0.0350 = \mathbf{+3.80\%\ \text{per trade}}$$
+
+Even at a conservative 40% win rate ($P_{\text{win}} = 0.40$):
+$$\mathbb{E}[\text{Return}] = (0.40 \times 0.1460) - (0.60 \times 0.0700) = +0.0584 - 0.0420 = \mathbf{+1.64\%\ \text{per trade}}$$
+
+---
+
+## 15. Database Schema & Data Flow Specification
+
+### 1. `signals` Table (Live & Active Recommendations)
+| Column Name | PostgreSQL Type | Nullable | Description |
+| :--- | :--- | :---: | :--- |
+| `id` | `uuid` | No | Primary Key (`gen_random_uuid()`) |
+| `scan_date` | `date` | No | Date of scan generation |
+| `ticker` | `varchar(10)` | No | Ticker symbol (e.g. CRL) |
+| `strategy` | `varchar(50)` | Yes | Internal strategy identifier |
+| `strategy_name` | `varchar(100)` | Yes | Display name of strategy |
+| `composite_score`| `numeric` | Yes | Multi-factor score (0–100) |
+| `tier_label` | `varchar(30)` | Yes | Strong Buy / Buy / Neutral |
+| `price` | `numeric` | Yes | Scan close or live price |
+| `entry_price` | `numeric` | Yes | Suggested trade entry price |
+| `stop_loss` | `numeric` | Yes | Stop-loss price level |
+| `target_1` | `numeric` | Yes | First profit target (T1) |
+| `target_2` | `numeric` | Yes | Second profit target (T2 or null) |
+| `target_3` | `numeric` | Yes | Third profit target (T3 or null) |
+| `reach_prob_t1` | `numeric` | Yes | 504-day empirical reach prob for T1 |
+| `reach_prob_t2` | `numeric` | Yes | 504-day empirical reach prob for T2 |
+| `reach_prob_t3` | `numeric` | Yes | 504-day empirical reach prob for T3 |
+| `scale_out_weights`| `varchar(20)` | Yes | Assigned scale ("50/30/20", etc.) |
+| `weighted_rr_honest`| `numeric` | Yes | Honest Risk-to-Reward ratio |
+| `allocated_dollars`| `numeric` | Yes | Half-Kelly allocated capital ($) |
+| `max_shares` | `integer` | Yes | Allocated integer shares |
+| `status` | `varchar(30)` | Yes | pending, open, hit_t1, hit_t2, etc. |
+
+### 2. `signals_history` Table (Historical Outcome Ledger)
+- Mirrors `signals` schema with additional outcome tracking columns: `outcome` (`stopped`, `hit_t1`, `hit_t2`, `hit_t3`, `closed`), `outcome_date`, `exit_price`, `realized_pnl`.
+
+### 3. `portfolio_state` Table (Equity & Cash Tracking)
+- Columns: `portfolio_value` (numeric), `cash_balance` (numeric), `total_pnl` (numeric), `created_at` (timestamp).
+
+---
+
+## 16. Master Rules & Invariants for LLM Agents
+
+Any autonomous agent or developer modifying this repository MUST uphold these strict invariants:
+
+1. **Portfolio Isolation Rule**:
+   - Only signals where `allocated_dollars > 0 AND status IN ('pending', 'open', 'hit_t1', 'hit_t2')` may appear in the Portfolio View.
+   - All $0 allocated setups must be routed exclusively to the Scan Log View.
+2. **P&L Isolation Rule**:
+   - Total P&L, unrealized return, and equity metrics must NEVER calculate returns on signals with `allocated_dollars = 0`.
+3. **Database Integer Share Rule**:
+   - PostgreSQL column `signals.max_shares` is typed as an `INTEGER`. Always persist integer `int(shares)` to Supabase; fractional precision is handled in TypeScript runtime.
+4. **Target Reach Probability Filter**:
+   - Never remove the $P(\text{reach}_1) \ge 0.50$ filter. If a stock cannot reach T1 in 50% of historical 60-day windows, it must not be recommended.
+5. **Stop Loss Bounding**:
+   - Hard risk ceiling: $\text{StopLoss} \ge P_{\text{entry}} \times 0.93$ (max 7% loss).
+   - Noise floor: $\text{StopLoss} \le P_{\text{entry}} \times 0.96$ (min 4% buffer).
+6. **Next-Day Gap Cancellation**:
+   - Never remove the 3.0% morning open gap cancellation rule. Chasing open gaps ruins asymmetric CTA expectancy.

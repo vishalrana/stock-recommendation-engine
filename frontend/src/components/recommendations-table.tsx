@@ -665,6 +665,38 @@ export default function RecommendationsTable({
         size: 220,
       },
       {
+        id: 'earnings',
+        header: 'Earnings',
+        cell: ({ row }) => {
+          const sig = row.original;
+          const strat = (sig.strategy_name || sig.strategy || '').toLowerCase();
+          const isPead = strat.includes('pead') || strat.includes('earnings');
+          const isRejected = sig.earnings_rejected || (sig.status === 'rejected' && sig.sell_signal_reason?.includes('Earnings in'));
+          const days = sig.days_to_earnings;
+
+          if (isRejected) {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                Earnings in {days !== undefined && days !== null ? `${days}d` : 'window'}
+              </span>
+            );
+          }
+          if (isPead) {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                Post-earnings
+              </span>
+            );
+          }
+          return (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              {days !== undefined && days !== null ? `Earnings passed (${days}d)` : 'Earnings passed'}
+            </span>
+          );
+        },
+        size: 140,
+      },
+      {
         accessorKey: 'scan_date',
         header: 'Scan Date',
         cell: ({ row }) => {

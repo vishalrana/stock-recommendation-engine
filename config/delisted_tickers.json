@@ -1,0 +1,501 @@
+{
+  "description": "Historical S&P 500 delisted tickers (2000-present) for survivorship bias mitigation",
+  "total_count": 55,
+  "delisted_tickers": [
+    {
+      "ticker": "LEH",
+      "company_name": "Lehman Brothers Holdings Inc.",
+      "delisted_date": "2008-09-15",
+      "reason": "bankruptcy",
+      "sector": "Financials",
+      "final_price": 0.05,
+      "peak_price_1yr_prior": 65.4
+    },
+    {
+      "ticker": "ENRNQ",
+      "company_name": "Enron Corp.",
+      "delisted_date": "2001-12-02",
+      "reason": "bankruptcy",
+      "sector": "Energy",
+      "final_price": 0.26,
+      "peak_price_1yr_prior": 84.5
+    },
+    {
+      "ticker": "WAMUQ",
+      "company_name": "Washington Mutual Inc.",
+      "delisted_date": "2008-09-26",
+      "reason": "bankruptcy",
+      "sector": "Financials",
+      "final_price": 0.16,
+      "peak_price_1yr_prior": 39.25
+    },
+    {
+      "ticker": "WB",
+      "company_name": "Wachovia Corp.",
+      "delisted_date": "2008-12-31",
+      "reason": "acquired",
+      "sector": "Financials",
+      "final_price": 5.4,
+      "peak_price_1yr_prior": 54.0
+    },
+    {
+      "ticker": "BSC",
+      "company_name": "Bear Stearns Companies Inc.",
+      "delisted_date": "2008-05-30",
+      "reason": "acquired",
+      "sector": "Financials",
+      "final_price": 10.0,
+      "peak_price_1yr_prior": 159.0
+    },
+    {
+      "ticker": "MER",
+      "company_name": "Merrill Lynch & Co.",
+      "delisted_date": "2009-01-01",
+      "reason": "acquired",
+      "sector": "Financials",
+      "final_price": 12.2,
+      "peak_price_1yr_prior": 85.0
+    },
+    {
+      "ticker": "CFC",
+      "company_name": "Countrywide Financial Corp.",
+      "delisted_date": "2008-07-01",
+      "reason": "acquired",
+      "sector": "Financials",
+      "final_price": 4.1,
+      "peak_price_1yr_prior": 42.0
+    },
+    {
+      "ticker": "WCOM",
+      "company_name": "WorldCom Inc.",
+      "delisted_date": "2002-07-21",
+      "reason": "bankruptcy",
+      "sector": "Communication Services",
+      "final_price": 0.14,
+      "peak_price_1yr_prior": 15.6
+    },
+    {
+      "ticker": "TWX",
+      "company_name": "Time Warner Inc.",
+      "delisted_date": "2018-06-14",
+      "reason": "acquired",
+      "sector": "Communication Services",
+      "final_price": 107.5,
+      "peak_price_1yr_prior": 102.0
+    },
+    {
+      "ticker": "CELG",
+      "company_name": "Celgene Corp.",
+      "delisted_date": "2019-11-20",
+      "reason": "acquired",
+      "sector": "Health Care",
+      "final_price": 108.24,
+      "peak_price_1yr_prior": 90.5
+    },
+    {
+      "ticker": "MON",
+      "company_name": "Monsanto Co.",
+      "delisted_date": "2018-06-07",
+      "reason": "acquired",
+      "sector": "Materials",
+      "final_price": 128.0,
+      "peak_price_1yr_prior": 120.0
+    },
+    {
+      "ticker": "APC",
+      "company_name": "Anadarko Petroleum Corp.",
+      "delisted_date": "2019-08-08",
+      "reason": "acquired",
+      "sector": "Energy",
+      "final_price": 72.0,
+      "peak_price_1yr_prior": 65.0
+    },
+    {
+      "ticker": "AGN",
+      "company_name": "Allergan plc",
+      "delisted_date": "2020-05-08",
+      "reason": "acquired",
+      "sector": "Health Care",
+      "final_price": 193.0,
+      "peak_price_1yr_prior": 180.0
+    },
+    {
+      "ticker": "STI",
+      "company_name": "SunTrust Banks Inc.",
+      "delisted_date": "2019-12-06",
+      "reason": "merged",
+      "sector": "Financials",
+      "final_price": 71.0,
+      "peak_price_1yr_prior": 66.0
+    },
+    {
+      "ticker": "BBT",
+      "company_name": "BB&T Corp.",
+      "delisted_date": "2019-12-06",
+      "reason": "merged",
+      "sector": "Financials",
+      "final_price": 54.0,
+      "peak_price_1yr_prior": 50.0
+    },
+    {
+      "ticker": "ALTR",
+      "company_name": "Altera Corp.",
+      "delisted_date": "2015-12-28",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 54.0,
+      "peak_price_1yr_prior": 48.0
+    },
+    {
+      "ticker": "EMC",
+      "company_name": "EMC Corp.",
+      "delisted_date": "2016-09-07",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 28.5,
+      "peak_price_1yr_prior": 27.0
+    },
+    {
+      "ticker": "BRCM",
+      "company_name": "Broadcom Corp.",
+      "delisted_date": "2016-02-01",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 54.5,
+      "peak_price_1yr_prior": 52.0
+    },
+    {
+      "ticker": "YHOO",
+      "company_name": "Yahoo! Inc.",
+      "delisted_date": "2017-06-16",
+      "reason": "acquired",
+      "sector": "Communication Services",
+      "final_price": 52.5,
+      "peak_price_1yr_prior": 50.0
+    },
+    {
+      "ticker": "CA",
+      "company_name": "CA Technologies",
+      "delisted_date": "2018-11-05",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 44.5,
+      "peak_price_1yr_prior": 42.0
+    },
+    {
+      "ticker": "RHT",
+      "company_name": "Red Hat Inc.",
+      "delisted_date": "2019-07-09",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 190.0,
+      "peak_price_1yr_prior": 175.0
+    },
+    {
+      "ticker": "TIF",
+      "company_name": "Tiffany & Co.",
+      "delisted_date": "2021-01-07",
+      "reason": "acquired",
+      "sector": "Consumer Discretionary",
+      "final_price": 131.5,
+      "peak_price_1yr_prior": 125.0
+    },
+    {
+      "ticker": "VIAB",
+      "company_name": "Viacom Inc.",
+      "delisted_date": "2019-12-04",
+      "reason": "merged",
+      "sector": "Communication Services",
+      "final_price": 23.5,
+      "peak_price_1yr_prior": 32.0
+    },
+    {
+      "ticker": "WCG",
+      "company_name": "WellCare Health Plans Inc.",
+      "delisted_date": "2020-01-23",
+      "reason": "acquired",
+      "sector": "Health Care",
+      "final_price": 315.0,
+      "peak_price_1yr_prior": 290.0
+    },
+    {
+      "ticker": "BHI",
+      "company_name": "Baker Hughes Inc.",
+      "delisted_date": "2017-07-03",
+      "reason": "merged",
+      "sector": "Energy",
+      "final_price": 56.0,
+      "peak_price_1yr_prior": 65.0
+    },
+    {
+      "ticker": "DPS",
+      "company_name": "Dr Pepper Snapple Group Inc.",
+      "delisted_date": "2018-07-09",
+      "reason": "merged",
+      "sector": "Consumer Staples",
+      "final_price": 122.0,
+      "peak_price_1yr_prior": 115.0
+    },
+    {
+      "ticker": "MJN",
+      "company_name": "Mead Johnson Nutrition Co.",
+      "delisted_date": "2017-06-15",
+      "reason": "acquired",
+      "sector": "Consumer Staples",
+      "final_price": 90.0,
+      "peak_price_1yr_prior": 88.0
+    },
+    {
+      "ticker": "RAI",
+      "company_name": "Reynolds American Inc.",
+      "delisted_date": "2017-07-25",
+      "reason": "acquired",
+      "sector": "Consumer Staples",
+      "final_price": 65.0,
+      "peak_price_1yr_prior": 60.0
+    },
+    {
+      "ticker": "LTD",
+      "company_name": "L Brands Inc.",
+      "delisted_date": "2021-08-02",
+      "reason": "removed",
+      "sector": "Consumer Discretionary",
+      "final_price": 18.0,
+      "peak_price_1yr_prior": 45.0
+    },
+    {
+      "ticker": "HOT",
+      "company_name": "Starwood Hotels & Resorts Worldwide Inc.",
+      "delisted_date": "2016-09-23",
+      "reason": "acquired",
+      "sector": "Consumer Discretionary",
+      "final_price": 77.0,
+      "peak_price_1yr_prior": 75.0
+    },
+    {
+      "ticker": "PCP",
+      "company_name": "Precision Castparts Corp.",
+      "delisted_date": "2016-01-29",
+      "reason": "acquired",
+      "sector": "Industrials",
+      "final_price": 235.0,
+      "peak_price_1yr_prior": 230.0
+    },
+    {
+      "ticker": "COL",
+      "company_name": "Rockwell Collins Inc.",
+      "delisted_date": "2018-11-26",
+      "reason": "acquired",
+      "sector": "Industrials",
+      "final_price": 140.0,
+      "peak_price_1yr_prior": 135.0
+    },
+    {
+      "ticker": "TYC",
+      "company_name": "Tyco International plc",
+      "delisted_date": "2016-09-02",
+      "reason": "merged",
+      "sector": "Industrials",
+      "final_price": 43.0,
+      "peak_price_1yr_prior": 40.0
+    },
+    {
+      "ticker": "DOW",
+      "company_name": "The Dow Chemical Co.",
+      "delisted_date": "2017-09-01",
+      "reason": "merged",
+      "sector": "Materials",
+      "final_price": 65.0,
+      "peak_price_1yr_prior": 63.0
+    },
+    {
+      "ticker": "DD",
+      "company_name": "E. I. du Pont de Nemours and Co.",
+      "delisted_date": "2017-09-01",
+      "reason": "merged",
+      "sector": "Materials",
+      "final_price": 83.0,
+      "peak_price_1yr_prior": 80.0
+    },
+    {
+      "ticker": "LLL",
+      "company_name": "L3 Technologies Inc.",
+      "delisted_date": "2019-06-28",
+      "reason": "merged",
+      "sector": "Industrials",
+      "final_price": 245.0,
+      "peak_price_1yr_prior": 220.0
+    },
+    {
+      "ticker": "UTX",
+      "company_name": "United Technologies Corp.",
+      "delisted_date": "2020-04-03",
+      "reason": "merged",
+      "sector": "Industrials",
+      "final_price": 95.0,
+      "peak_price_1yr_prior": 140.0
+    },
+    {
+      "ticker": "RTN",
+      "company_name": "Raytheon Co.",
+      "delisted_date": "2020-04-03",
+      "reason": "merged",
+      "sector": "Industrials",
+      "final_price": 120.0,
+      "peak_price_1yr_prior": 190.0
+    },
+    {
+      "ticker": "ARNC",
+      "company_name": "Arconic Inc.",
+      "delisted_date": "2020-04-01",
+      "reason": "removed",
+      "sector": "Materials",
+      "final_price": 16.0,
+      "peak_price_1yr_prior": 32.0
+    },
+    {
+      "ticker": "CXO",
+      "company_name": "Concho Resources Inc.",
+      "delisted_date": "2021-01-15",
+      "reason": "acquired",
+      "sector": "Energy",
+      "final_price": 58.0,
+      "peak_price_1yr_prior": 62.0
+    },
+    {
+      "ticker": "NBL",
+      "company_name": "Noble Energy Inc.",
+      "delisted_date": "2020-10-05",
+      "reason": "acquired",
+      "sector": "Energy",
+      "final_price": 9.5,
+      "peak_price_1yr_prior": 24.0
+    },
+    {
+      "ticker": "COG",
+      "company_name": "Cabot Oil & Gas Corp.",
+      "delisted_date": "2021-10-01",
+      "reason": "merged",
+      "sector": "Energy",
+      "final_price": 21.0,
+      "peak_price_1yr_prior": 18.0
+    },
+    {
+      "ticker": "VAR",
+      "company_name": "Varian Medical Systems Inc.",
+      "delisted_date": "2021-04-15",
+      "reason": "acquired",
+      "sector": "Health Care",
+      "final_price": 177.0,
+      "peak_price_1yr_prior": 170.0
+    },
+    {
+      "ticker": "ALXN",
+      "company_name": "Alexion Pharmaceuticals Inc.",
+      "delisted_date": "2021-07-21",
+      "reason": "acquired",
+      "sector": "Health Care",
+      "final_price": 182.0,
+      "peak_price_1yr_prior": 175.0
+    },
+    {
+      "ticker": "MXIM",
+      "company_name": "Maxim Integrated Products Inc.",
+      "delisted_date": "2021-08-26",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 103.0,
+      "peak_price_1yr_prior": 95.0
+    },
+    {
+      "ticker": "XLNX",
+      "company_name": "Xilinx Inc.",
+      "delisted_date": "2022-02-14",
+      "reason": "acquired",
+      "sector": "Information Technology",
+      "final_price": 194.0,
+      "peak_price_1yr_prior": 180.0
+    },
+    {
+      "ticker": "CERN",
+      "company_name": "Cerner Corp.",
+      "delisted_date": "2022-06-08",
+      "reason": "acquired",
+      "sector": "Health Care",
+      "final_price": 95.0,
+      "peak_price_1yr_prior": 90.0
+    },
+    {
+      "ticker": "TWTR",
+      "company_name": "Twitter Inc.",
+      "delisted_date": "2022-10-28",
+      "reason": "acquired",
+      "sector": "Communication Services",
+      "final_price": 54.2,
+      "peak_price_1yr_prior": 50.0
+    },
+    {
+      "ticker": "ATVI",
+      "company_name": "Activision Blizzard Inc.",
+      "delisted_date": "2023-10-13",
+      "reason": "acquired",
+      "sector": "Communication Services",
+      "final_price": 95.0,
+      "peak_price_1yr_prior": 85.0
+    },
+    {
+      "ticker": "SBNY",
+      "company_name": "Signature Bank",
+      "delisted_date": "2023-03-12",
+      "reason": "bankruptcy",
+      "sector": "Financials",
+      "final_price": 0.1,
+      "peak_price_1yr_prior": 280.0
+    },
+    {
+      "ticker": "SIVBQ",
+      "company_name": "SVB Financial Group",
+      "delisted_date": "2023-03-10",
+      "reason": "bankruptcy",
+      "sector": "Financials",
+      "final_price": 0.4,
+      "peak_price_1yr_prior": 320.0
+    },
+    {
+      "ticker": "FRC",
+      "company_name": "First Republic Bank",
+      "delisted_date": "2023-05-01",
+      "reason": "bankruptcy",
+      "sector": "Financials",
+      "final_price": 0.35,
+      "peak_price_1yr_prior": 145.0
+    },
+    {
+      "ticker": "BLL",
+      "company_name": "Ball Corp.",
+      "delisted_date": "2022-04-01",
+      "reason": "removed",
+      "sector": "Materials",
+      "final_price": 60.0,
+      "peak_price_1yr_prior": 85.0
+    },
+    {
+      "ticker": "DISCA",
+      "company_name": "Discovery Inc. Series A",
+      "delisted_date": "2022-04-08",
+      "reason": "merged",
+      "sector": "Communication Services",
+      "final_price": 24.0,
+      "peak_price_1yr_prior": 30.0
+    },
+    {
+      "ticker": "INFO",
+      "company_name": "IHS Markit Ltd.",
+      "delisted_date": "2022-02-28",
+      "reason": "merged",
+      "sector": "Industrials",
+      "final_price": 114.0,
+      "peak_price_1yr_prior": 105.0
+    }
+  ]
+}

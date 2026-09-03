@@ -161,7 +161,21 @@ export async function getLatestPortfolioValue(): Promise<number> {
   }
 }
 
+export function calculatePWin(score: number): number {
+  const z = -0.15 * (score - 65.0);
+  const sigmoid = 1.0 / (1.0 + Math.exp(z));
+  const p = 0.35 + 0.40 * sigmoid;
+  return Math.max(0.35, Math.min(0.75, Math.round(p * 10000) / 10000));
+}
+
 export function getRejectionReason(sig: Recommendation): string {
+  if (sig.sell_signal_reason && sig.sell_signal_reason.includes('Earnings in')) {
+    return sig.sell_signal_reason;
+  }
+  if (sig.earnings_rejected) {
+    const days = sig.days_to_earnings !== undefined && sig.days_to_earnings !== null ? `${sig.days_to_earnings}d` : '';
+    return `Earnings in ${days}`;
+  }
   if (sig.status === 'cancelled_gap_up') {
     return 'Cancelled: Gap > 3%';
   }
@@ -172,12 +186,7 @@ export function getRejectionReason(sig: Recommendation): string {
   const rr = sig.weighted_rr_honest ?? sig.weighted_rr ?? 0;
   const score = sig.composite_score || 50;
 
-  let winRate = 0.35;
-  if (score >= 90) winRate = 0.75;
-  else if (score >= 80) winRate = 0.68;
-  else if (score >= 70) winRate = 0.60;
-  else if (score >= 60) winRate = 0.52;
-  else if (score >= 50) winRate = 0.45;
+  const winRate = calculatePWin(score);
 
   const r = Number(rr) > 0 ? Number(rr) : 1.0;
   const kelly = winRate - (1 - winRate) / r;

@@ -27,6 +27,184 @@ from src.data.cache_manager import get_cache_manager
 logger = logging.getLogger(__name__)
 
 
+# Strategy-Specific Constants & Refactored Scoring Tables
+
+SURVIVORSHIP_BIAS_HAIRCUT = 0.85  # 15% reduction for survivorship bias mitigation
+
+STRATEGY_HISTORICAL_EXPECTANCY = {
+    'trend_following': 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT,          # +1.44% (was +1.69%)
+    '52w_high_breakout': 0.0210 * SURVIVORSHIP_BIAS_HAIRCUT,        # +1.79% (was +2.10%)
+    'pullback_recovery': 0.0145 * SURVIVORSHIP_BIAS_HAIRCUT,        # +1.23% (was +1.45%)
+    'cross_sectional_momentum': 0.0180 * SURVIVORSHIP_BIAS_HAIRCUT, # +1.53% (was +1.80%)
+    'pead': 0.0225 * SURVIVORSHIP_BIAS_HAIRCUT,                     # +1.91% (was +2.25%)
+    'sector_rotation': 0.0120 * SURVIVORSHIP_BIAS_HAIRCUT,          # +1.02% (was +1.20%)
+    'mean_reversion': 0.0085 * SURVIVORSHIP_BIAS_HAIRCUT,           # +0.72% (was +0.85%)
+}
+
+STRATEGY_WEIGHT_VECTORS = {
+    'trend_following':         {'mom': 0.45, 'exp': 0.20, 'wr': 0.15, 'reg': 0.10, 'ctx': 0.10},
+    '52w_high_breakout':       {'mom': 0.35, 'exp': 0.20, 'wr': 0.20, 'reg': 0.15, 'ctx': 0.10},
+    'pullback_recovery':       {'mom': 0.20, 'exp': 0.25, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.25},
+    'cross_sectional_momentum': {'mom': 0.40, 'exp': 0.20, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.10},
+    'pead':                    {'mom': 0.15, 'exp': 0.30, 'wr': 0.15, 'reg': 0.10, 'ctx': 0.30},
+    'sector_rotation':         {'mom': 0.25, 'exp': 0.25, 'wr': 0.20, 'reg': 0.20, 'ctx': 0.10},
+    'mean_reversion':          {'mom': 0.10, 'exp': 0.20, 'wr': 0.15, 'reg': 0.15, 'ctx': 0.40},
+}
+
+STRATEGY_OPTIMAL_REGIME = {
+    'trend_following':        100,  # Loves bull
+    '52w_high_breakout':      100,  # Loves bull
+    'pullback_recovery':       50,  # Works in sideways and bull
+    'cross_sectional_momentum': 75, # Prefers bull, tolerates sideways
+    'pead':                    50,  # Regime-agnostic micro event
+    'sector_rotation':         75,  # Prefers bull
+    'mean_reversion':           0,  # Loves bear oversold
+}
+
+MARKET_REGIME_SCORE = {
+    'bull':     100,
+    'sideways':  50,
+    'bear':       0,
+}
+
+
+def normalize_strategy_key(strategy: str) -> str:
+    """Standardize strategy names to internal dictionary keys."""
+    if not strategy:
+        return 'trend_following'
+    s = str(strategy).strip().lower().replace('-', '_').replace(' ', '_')
+    if '52' in s or 'breakout' in s or 'high' in s:
+        return '52w_high_breakout'
+    if 'trend' in s:
+        return 'trend_following'
+    if 'pullback' in s:
+        return 'pullback_recovery'
+    if 'cross' in s or 'momentum' in s:
+        return 'cross_sectional_momentum'
+    if 'pead' in s or 'earnings' in s:
+        return 'pead'
+    if 'sector' in s or 'rotation' in s:
+        return 'sector_rotation'
+    if 'mean' in s or 'reversion' in s:
+        return 'mean_reversion'
+    return s
+
+
+def compute_expectancy_score(strategy: str) -> float:
+    """
+    Fix 2: Break circular R:R dependency by using historical strategy expectancy.
+    S_exp = clip((StrategyHistExpectancy_% + 2.0) / 10.0 * 100, 0, 100)
+    """
+    strat_key = normalize_strategy_key(strategy)
+    hist_exp = STRATEGY_HISTORICAL_EXPECTANCY.get(strat_key, 0.0169)
+    hist_exp_pct = hist_exp * 100.0  # e.g., 1.69% -> 1.69
+    score = ((hist_exp_pct + 2.0) / 10.0) * 100.0
+    return max(0.0, min(100.0, float(score)))
+
+
+def compute_regime_alignment(strategy: str, market_regime: str) -> float:
+    """
+    Fix 5: Continuous, strategy-dependent regime alignment.
+    Penalty = abs(optimal - actual) * 0.6
+    S_reg = clip(100 - penalty, 0, 100)
+    """
+    strat_key = normalize_strategy_key(strategy)
+    optimal = STRATEGY_OPTIMAL_REGIME.get(strat_key, 75)
+    regime_str = str(market_regime).strip().lower()
+    actual = MARKET_REGIME_SCORE.get(regime_str, 50)
+    distance = abs(optimal - actual)
+    penalty = distance * 0.6
+    return max(0.0, min(100.0, float(100.0 - penalty)))
+
+
+def compute_context_score(
+    analyst_pts: float = 0.0,
+    earnings_pts: float = 0.0,
+    fundamental_pts: float = 0.0,
+    news_pts: float = 0.0,
+    de_ratio: Optional[float] = None,
+    current_ratio: Optional[float] = None,
+    earnings_surprise_pct: Optional[float] = None,
+    finbert_sentiment: Optional[float] = None,
+    target_consensus: Optional[float] = None,
+    price: Optional[float] = None,
+) -> float:
+    """
+    Fix 3: Context Score with Veto Gates.
+    Caps or penalizes context score when fundamentals/news are dangerous.
+    """
+    raw = float(analyst_pts or 0.0) + float(earnings_pts or 0.0) + float(fundamental_pts or 0.0) + float(news_pts or 0.0)
+
+    # Veto Gate 1: Dangerous leverage + poor liquidity
+    if de_ratio is not None and current_ratio is not None:
+        try:
+            if float(de_ratio) > 2.0 and float(current_ratio) < 0.8:
+                raw = min(raw, 30.0)
+        except (ValueError, TypeError):
+            pass
+
+    # Veto Gate 2: Severely negative news sentiment
+    if finbert_sentiment is not None:
+        try:
+            if float(finbert_sentiment) < -0.20:
+                raw = min(raw, 40.0)
+        except (ValueError, TypeError):
+            pass
+
+    # Veto Gate 3: Significant earnings miss
+    if earnings_surprise_pct is not None:
+        try:
+            if float(earnings_surprise_pct) < -0.05:
+                raw = raw - 20.0
+        except (ValueError, TypeError):
+            pass
+
+    # Veto Gate 4: Analyst downside (not just zero)
+    if target_consensus is not None and price is not None:
+        try:
+            p = float(price)
+            tc = float(target_consensus)
+            if p > 0:
+                analyst_upside_pct = (tc - p) / p
+                if analyst_upside_pct < 0:
+                    raw = raw - 15.0  # Penalty for negative consensus
+        except (ValueError, TypeError):
+            pass
+
+    return max(0.0, min(100.0, float(raw)))
+
+
+def calculate_p_win(composite_score: float) -> float:
+    """
+    Fix 1: Replace coarse win-probability buckets with smooth sigmoid mapping:
+    p_win = 0.35 + 0.40 / (1 + e^(-0.15 * (S_composite - 65)))
+    Clamped to [0.35, 0.75], rounded to 4 decimal places.
+    """
+    s = float(composite_score)
+    z = -0.15 * (s - 65.0)
+    if z > 50.0:
+        sigmoid_val = 0.0
+    elif z < -50.0:
+        sigmoid_val = 1.0
+    else:
+        sigmoid_val = 1.0 / (1.0 + math.exp(z))
+
+    p = 0.35 + 0.40 * sigmoid_val
+    return max(0.35, min(0.75, round(p, 4)))
+
+
+def calculate_half_kelly(composite_score: float, honest_rr: float) -> float:
+    """
+    Calculate Half-Kelly fraction using sigmoid p_win and honest R:R.
+    R_honest is used ONLY here, not in composite score.
+    """
+    p_win = calculate_p_win(composite_score)
+    r = float(honest_rr) if float(honest_rr) > 0 else 1.0
+    full_kelly = p_win - (1.0 - p_win) / r
+    half_kelly = max(0.0, full_kelly / 2.0)
+    return round(half_kelly, 4)
+
+
 class SignalRanker:
     """
     Composite-normalized ranking engine with tiered fallback.
@@ -61,10 +239,13 @@ class SignalRanker:
     def regime_adjustment(self, score: float, regime: str, stock_metrics: dict) -> float:
         """
         Calculate regime adjustment score (0-100).
-        - Bull: 100.0 if RSI 50-70 AND price > 50DMA else 0.0
-        - Bear: 100.0 if industry IN defensive list OR beta < 1.0 else 0.0
-        - Sideways: 100.0 if abs(RSI - 50) < 8 else 0.0
+        Delegates to continuous compute_regime_alignment if strategy is provided,
+        otherwise preserves original defensive/momentum heuristic for backward compatibility.
         """
+        strat = stock_metrics.get("strategy_name") or stock_metrics.get("strategy")
+        if strat:
+            return compute_regime_alignment(strat, regime)
+
         rsi = stock_metrics.get("current_rsi", 50.0)
         price = stock_metrics.get("price", 0.0)
         dma_50 = stock_metrics.get("dma_50", 0.0)
@@ -97,27 +278,44 @@ class SignalRanker:
     def compute_composite_score(self, row, regime: str, pool_stats: dict = None) -> dict:
         """
         Compute the final composite score and breakdown for a candidate.
-        Expects row to have pre-calculated component scores.
+        Uses Strategy-Specific Weights (Fix 4), Historical Expectancy (Fix 2),
+        Veto-Gated Context (Fix 3), and Continuous Regime Alignment (Fix 5).
         """
-        momentum_score = row.get("momentum_score", 50.0)
-        expectancy_score = row.get("expectancy_score", 50.0)
-        winrate_score = row.get("winrate_score", 50.0)
-        context_score = row.get("context_score", 0.0)
-        
-        regime_score = self.regime_adjustment(momentum_score, regime, row)
-        
-        # TASK 1: Regime-Dependent Composite Weights
-        REGIME_WEIGHTS = {
-            "bull":     {"mom": 0.30, "exp": 0.30, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
-            "sideways": {"mom": 0.25, "exp": 0.35, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
-            "bear":     {"mom": 0.15, "exp": 0.35, "wr": 0.10, "reg": 0.10, "ctx": 0.30},
-        }
-        current_regime = regime.lower()
-        w = REGIME_WEIGHTS.get(current_regime, REGIME_WEIGHTS["sideways"])
-        
-        # Assert weights sum to exactly 1.0
-        assert abs(sum(w.values()) - 1.0) < 1e-9, f"Weights for regime {current_regime} must sum to 1.0!"
-        
+        strategy = row.get("strategy_name") or row.get("strategy") or "trend_following"
+        strat_key = normalize_strategy_key(strategy)
+
+        # 1. Momentum score
+        momentum_score = float(row.get("momentum_score", 50.0))
+
+        # 2. Historical Strategy Expectancy (Fix 2: No circular R:R)
+        expectancy_score = compute_expectancy_score(strat_key)
+
+        # 3. Historical Win Rate score
+        winrate_score = float(row.get("winrate_score", row.get("win_rate", 50.0)))
+
+        # 4. Continuous Strategy-Dependent Regime Alignment (Fix 5)
+        regime_score = compute_regime_alignment(strat_key, regime)
+
+        # 5. Context Score with Veto Gates (Fix 3)
+        context_score = compute_context_score(
+            analyst_pts=float(row.get("context_analyst", 0.0)),
+            earnings_pts=float(row.get("context_earnings", 0.0)),
+            fundamental_pts=float(row.get("context_fundamental", 0.0)),
+            news_pts=float(row.get("context_news", 0.0)),
+            de_ratio=row.get("de_ratio"),
+            current_ratio=row.get("current_ratio"),
+            earnings_surprise_pct=row.get("earnings_surprise_pct"),
+            finbert_sentiment=row.get("finbert_sentiment"),
+            target_consensus=row.get("target_consensus"),
+            price=row.get("price") or row.get("entry_price"),
+        )
+
+        # Strategy-Specific Weight Vector (Fix 4)
+        w = STRATEGY_WEIGHT_VECTORS.get(strat_key, STRATEGY_WEIGHT_VECTORS["trend_following"])
+
+        # Assert weights sum to 1.0
+        assert abs(sum(w.values()) - 1.0) < 1e-9, f"Weights for {strat_key} must sum to 1.0!"
+
         total = (
             w["mom"] * momentum_score
             + w["exp"] * expectancy_score
@@ -125,7 +323,7 @@ class SignalRanker:
             + w["reg"] * regime_score
             + w["ctx"] * context_score
         )
-        
+
         return {
             "total": round(total, 4),
             "breakdown": {
@@ -134,7 +332,9 @@ class SignalRanker:
                 "winrate": round(winrate_score, 4),
                 "regime": round(regime_score, 4),
                 "context": round(context_score, 4),
-            }
+            },
+            "strategy": strat_key,
+            "weights": w,
         }
 
     def composite_rank(self, df: pd.DataFrame, regime: str, top_n: int = 5) -> pd.DataFrame:
@@ -496,36 +696,41 @@ def calculate_normalized_sizing(signals: list, portfolio_value: float, available
     """
     Apply cash-constrained normalization to position sizing.
     Hard-caps every single-stock capital allocation at 5.0% of portfolio value.
+    Computes exact_shares (NUMERIC) and max_shares (INTEGER).
     """
     safe_cash = max(0.0, float(available_cash))
     pv = max(0.0, float(portfolio_value))
     max_single_stock_dollars = 0.05 * pv
-    
-    # Compute raw dollar allocations (Raw New Demand) capped at 5.0% per stock
+
     raw_allocs = []
     for sig in signals:
-        hk_frac = max(0.0, float(sig.get("half_kelly_fraction", 0.0)))
+        score = float(sig.get("composite_score", sig.get("score", 50.0)))
+        rr = float(sig.get("weighted_rr_honest", sig.get("weighted_rr", 2.0)))
+
+        if "half_kelly_fraction" in sig and sig["half_kelly_fraction"] is not None:
+            hk_frac = max(0.0, float(sig["half_kelly_fraction"]))
+        else:
+            hk_frac = calculate_half_kelly(score, rr)
+
         raw_dollars = min(pv * hk_frac, max_single_stock_dollars)
         raw_allocs.append(raw_dollars)
-        
+
     total_needed = sum(raw_allocs)
-    
-    # Calculate normalization multiplier
+
     if safe_cash == 0.0:
         multiplier = 0.0
     elif total_needed > safe_cash and total_needed > 0.0:
         multiplier = safe_cash / total_needed
     else:
         multiplier = 1.0
-        
-    # Build modified signals with final allocations and share counts
+
     result = []
     for i, sig in enumerate(signals):
         sig_copy = sig.copy()
         final_dollar = min(raw_allocs[i] * multiplier, max_single_stock_dollars)
-        
+
         entry = float(sig_copy.get("entry_price", 0.0))
-        
+
         if entry > 0.0 and final_dollar > 0.0:
             exact_shares = round(final_dollar / entry, 4)
             int_shares = int(math.floor(exact_shares))
@@ -533,20 +738,22 @@ def calculate_normalized_sizing(signals: list, portfolio_value: float, available
             exact_shares = 0.0
             int_shares = 0
             final_dollar = 0.0
-            
+
         sig_copy["allocated_dollars"] = round(final_dollar, 2)
         sig_copy["exact_shares"] = exact_shares
         sig_copy["max_shares"] = int_shares
-        
+
         alloc_pct = (final_dollar / portfolio_value * 100.0) if portfolio_value > 0 else 0.0
         if exact_shares > 0:
             if exact_shares < 1.0:
                 sig_copy["position_sizing"] = f"K: {alloc_pct:.1f}% ({exact_shares:.2f} sh)"
             else:
                 sig_copy["position_sizing"] = f"K: {alloc_pct:.1f}% ({int_shares} sh)"
-                
+        else:
+            sig_copy["position_sizing"] = "K: 0.0%"
+
         result.append(sig_copy)
-        
+
     return result
 
 

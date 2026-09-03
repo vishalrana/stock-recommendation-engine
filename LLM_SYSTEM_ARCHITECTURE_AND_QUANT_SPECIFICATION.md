@@ -258,22 +258,43 @@ $$R_{\text{honest}} = \frac{\sum_{k \in \text{surviving}} \left(w_k \times \frac
 
 ---
 
-## 7. Multi-Factor Composite Scoring Engine
+## 7. Multi-Factor Composite Scoring Engine (v2.2 Architecture)
 
-Each surviving setup is scored on a normalized scale of **0.0 to 100.0**:
+Each surviving candidate setup is scored on an objective, normalized scale of **0.0 to 100.0**:
 
-$$\text{Score}_{\text{composite}} = W_{\text{mom}} S_{\text{mom}} + W_{\text{exp}} S_{\text{exp}} + W_{\text{win}} S_{\text{win}} + W_{\text{reg}} S_{\text{reg}} + W_{\text{ctx}} S_{\text{ctx}}$$
+$$\text{Score}_{\text{composite}} = w_{\text{mom}} S_{\text{mom}} + w_{\text{exp}} S_{\text{exp}} + w_{\text{wr}} S_{\text{wr}} + w_{\text{reg}} S_{\text{reg}} + w_{\text{ctx}} S_{\text{ctx}}$$
 
-### Sub-Score Normalization Formulas:
+### 1. Strategy-Specific Weight Vectors (Fix 4)
+Rather than using broad regime-wide weights, weights are strictly tailored to each strategy's alpha drivers:
+
+| Strategy | Momentum ($w_{\text{mom}}$) | Expectancy ($w_{\text{exp}}$) | Win Rate ($w_{\text{wr}}$) | Regime ($w_{\text{reg}}$) | Context ($w_{\text{ctx}}$) | Sum |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Trend Following** | 0.45 | 0.20 | 0.15 | 0.10 | 0.10 | **1.00** |
+| **52-Week High Breakout** | 0.35 | 0.20 | 0.20 | 0.15 | 0.10 | **1.00** |
+| **Pullback Recovery** | 0.20 | 0.25 | 0.20 | 0.10 | 0.25 | **1.00** |
+| **Cross-Sectional Momentum** | 0.40 | 0.20 | 0.20 | 0.10 | 0.10 | **1.00** |
+| **PEAD** | 0.15 | 0.30 | 0.15 | 0.10 | 0.30 | **1.00** |
+| **Sector Rotation** | 0.25 | 0.25 | 0.20 | 0.20 | 0.10 | **1.00** |
+| **Mean Reversion** | 0.10 | 0.20 | 0.15 | 0.15 | 0.40 | **1.00** |
+
+### 2. Sub-Score Formulations:
 1. **Momentum Sub-Score ($S_{\text{mom}} \in [0, 100]$)**:
    $$S_{\text{mom}} = 50 + 25 \times \left(\frac{\text{ADX}_{14} - 25}{25}\right) + 25 \times \text{clip}\left(\frac{\text{Return}_{20\text{d}}}{0.15}, -1.0, 1.0\right)$$
-2. **Expectancy Sub-Score ($S_{\text{exp}} \in [0, 100]$)**:
-   $$S_{\text{exp}} = \text{clip}\left(R_{\text{honest}} \times 35.0, 0.0, 100.0\right)$$
-3. **Past Win Rate Sub-Score ($S_{\text{win}} \in [0, 100]$)**:
-   $$S_{\text{win}} = \text{clip}\left(\text{WinRate}_{\text{historical}} \times 100.0, 0.0, 100.0\right)$$
-4. **Regime Sub-Score ($S_{\text{reg}} \in [0, 100]$)**:
-   $$S_{\text{reg}} = \begin{cases} 100.0, & \text{if Bull Regime} \\ 65.0, & \text{if Sideways Regime} \\ 30.0, & \text{if Bear Regime} \end{cases}$$
-5. **Context Sub-Score ($S_{\text{ctx}} \in [0, 100]$)**: Multimodal score from contextual provider pipeline.
+2. **Expectancy Sub-Score ($S_{\text{exp}} \in [0, 100]$) (Fix 2: No Circular R:R Dependency)**:
+   $R_{\text{honest}}$ is eliminated from the composite score and reserved solely for Half-Kelly position sizing. $S_{\text{exp}}$ uses historical strategy backtest expectancy:
+   $$S_{\text{exp}} = \text{clip}\left(\frac{\text{StrategyHistExpectancy}_{\%} + 2.0}{10.0} \times 100.0, 0.0, 100.0\right)$$
+   *Lookups*: PEAD: +2.25% ($S_{\text{exp}}=42.5$), 52w Breakout: +2.10% ($S_{\text{exp}}=41.0$), Cross-Sectional: +1.80% ($S_{\text{exp}}=38.0$), Trend Following: +1.69% ($S_{\text{exp}}=36.9$), Pullback: +1.45% ($S_{\text{exp}}=34.5$), Sector Rotation: +1.20% ($S_{\text{exp}}=32.0$), Mean Reversion: +0.85% ($S_{\text{exp}}=28.5$).
+3. **Past Win Rate Sub-Score ($S_{\text{wr}} \in [0, 100]$)**:
+   $$S_{\text{wr}} = \text{clip}\left(\text{WinRate}_{\text{historical}} \times 100.0, 0.0, 100.0\right)$$
+4. **Continuous Strategy-Dependent Regime Alignment ($S_{\text{reg}} \in [0, 100]$) (Fix 5)**:
+   $$S_{\text{reg}} = \text{clip}\left(100.0 - |S_{\text{opt}} - S_{\text{mkt}}| \times 0.6, 0.0, 100.0\right)$$
+   Where $S_{\text{mkt}} \in \{\text{Bull}: 100, \text{Sideways}: 50, \text{Bear}: 0\}$.
+   - Trend Following / 52w Breakout ($S_{\text{opt}} = 100$): Bull = 100.0, Sideways = 70.0, Bear = 40.0.
+   - Cross-Sectional / Sector Rotation ($S_{\text{opt}} = 75$): Bull = 85.0, Sideways = 85.0, Bear = 55.0.
+   - Pullback / PEAD ($S_{\text{opt}} = 50$): Bull = 70.0, Sideways = 100.0, Bear = 70.0.
+   - Mean Reversion ($S_{\text{opt}} = 0$): Bull = 40.0, Sideways = 70.0, Bear = 100.0.
+5. **Context Sub-Score with Veto Gates ($S_{\text{ctx}} \in [0, 100]$) (Fix 3)**:
+   Evaluated through fundamental health, news sentiment, and analyst consensus with hard veto rules.
 
 ### Tier Classification:
 $$\text{Tier} = \begin{cases} 
@@ -284,65 +305,68 @@ $$\text{Tier} = \begin{cases}
 
 ---
 
-## 8. Context & Multimodal NLP Scoring Pipeline
+## 8. Context & Multimodal NLP Pipeline with Veto Gates (Fix 3)
 
-The Context Sub-Score ($S_{\text{ctx}}$) aggregates 4 external fundamental, analyst, and sentiment data feeds (0 to 100 pts total):
+The raw Context Score aggregates 4 external fundamental, analyst, and sentiment data feeds (0 to 100 pts total):
+$$\text{RawContext} = \text{Score}_{\text{analyst}} + \text{Score}_{\text{earnings}} + \text{Score}_{\text{fund}} + \text{Score}_{\text{news}}$$
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                 Total Context Score (100 pts)               │
+│                 Raw Context Score (100 pts max)             │
 ├──────────────────────────────┬──────────────────────────────┤
 │ Analyst Consensus (40 pts)   │ Earnings Surprise (30 pts)   │
 │ - Buy/Hold/Sell ratios       │ - Last quarter EPS beat %    │
-│ - Price target upside %      │ - Revenue surprise %         │
+│ - Target price upside %      │ - Revenue surprise %         │
 ├──────────────────────────────┼──────────────────────────────┤
 │ Fundamental Health (20 pts)  │ FinBERT NLP Sentiment (10 pts│
-│ - Debt-to-Equity < 1.5       │ - 7-day headline sentiment   │
-│ - Current Ratio > 1.2        │ - Positive/Negative polarity │
+│ - Debt-to-Equity ratio       │ - 7-day headline sentiment   │
+│ - Current Ratio              │ - Positive/Negative polarity │
 └──────────────────────────────┴──────────────────────────────┘
 ```
 
-1. **Analyst Consensus (40 pts)**:
-   $$\text{Score}_{\text{analyst}} = 40 \times \left(\frac{N_{\text{strong\_buy}} + 0.75 N_{\text{buy}}}{N_{\text{total\_ratings}}}\right)$$
-2. **Earnings Surprise (30 pts)**:
-   $$\text{Score}_{\text{earnings}} = \text{clip}\left(15 + 1.5 \times \text{SurprisePct}_{\text{EPS}}, 0, 30\right)$$
-3. **Fundamental Financial Health (20 pts)**:
-   $$\text{Score}_{\text{fund}} = 10 \times \mathbb{I}\left(\frac{\text{Debt}}{\text{Equity}} < 1.5\right) + 10 \times \mathbb{I}\left(\text{CurrentRatio} > 1.2\right)$$
-4. **FinBERT NLP Sentiment (10 pts)**:
-   $$\text{Score}_{\text{news}} = 5 + 5 \times (\text{Prob}_{\text{positive}} - \text{Prob}_{\text{negative}})$$
+### Deterministic Veto Gates:
+1. **Leverage & Liquidity Veto**: If $\text{Debt-to-Equity} > 2.0$ and $\text{Current Ratio} < 0.8$:
+   $$\text{ContextScore} = \min(\text{RawContext}, 30.0)$$
+2. **FinBERT News Sentiment Veto**: If $\text{FinBERT Sentiment} < -0.20$:
+   $$\text{ContextScore} = \min(\text{RawContext}, 40.0)$$
+3. **Earnings Miss Penalty**: If $\text{Earnings Surprise} < -5.0\%$:
+   $$\text{ContextScore} = \text{RawContext} - 20.0$$
+4. **Analyst Downside Penalty**: If $\text{Consensus Target} < \text{Current Price}$:
+   $$\text{ContextScore} = \text{RawContext} - 15.0$$
+Final score is clipped: $S_{\text{ctx}} = \text{clip}(\text{ContextScore}, 0.0, 100.0)$.
 
 ---
 
 ## 9. Risk Management, Sizing & Capital Allocation Math
 
-Capital allocation is governed by the **Constrained Half-Kelly Sizing Model with Strict 5.0% Single-Stock Cap**:
+Capital allocation is governed by the **Constrained Half-Kelly Sizing Model with Sigmoid Win Probability and 5.0% Single-Stock Cap**:
 
-### 1. Probability of Win Assignment
-$$P_{\text{win}} = \begin{cases} 
-0.75, & \text{if } \text{Score}_{\text{composite}} \ge 90.0 \\ 
-0.68, & \text{if } 80.0 \le \text{Score}_{\text{composite}} < 90.0 \\ 
-0.60, & \text{if } 70.0 \le \text{Score}_{\text{composite}} < 80.0 \\ 
-0.52, & \text{if } 60.0 \le \text{Score}_{\text{composite}} < 70.0 \\ 
-0.45, & \text{if } 50.0 \le \text{Score}_{\text{composite}} < 60.0 \\ 
-0.35, & \text{if } \text{Score}_{\text{composite}} < 50.0 
-\end{cases}$$
+### 1. Sigmoid Win-Probability Mapping (Fix 1)
+Replacing coarse step-buckets, win probability is interpolated smoothly from composite score:
+$$P_{\text{win}} = 0.35 + \frac{0.40}{1 + e^{-0.15 \times (\text{Score}_{\text{composite}} - 65)}}$$
+Output is clamped: $P_{\text{win}} = \text{clip}(P_{\text{win}}, 0.35, 0.75)$, rounded to 4 decimal places.
 
 ### 2. Full Kelly Fraction ($f^*$)
 $$f^* = P_{\text{win}} - \frac{1 - P_{\text{win}}}{R_{\text{honest}}}$$
 
 ### 3. Half-Kelly Fraction ($f_{\text{half}}$)
-$$f_{\text{half}} = \max\left(0, \frac{f^*}{2}\right)$$
+$$f_{\text{half}} = \max\left(0.0, \frac{f^*}{2}\right)$$
 
 ### 4. Single-Stock 5.0% Portfolio Cap Rule
 $$\text{AllocationPct} = \min\left(f_{\text{half}} \times 100\%, 5.0\%\right)$$
 $$\text{RawDemandDollars}_i = \text{PortfolioValue} \times \left(\frac{\text{AllocationPct}_i}{100}\right)$$
 
 ### 5. Cash-Constrained Cross-Sectional Normalization
-If the aggregate dollar demand across all qualified signals exceeds available cash:
+If aggregate dollar demand across all qualified signals exceeds available cash:
 $$\text{TotalDemand} = \sum_{i=1}^{K} \text{RawDemandDollars}_i$$
 $$\text{ScalingFactor} = \min\left(1.0, \frac{\text{AvailableCash}}{\text{TotalDemand}}\right)$$
 $$\text{AllocatedDollars}_i = \text{round}\left(\text{RawDemandDollars}_i \times \text{ScalingFactor}, 2\right)$$
-$$\text{Shares}_i = \text{floor}\left(\frac{\text{AllocatedDollars}_i}{P_{\text{entry}, i}}\right) \quad \text{[DB Integer Persistence]}$$
+
+### 6. Canonical Fractional Shares vs Integer Fallback
+- Canonical Broker Order Sizing:
+  $$\text{exact\_shares}_i = \text{round}\left(\frac{\text{AllocatedDollars}_i}{P_{\text{entry}, i}}, 4\right) \quad \text{[NUMERIC(10, 4)]}$$
+- Database Backward-Compatibility Fallback:
+  $$\text{max\_shares}_i = \text{int}\left(\text{floor}(\text{exact\_shares}_i)\right) \quad \text{[INTEGER]}$$
 
 ---
 

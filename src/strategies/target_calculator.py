@@ -150,6 +150,8 @@ class TargetCalculationResult:
     weighted_rr_honest: float
     is_valid: bool
     rejection_reason: Optional[str] = None
+    reach_prob_raw: Optional[float] = None
+    reach_prob_adjusted: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -266,12 +268,13 @@ def calculate_targets(
     price_df: Optional[pd.DataFrame] = None,
     mock_reach_probs: Optional[Tuple[float, float, float]] = None,
     override_targets: Optional[Tuple[float, float, float]] = None,
+    sector: Optional[str] = None,
 ) -> TargetCalculationResult:
     """
     Full 3-layer target calculation and reach-probability filtering engine.
 
     Layer 1: Computes ATR targets and fixed-floor targets per strategy, selecting max().
-    Layer 2: Applies reach-probability decision tree to filter or prune targets.
+    Layer 2: Applies reach-probability decision tree with survivorship bias mitigation.
     Layer 3: Computes honest weighted risk-to-reward ratio for Half-Kelly sizing.
     """
     strat_key = normalize_strategy_name(strategy_name)
@@ -298,14 +301,16 @@ def calculate_targets(
     t2_pct = (cand_t2 - entry) / entry if entry > 0 else 0.0
     t3_pct = (cand_t3 - entry) / entry if entry > 0 else 0.0
 
-    # Layer 2 — Reach Probabilities
+    # Layer 2 — Reach Probabilities with Survivorship Bias Adjustment
     if mock_reach_probs is not None:
         rp_t1, rp_t2, rp_t3 = mock_reach_probs
+        raw_t1 = rp_t1
     else:
         hold = cfg["hold_days"]
-        rp_t1 = get_reach_prob(ticker, t1_pct, hold, price_df)
-        rp_t2 = get_reach_prob(ticker, t2_pct, hold, price_df)
-        rp_t3 = get_reach_prob(ticker, t3_pct, hold, price_df)
+        from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
+        rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_pct, hold, price_df, sector=sector)
+        rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_pct, hold, price_df, sector=sector)
+        rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_pct, hold, price_df, sector=sector)
 
     t1_min = cfg["t1_min"]
     t2_min = cfg["t2_min"]
@@ -331,6 +336,8 @@ def calculate_targets(
             weighted_rr_honest=0.0,
             is_valid=False,
             rejection_reason=f"ReachProb(T1) {rp_t1:.1%} < StrategyMin.T1 ({t1_min:.1%})",
+            reach_prob_raw=round(raw_t1, 4),
+            reach_prob_adjusted=round(rp_t1, 4),
         )
 
     elif rp_t2 < t2_min:
@@ -354,6 +361,8 @@ def calculate_targets(
             scale_out_weights="70/30/0",
             weighted_rr_honest=weighted_rr,
             is_valid=True,
+            reach_prob_raw=round(raw_t1, 4),
+            reach_prob_adjusted=round(rp_t1, 4),
         )
 
     elif rp_t3 < t3_min:
@@ -378,6 +387,8 @@ def calculate_targets(
             scale_out_weights="60/30/10",
             weighted_rr_honest=weighted_rr,
             is_valid=True,
+            reach_prob_raw=round(raw_t1, 4),
+            reach_prob_adjusted=round(rp_t1, 4),
         )
 
     elif rp_t3 < 0.15:
@@ -403,6 +414,8 @@ def calculate_targets(
             scale_out_weights="60/30/10",
             weighted_rr_honest=weighted_rr,
             is_valid=True,
+            reach_prob_raw=round(raw_t1, 4),
+            reach_prob_adjusted=round(rp_t1, 4),
         )
 
     else:
@@ -428,4 +441,6 @@ def calculate_targets(
             scale_out_weights="50/30/20",
             weighted_rr_honest=weighted_rr,
             is_valid=True,
+            reach_prob_raw=round(raw_t1, 4),
+            reach_prob_adjusted=round(rp_t1, 4),
         )

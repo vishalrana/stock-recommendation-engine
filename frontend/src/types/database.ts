@@ -58,8 +58,13 @@ export interface Recommendation {
   sell_price?: number | null;
   context_analyst?: number | null;
   context_earnings?: number | null;
-  context_news?: number | null;
   context_fundamental?: number | null;
+  context_news?: number | null;
+  exact_shares?: number | null;
+  de_ratio?: number | null;
+  current_ratio?: number | null;
+  earnings_surprise_pct?: number | null;
+  finbert_sentiment?: number | null;
   exit_dollars_t1?: number | null;
   exit_dollars_t2?: number | null;
   exit_dollars_t3?: number | null;
@@ -67,6 +72,11 @@ export interface Recommendation {
   exit_price_t2?: number | null;
   exit_price_t3?: number | null;
   unrealized_pnl?: number | null;
+  next_earnings_date?: string | null;
+  days_to_earnings?: number | null;
+  earnings_rejected?: boolean | null;
+  reach_prob_adjusted?: number | null;
+  reach_prob_raw?: number | null;
 }
 
 export interface ScanLog {

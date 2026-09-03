@@ -39,8 +39,9 @@ from regime import get_regime
 from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
 from src.data.cache_manager import get_cache_manager
-from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
 from src.strategies.target_calculator import calculate_targets
+from src.filters.earnings_filter import fetch_earnings_calendar, earnings_risk_filter
+from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
 
 
 def get_cache_mode(args) -> str:
@@ -520,6 +521,14 @@ def main():
         logger.error("Failed to initialize Supabase client: %s", e)
         sys.exit(1)
 
+    # ── Earnings Calendar Preload (Cached Daily) ─────────────────────
+    earnings_calendar_cache = {}
+    try:
+        earnings_calendar_cache = fetch_earnings_calendar(tickers, supabase=supabase)
+        logger.info(f"[EARNINGS CALENDAR] Loaded {len(earnings_calendar_cache)} ticker schedules")
+    except Exception as ec_err:
+        logger.warning(f"Could not load earnings calendar: {ec_err}")
+
     # TASK 3: Drawdown Circuit Breaker
     portfolio_value = 10000.0
     peak_value = 10000.0
@@ -839,34 +848,29 @@ def main():
             tier1_candidates = [sig for sig in final_signals if float(sig.get("composite_score") or 0.0) >= 85.0]
             # 2. Identify Weak Holdings (Score <= 55)
             weak_holdings = [pos for pos in open_positions if float(pos.get("composite_score") or 0.0) <= 55.0]
+            # Estimate raw Kelly weights & total raw dollars needed for new signals
+            from src.position_sizer import calculate_p_win
+            total_raw_dollars_needed = 0.0
+            for sig in final_signals:
+                score = float(sig.get("composite_score", 0.0))
+                win_p = calculate_p_win(score)
+                
+                rr_val = sig.get('weighted_rr_honest') or sig.get('weighted_rr') or 2.0
+                rr_val = float(rr_val) if float(rr_val) > 0 else 2.0
+                kelly_f = win_p - (1.0 - win_p) / rr_val
+                half_kelly = max(0.0, kelly_f / 2.0)
+                
+                half_kelly_fraction = half_kelly * risk_multiplier * size_mult
+                raw_dollar_sizing = min(portfolio_value * half_kelly_fraction, 0.05 * portfolio_value)
+                total_raw_dollars_needed += raw_dollar_sizing
             
-            if tier1_candidates and weak_holdings:
-                # Estimate raw Kelly weights & total raw dollars needed for new signals
-                total_raw_dollars_needed = 0.0
-                for sig in final_signals:
-                    score = float(sig.get("composite_score", 0.0))
-                    win_p = 0.35
-                    if score >= 90.0: win_p = 0.75
-                    elif score >= 80.0: win_p = 0.68
-                    elif score >= 70.0: win_p = 0.60
-                    elif score >= 60.0: win_p = 0.52
-                    elif score >= 50.0: win_p = 0.45
-                    
-                    rr_val = sig.get('weighted_rr') if sig.get('weighted_rr', 0) > 0 else 2.0
-                    kelly_f = win_p - (1.0 - win_p) / rr_val
-                    half_kelly = max(0.0, kelly_f / 2.0)
-                    
-                    half_kelly_fraction = half_kelly * risk_multiplier * size_mult
-                    raw_dollar_sizing = min(portfolio_value * half_kelly_fraction, 0.05 * portfolio_value)
-                    total_raw_dollars_needed += raw_dollar_sizing
-                
-                # Sort weak holdings lowest score first to rotate the weakest ones first
-                weak_holdings = sorted(weak_holdings, key=lambda x: float(x.get("composite_score") or 0.0))
-                
-                # Pair them up and trigger rotation if cash-constrained
-                from jobs.supabase_client import execute_position_exit
-                
-                for t1_cand in tier1_candidates:
+            # Sort weak holdings lowest score first to rotate the weakest ones first
+            weak_holdings = sorted(weak_holdings, key=lambda x: float(x.get("composite_score") or 0.0))
+            
+            # Pair them up and trigger rotation if cash-constrained
+            from jobs.supabase_client import execute_position_exit
+            
+            for t1_cand in tier1_candidates:
                     # Check cash constraint
                     unallocated_cash = portfolio_value - open_positions_allocated_sum
                     if total_raw_dollars_needed <= unallocated_cash:
@@ -917,6 +921,10 @@ def main():
         logger.info(f"[PORTFOLIO] Available cash for new setups: ${available_cash:.2f}")
 
         # Phase 1: Pre-calculate raw Kelly weights and metrics for potential new setups
+        earnings_rejected_count = 0
+        reach_rejected_count = 0
+        kelly_rejected_count = 0
+        rejected_signals_to_insert = []
         candidates_to_size = []
         for sig in final_signals:
             ticker = sig["ticker"]
@@ -935,6 +943,34 @@ def main():
                 logger.info(f"[TIER FILTER] Skipping {sig['ticker']} as it is tier {sig['tier_label']} (only Strong Buy and Buy allowed)")
                 continue
 
+            # 0. Earnings Date Risk Filter (Feature 1)
+            # ponytail: reject before expensive target calculation
+            from datetime import datetime as dt_cls
+            scan_dt = dt_cls.strptime(sig["scan_date"], "%Y-%m-%d").date() if isinstance(sig["scan_date"], str) else sig["scan_date"]
+            er_res = earnings_risk_filter(
+                ticker=ticker,
+                scan_date=scan_dt,
+                strategy=strategy_name,
+                earnings_calendar=earnings_calendar_cache,
+            )
+            sig["next_earnings_date"] = er_res.get("next_earnings_date")
+            sig["days_to_earnings"] = er_res.get("days_to_earnings")
+
+            if not er_res.get("pass", True):
+                sig["status"] = "rejected"
+                sig["earnings_rejected"] = True
+                sig["rejection_reason"] = er_res.get("reason", "Earnings blackout")
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
+                earnings_rejected_count += 1
+                logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']}")
+                rejected_signals_to_insert.append(sig)
+                continue
+            else:
+                sig["earnings_rejected"] = False
+
             atr = float(sig.get("atr_14", 0.0))
 
             # 1. Enforce Hard Stop-Loss Risk Ceiling (Max 7.0% Max Loss)
@@ -950,7 +986,7 @@ def main():
                 stop_loss = max_tight_stop
                 sig['stop_loss'] = stop_loss
 
-            # 2. Strategy-Specific ATR Targets with Reach Probability Filtering
+            # 2. Strategy-Specific ATR Targets with Survivorship Bias Mitigation
             ticker_df = None
             if cache_manager:
                 try:
@@ -965,10 +1001,21 @@ def main():
                 stop_loss=stop_loss,
                 strategy_name=strategy_name,
                 price_df=ticker_df,
+                sector=sig.get("sector") or sig.get("industry"),
             )
 
             if not calc_res.is_valid:
                 logger.info(f"[REACH PROB FILTER] Dropping {ticker} ({strategy_name}): {calc_res.rejection_reason}")
+                reach_rejected_count += 1
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = calc_res.rejection_reason
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
+                sig["reach_prob_raw"] = calc_res.reach_prob_raw
+                sig["reach_prob_adjusted"] = calc_res.reach_prob_adjusted
+                rejected_signals_to_insert.append(sig)
                 continue
 
             sig["target_1"] = calc_res.target_1
@@ -983,20 +1030,20 @@ def main():
             sig["reach_prob_t1"] = calc_res.reach_prob_t1
             sig["reach_prob_t2"] = calc_res.reach_prob_t2
             sig["reach_prob_t3"] = calc_res.reach_prob_t3
+            sig["reach_prob_raw"] = calc_res.reach_prob_raw
+            sig["reach_prob_adjusted"] = calc_res.reach_prob_adjusted
             sig["scale_out_weights"] = calc_res.scale_out_weights
             sig["weighted_rr"] = calc_res.weighted_rr_honest
             sig["weighted_rr_honest"] = calc_res.weighted_rr_honest
 
-            # TASK 2 & 3: Sizing adjustments based on VIX override and drawdown controls
-            win_p = 0.35
-            if score >= 90.0: win_p = 0.75
-            elif score >= 80.0: win_p = 0.68
-            elif score >= 70.0: win_p = 0.60
-            elif score >= 60.0: win_p = 0.52
-            elif score >= 50.0: win_p = 0.45
+            # Fix 1: Sizing adjustments based on smooth sigmoid win probability
+            from src.position_sizer import calculate_p_win
+            win_p = calculate_p_win(score)
             
             rr_val = calc_res.weighted_rr_honest if calc_res.weighted_rr_honest > 0 else 2.0
             kelly_f = win_p - (1.0 - win_p) / rr_val
+            if kelly_f <= 0.0:
+                kelly_rejected_count += 1
             half_kelly = max(0.0, kelly_f / 2.0)
             
             # Pre-calculate half kelly fraction
@@ -1008,14 +1055,26 @@ def main():
         from src.ranker import calculate_normalized_sizing
         sized_signals = calculate_normalized_sizing(candidates_to_size, portfolio_value, available_cash)
 
+        # Log Scan Summary line
+        total_signals = len(final_signals)
+        portfolio_count = sum(1 for s in sized_signals if s.get("allocated_dollars", 0) > 0)
+        logger.info(
+            f"Scan Summary: {total_signals} candidates | "
+            f"{earnings_rejected_count} earnings-rejected | "
+            f"{reach_rejected_count} reach-prob-rejected | "
+            f"{kelly_rejected_count} kelly-rejected | "
+            f"{portfolio_count} funded positions"
+        )
+
         # Phase 3: Construct final ranked signals list for database insertion
-        for sig in sized_signals:
-            # We display the final allocated percentage in position_sizing string
+        all_signals_to_save = sized_signals + rejected_signals_to_insert
+        for sig in all_signals_to_save:
+            is_rejected = sig.get("status") == "rejected"
             final_alloc_pct = 0.0
-            if portfolio_value > 0:
-                final_alloc_pct = (sig["allocated_dollars"] / portfolio_value) * 100.0
+            if portfolio_value > 0 and not is_rejected:
+                final_alloc_pct = (sig.get("allocated_dollars", 0.0) / portfolio_value) * 100.0
             position_sizing_str = f"K: {final_alloc_pct:.1f}%"
-            if final_alloc_pct == 0.0 or available_cash <= 0:
+            if final_alloc_pct == 0.0 or available_cash <= 0 or is_rejected:
                 position_sizing_str = "K: 0.0%"
 
             ranked_signals.append(
@@ -1027,19 +1086,19 @@ def main():
                     "price": sig["price"],
                     "entry_price": sig["entry_price"],
                     "stop_loss": sig["stop_loss"],
-                    "exit_price": sig["exit_price"],
-                    "upside_pct": sig["upside_pct"],
-                    "risk_reward": sig["risk_reward"],
-                    "current_rsi": sig["current_rsi"],
+                    "exit_price": sig.get("exit_price"),
+                    "upside_pct": sig.get("upside_pct"),
+                    "risk_reward": sig.get("risk_reward"),
+                    "current_rsi": sig.get("current_rsi"),
                     "rsi_min_10d": sig.get("rsi_min_10d"),
-                    "volume_ratio": sig["volume_ratio"],
-                    "adx_value": sig["adx_value"],
-                    "macd_histogram": sig["macd_histogram"],
-                    "ema20": sig["ema20"],
-                    "score": sig["composite_score"],
-                    "composite_score": sig["composite_score"],
-                    "quality_score": sig["quality_score"],
-                    "tier_label": sig["tier_label"],
+                    "volume_ratio": sig.get("volume_ratio"),
+                    "adx_value": sig.get("adx_value"),
+                    "macd_histogram": sig.get("macd_histogram"),
+                    "ema20": sig.get("ema20"),
+                    "score": sig.get("composite_score", sig.get("score", 0.0)),
+                    "composite_score": sig.get("composite_score", sig.get("score", 0.0)),
+                    "quality_score": sig.get("quality_score", sig.get("composite_score", 0.0)),
+                    "tier_label": sig.get("tier_label", "Speculative"),
                     "strategy": sig["strategy"],
                     "regime": regime_str,
                     "is_fallback": bool(sig.get("is_fallback", False)),
@@ -1062,32 +1121,44 @@ def main():
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig["strategy"],
                     "context_score": sig.get("context_score", 0.0),
-                    # GTM persistence columns (Task 2)
+                    # GTM persistence columns
                     "entry_date": get_next_trading_day(datetime.strptime(sig["scan_date"], "%Y-%m-%d").date()).isoformat(),
-                    "status": "pending",
+                    "status": "rejected" if is_rejected else "pending",
                     "sell_signal": False,
-                    "sell_signal_reason": None,
+                    "sell_signal_reason": sig.get("rejection_reason") if is_rejected else None,
                     "sell_price": None,
-                    # Context breakdown columns (Task 7)
+                    # Context breakdown columns
                     "context_analyst": float(sig.get("context_analyst") or 0.0),
                     "context_earnings": float(sig.get("context_earnings") or 0.0),
                     "context_fundamental": float(sig.get("context_fundamental") or 0.0),
                     "context_news": float(sig.get("context_news") or 0.0),
+                    # Veto and ratios
+                    "de_ratio": sig.get("de_ratio"),
+                    "current_ratio": sig.get("current_ratio"),
+                    "earnings_surprise_pct": sig.get("earnings_surprise_pct"),
+                    "finbert_sentiment": sig.get("finbert_sentiment"),
                     # New position sizing columns
-                    "allocated_dollars": sig["allocated_dollars"],
-                    "max_shares": sig["max_shares"],
+                    "allocated_dollars": sig.get("allocated_dollars", 0.0),
+                    "exact_shares": sig.get("exact_shares", 0.0),
+                    "max_shares": sig.get("max_shares", 0),
+                    # Earnings and Survivorship Risk columns
+                    "next_earnings_date": sig.get("next_earnings_date"),
+                    "days_to_earnings": sig.get("days_to_earnings"),
+                    "earnings_rejected": bool(sig.get("earnings_rejected", False)),
+                    "reach_prob_raw": sig.get("reach_prob_raw"),
+                    "reach_prob_adjusted": sig.get("reach_prob_adjusted"),
                 }
             )
     else:
         logger.info("No technically qualified signals found.")
 
     rsi_breadth_pct = round(100.0 * rsi_passed_count / scanned_count, 1) if scanned_count > 0 else 0.0
-    signals_recommended = len(ranked_signals)
+    signals_recommended = len([s for s in ranked_signals if s.get("status") != "rejected"])
     
     if ranked_signals:
         logger.info("=== FINAL RECOMMENDED SIGNALS ===")
         for s in ranked_signals:
-            logger.info(f"Ticker: {s['ticker']:<5} | Strategy: {s['strategy']:<25} | Composite Score: {s['composite_score']:.2f} | Tier: {s['tier_label']}")
+            logger.info(f"Ticker: {s['ticker']:<5} | Strategy: {s['strategy']:<25} | Composite Score: {s['composite_score']:.2f} | Status: {s['status']} | Tier: {s['tier_label']}")
         logger.info("=================================")
     else:
         logger.info("No high-confidence setups tonight. Cash is a position.")
@@ -1167,12 +1238,29 @@ def main():
                         "context_earnings": float(sig.get("context_earnings") or 0.0),
                         "context_fundamental": float(sig.get("context_fundamental") or 0.0),
                         "context_news": float(sig.get("context_news") or 0.0),
+                        "de_ratio": sig.get("de_ratio"),
+                        "current_ratio": sig.get("current_ratio"),
+                        "earnings_surprise_pct": sig.get("earnings_surprise_pct"),
+                        "finbert_sentiment": sig.get("finbert_sentiment"),
                         "allocated_dollars": sig.get("allocated_dollars"),
+                        "exact_shares": sig.get("exact_shares"),
                         "max_shares": int(sig.get("max_shares", 0)) if sig.get("max_shares") is not None else None,
+                        "next_earnings_date": sig.get("next_earnings_date"),
+                        "days_to_earnings": sig.get("days_to_earnings"),
+                        "earnings_rejected": bool(sig.get("earnings_rejected", False)),
+                        "reach_prob_raw": sig.get("reach_prob_raw"),
+                        "reach_prob_adjusted": sig.get("reach_prob_adjusted"),
                     })
                 
                 # Attempt insertion with full schema; fall back to base columns if DB migration is pending
-                new_cols = ("target_1_atr", "target_2_atr", "target_3_atr", "reach_prob_t1", "reach_prob_t2", "reach_prob_t3", "scale_out_weights", "weighted_rr_honest")
+                new_cols = (
+                    "target_1_atr", "target_2_atr", "target_3_atr",
+                    "reach_prob_t1", "reach_prob_t2", "reach_prob_t3",
+                    "scale_out_weights", "weighted_rr_honest", "exact_shares",
+                    "de_ratio", "current_ratio", "earnings_surprise_pct", "finbert_sentiment",
+                    "next_earnings_date", "days_to_earnings", "earnings_rejected",
+                    "reach_prob_adjusted", "reach_prob_raw"
+                )
                 try:
                     supabase.table("signals").insert(ranked_signals).execute()
                 except Exception as sig_err:

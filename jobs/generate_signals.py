@@ -39,6 +39,7 @@ from regime import get_regime
 from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
 from src.data.cache_manager import get_cache_manager
+from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
 from src.strategies.target_calculator import calculate_targets
 from src.filters.earnings_filter import fetch_earnings_calendar, earnings_risk_filter
 from src.filters.survivorship_bias import compute_reach_prob_with_survivorship

@@ -36,6 +36,7 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
     return {
       ...s,
+      tier_label: s.tier_label || 'Rejected',
       status: s.status || 'pending',
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate ?? 0,
@@ -60,6 +61,7 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
 
     return {
       ...h,
+      tier_label: h.tier_label || 'Rejected',
       entry_date: h.scan_date,
       exit_date: h.outcome_date,
       status: status || 'closed',
@@ -113,6 +115,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
     return {
       ...s,
+      tier_label: s.tier_label || 'Rejected',
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate ?? 0,
       total_trades: (m.wins ?? 0) + (m.losses ?? 0),

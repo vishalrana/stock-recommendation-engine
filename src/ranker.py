@@ -23,6 +23,7 @@ import datetime
 from src.providers.context.aggregator import ContextAggregator
 from src.scorers.context_scorer import ContextScorer
 from src.data.cache_manager import get_cache_manager
+from src.position_sizer import assign_tier, allocate_capital
 
 logger = logging.getLogger(__name__)
 
@@ -324,8 +325,12 @@ class SignalRanker:
             + w["ctx"] * context_score
         )
 
+        honest_rr = float(row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
+        tier_label = assign_tier(total, honest_rr)
+
         return {
             "total": round(total, 4),
+            "tier_label": tier_label,
             "breakdown": {
                 "momentum": round(momentum_score, 4),
                 "expectancy": round(expectancy_score, 4),
@@ -533,31 +538,17 @@ class SignalRanker:
         threshold = TIER1_THRESHOLDS.get(regime.lower(), 75)
         logger.info(f"[SCORING] Regime={regime}, Tier1 threshold={threshold}")
 
-        # 6. Assign Tier Labels
+        # 6. Assign Tier Labels using assign_tier
         tiers = []
         for _, row in df_filtered.iterrows():
-            score = row["composite_score"]
-            exp = row["expectancy_pct"]
-            wr = row["win_rate"]
-            trades = row.get("total_trades", 0)
-            ctx_score = row.get("context_score", 0.0)
-
-            current_regime = regime.lower()
-            t_threshold = TIER1_THRESHOLDS.get(current_regime, 75)
-            if current_regime == "bear":
-                tier1_pass = (score >= t_threshold) and (ctx_score > 50.0)
-            else:
-                tier1_pass = score >= t_threshold
-
-            is_t1 = tier1_pass and (exp > 0.0) and (wr >= 35.0) and (trades >= 10)
-            is_t2 = (score >= 50.0) and (exp >= 0.0) and (wr >= 25.0) and (trades >= 10)
-            is_t3 = (score >= 40.0) and (exp >= -2.0)
-
-            if is_t1:
+            score = float(row["composite_score"])
+            rr = float(row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
+            t_label = assign_tier(score, rr)
+            if t_label == "Strong Buy":
                 tiers.append(1)
-            elif is_t2:
+            elif t_label == "Buy":
                 tiers.append(2)
-            elif is_t3:
+            elif t_label == "Watch":
                 tiers.append(3)
             else:
                 tiers.append(4)
@@ -571,7 +562,7 @@ class SignalRanker:
         self.signals_speculative = int(sum(df_filtered["temp_tier"] == 4))
 
         # Map temp_tier to tier_label
-        tier_map = {1: "Strong Buy", 2: "Buy", 3: "Watch", 4: "Speculative"}
+        tier_map = {1: "Strong Buy", 2: "Buy", 3: "Watch", 4: "Rejected"}
         df_filtered["tier_label"] = df_filtered["temp_tier"].map(tier_map)
 
         # Log all composite scores for debugging
@@ -694,67 +685,10 @@ class SignalRanker:
 
 def calculate_normalized_sizing(signals: list, portfolio_value: float, available_cash: float) -> list:
     """
-    Apply cash-constrained normalization to position sizing.
-    Hard-caps every single-stock capital allocation at 5.0% of portfolio value.
-    Computes exact_shares (NUMERIC) and max_shares (INTEGER).
+    Backwards-compatible wrapper calling allocate_capital sequential funding.
     """
-    safe_cash = max(0.0, float(available_cash))
-    pv = max(0.0, float(portfolio_value))
-    max_single_stock_dollars = 0.05 * pv
-
-    raw_allocs = []
-    for sig in signals:
-        score = float(sig.get("composite_score", sig.get("score", 50.0)))
-        rr = float(sig.get("weighted_rr_honest", sig.get("weighted_rr", 2.0)))
-
-        if "half_kelly_fraction" in sig and sig["half_kelly_fraction"] is not None:
-            hk_frac = max(0.0, float(sig["half_kelly_fraction"]))
-        else:
-            hk_frac = calculate_half_kelly(score, rr)
-
-        raw_dollars = min(pv * hk_frac, max_single_stock_dollars)
-        raw_allocs.append(raw_dollars)
-
-    total_needed = sum(raw_allocs)
-
-    if safe_cash == 0.0:
-        multiplier = 0.0
-    elif total_needed > safe_cash and total_needed > 0.0:
-        multiplier = safe_cash / total_needed
-    else:
-        multiplier = 1.0
-
-    result = []
-    for i, sig in enumerate(signals):
-        sig_copy = sig.copy()
-        final_dollar = min(raw_allocs[i] * multiplier, max_single_stock_dollars)
-
-        entry = float(sig_copy.get("entry_price", 0.0))
-
-        if entry > 0.0 and final_dollar > 0.0:
-            exact_shares = round(final_dollar / entry, 4)
-            int_shares = int(math.floor(exact_shares))
-        else:
-            exact_shares = 0.0
-            int_shares = 0
-            final_dollar = 0.0
-
-        sig_copy["allocated_dollars"] = round(final_dollar, 2)
-        sig_copy["exact_shares"] = exact_shares
-        sig_copy["max_shares"] = int_shares
-
-        alloc_pct = (final_dollar / portfolio_value * 100.0) if portfolio_value > 0 else 0.0
-        if exact_shares > 0:
-            if exact_shares < 1.0:
-                sig_copy["position_sizing"] = f"K: {alloc_pct:.1f}% ({exact_shares:.2f} sh)"
-            else:
-                sig_copy["position_sizing"] = f"K: {alloc_pct:.1f}% ({int_shares} sh)"
-        else:
-            sig_copy["position_sizing"] = "K: 0.0%"
-
-        result.append(sig_copy)
-
-    return result
+    from src.position_sizer import calculate_normalized_sizing as _cns
+    return _cns(signals, portfolio_value, available_cash)
 
 
 

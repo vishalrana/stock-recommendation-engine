@@ -209,7 +209,5 @@ class Week52HighStrategy(StrategyInterface):
         }
 
     def rank_candidates(self, candidates: List[dict], regime: str) -> List[dict]:
-        # Filter out blocked candidates
-        valid = [c for c in candidates if not c.get("is_blocked")]
-        valid.sort(key=lambda x: x['composite_score'], reverse=True)
-        return valid[:3]
+        # P0-1: Central SignalRanker is single source of truth.
+        return [c for c in candidates if not c.get("is_blocked")]

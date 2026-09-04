@@ -23,7 +23,14 @@ import datetime
 from src.providers.context.aggregator import ContextAggregator
 from src.scorers.context_scorer import ContextScorer
 from src.data.cache_manager import get_cache_manager
-from src.position_sizer import assign_tier, allocate_capital
+from src.position_sizer import (
+    assign_tier,
+    allocate_capital,
+    calculate_p_win,
+    calculate_half_kelly,
+    calculate_normalized_sizing,
+    validate_candidate_for_allocation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +213,79 @@ def calculate_half_kelly(composite_score: float, honest_rr: float) -> float:
     return round(half_kelly, 4)
 
 
+def compute_momentum_score(row: dict) -> float:
+    """
+    P0-2: Explicit continuous technical momentum score (0-100).
+    Uses RSI, DMA 50 proximity, Volume Ratio, and MACD Histogram.
+    """
+    rsi = row.get("current_rsi")
+    price = row.get("price") if row.get("price") is not None else row.get("entry_price")
+    dma_50 = row.get("dma_50") if row.get("dma_50") is not None else row.get("ema20")
+    volume_ratio = row.get("volume_ratio")
+    macd_hist = row.get("macd_histogram", 0.0)
+
+    if rsi is None or price is None or dma_50 is None or volume_ratio is None:
+        raise ValueError(
+            f"Missing required technical momentum features: rsi={rsi}, price={price}, dma_50={dma_50}, volume_ratio={volume_ratio}"
+        )
+
+    rsi_val = float(rsi)
+    p_val = float(price)
+    d_val = float(dma_50)
+    v_val = float(volume_ratio)
+    m_val = float(macd_hist or 0.0)
+
+    # RSI score (peaks at 50, decreases as it moves away)
+    rsi_score = max(0.0, min(100.0, 100.0 - abs(rsi_val - 50.0) * 4.0))
+
+    # Proximity score to DMA 50
+    proximity = abs(p_val / d_val - 1.0) if d_val > 0 else 0.0
+    proximity_score = max(0.0, min(100.0, 100.0 - proximity * 500.0))
+
+    # Volume score
+    volume_score = max(0.0, min(100.0, v_val * 50.0))
+
+    # MACD score
+    macd_score = max(0.0, min(100.0, 50.0 + m_val * 200.0))
+
+    raw_momentum = (rsi_score + proximity_score + volume_score + macd_score) / 4.0
+
+    # Sigmoid weighting around 55.0
+    sigmoid_weight = 1.0 / (1.0 + math.exp(-(raw_momentum - 55.0) / 5.0))
+    momentum_score = raw_momentum * (0.5 + 0.5 * sigmoid_weight)
+    return round(max(0.0, min(100.0, momentum_score)), 4)
+
+
+def validate_candidate_features(row: dict) -> tuple[bool, str]:
+    """
+    P0-2: Validate that all required production features exist before composite scoring.
+    """
+    ticker = row.get("ticker")
+    if not ticker:
+        return False, "Missing ticker"
+
+    strategy = row.get("strategy") or row.get("strategy_name")
+    if not strategy:
+        return False, "Missing strategy"
+
+    # Momentum check: must either have momentum_score or technical inputs to compute it
+    if row.get("momentum_score") is None:
+        has_tech = (
+            row.get("current_rsi") is not None
+            and (row.get("price") is not None or row.get("entry_price") is not None)
+            and (row.get("dma_50") is not None or row.get("ema20") is not None)
+            and row.get("volume_ratio") is not None
+        )
+        if not has_tech:
+            return False, "Missing momentum_score and required technical momentum features"
+
+    # Win rate check: must have winrate_score or win_rate or past_win_rate
+    if row.get("winrate_score") is None and row.get("win_rate") is None and row.get("past_win_rate") is None:
+        return False, "Missing winrate_score / past_win_rate"
+
+    return True, "Valid"
+
+
 class SignalRanker:
     """
     Composite-normalized ranking engine with tiered fallback.
@@ -281,28 +361,52 @@ class SignalRanker:
         Compute the final composite score and breakdown for a candidate.
         Uses Strategy-Specific Weights (Fix 4), Historical Expectancy (Fix 2),
         Veto-Gated Context (Fix 3), and Continuous Regime Alignment (Fix 5).
+        P0-2: No silent neutral/zero defaults for missing features.
         """
-        strategy = row.get("strategy_name") or row.get("strategy") or "trend_following"
+        strategy = row.get("strategy_name") or row.get("strategy")
+        if not strategy:
+            raise ValueError("Missing required field 'strategy' in row for composite scoring")
         strat_key = normalize_strategy_key(strategy)
 
-        # 1. Momentum score
-        momentum_score = float(row.get("momentum_score", 50.0))
+        # 1. Momentum score (P0-2: No silent 50.0 fallback)
+        if "momentum_score" in row and row["momentum_score"] is not None:
+            momentum_score = float(row["momentum_score"])
+        else:
+            momentum_score = compute_momentum_score(row)
 
         # 2. Historical Strategy Expectancy (Fix 2: No circular R:R)
-        expectancy_score = compute_expectancy_score(strat_key)
+        if "expectancy_score" in row and row["expectancy_score"] is not None:
+            expectancy_score = float(row["expectancy_score"])
+        else:
+            expectancy_score = compute_expectancy_score(strat_key)
 
-        # 3. Historical Win Rate score
-        winrate_score = float(row.get("winrate_score", row.get("win_rate", 50.0)))
+        # 3. Historical Win Rate score (P0-2: No silent 50.0 fallback)
+        winrate_val = row.get("winrate_score")
+        if winrate_val is None:
+            winrate_val = row.get("win_rate")
+        if winrate_val is None:
+            winrate_val = row.get("past_win_rate")
+        if winrate_val is None:
+            raise ValueError(f"Missing required field 'winrate_score'/'win_rate' for {row.get('ticker', 'unknown')}")
+        winrate_score = float(winrate_val)
 
         # 4. Continuous Strategy-Dependent Regime Alignment (Fix 5)
-        regime_score = compute_regime_alignment(strat_key, regime)
+        if "regime_score" in row and row["regime_score"] is not None:
+            regime_score = float(row["regime_score"])
+        else:
+            regime_score = compute_regime_alignment(strat_key, regime)
 
         # 5. Context Score with Veto Gates (Fix 3)
+        c_analyst = float(row.get("context_analyst", 0.0) or 0.0)
+        c_earnings = float(row.get("context_earnings", 0.0) or 0.0)
+        c_fundamental = float(row.get("context_fundamental", 0.0) or 0.0)
+        c_news = float(row.get("context_news", 0.0) or 0.0)
+
         context_score = compute_context_score(
-            analyst_pts=float(row.get("context_analyst", 0.0)),
-            earnings_pts=float(row.get("context_earnings", 0.0)),
-            fundamental_pts=float(row.get("context_fundamental", 0.0)),
-            news_pts=float(row.get("context_news", 0.0)),
+            analyst_pts=c_analyst,
+            earnings_pts=c_earnings,
+            fundamental_pts=c_fundamental,
+            news_pts=c_news,
             de_ratio=row.get("de_ratio"),
             current_ratio=row.get("current_ratio"),
             earnings_surprise_pct=row.get("earnings_surprise_pct"),
@@ -310,6 +414,11 @@ class SignalRanker:
             target_consensus=row.get("target_consensus"),
             price=row.get("price") or row.get("entry_price"),
         )
+        if "context_score" in row and row["context_score"] is not None and float(row["context_score"]) > 0:
+            if c_analyst == 0.0 and c_earnings == 0.0 and c_fundamental == 0.0 and c_news == 0.0:
+                context_score = float(row["context_score"])
+            else:
+                context_score = max(context_score, float(row["context_score"]))
 
         # Strategy-Specific Weight Vector (Fix 4)
         w = STRATEGY_WEIGHT_VECTORS.get(strat_key, STRATEGY_WEIGHT_VECTORS["trend_following"])
@@ -330,6 +439,7 @@ class SignalRanker:
 
         return {
             "total": round(total, 4),
+            "composite_score": round(total, 4),
             "tier_label": tier_label,
             "breakdown": {
                 "momentum": round(momentum_score, 4),

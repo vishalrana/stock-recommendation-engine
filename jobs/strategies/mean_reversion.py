@@ -248,26 +248,8 @@ class MeanReversionStrategy(StrategyInterface):
             'strategy': 'Mean Reversion',
         }
 
-        # Filter minimum confidence
-        valid_tiers = []
-        if self.minimum_confidence() == "Strong Buy":
-            valid_tiers = ["Strong Buy"]
-        elif self.minimum_confidence() == "Buy":
-            valid_tiers = ["Strong Buy", "Buy"]
-        elif self.minimum_confidence() == "Watch":
-            valid_tiers = ["Strong Buy", "Buy", "Watch"]
-        else:
-            valid_tiers = ["Strong Buy", "Buy", "Watch", "Speculative"]
-
-        if tier_label not in valid_tiers:
-            return None
-
         return signal
 
     def rank_candidates(self, candidates: List[dict], regime: str) -> List[dict]:
-        # Filter out blocked candidates
-        valid = [c for c in candidates if not c.get("is_blocked")]
-        # Sort by composite_score descending
-        valid.sort(key=lambda x: x['composite_score'], reverse=True)
-        # Return top 5 from this strategy
-        return valid[:5]
+        # P0-1: Central SignalRanker is single source of truth.
+        return [c for c in candidates if not c.get("is_blocked")]

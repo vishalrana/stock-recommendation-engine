@@ -690,22 +690,10 @@ def main():
             rsi_passed_count += strategy.rsi_passed_count
 
         if strategy_signals:
-            from src.position_sizer import assign_tier
-            ranked = strategy.rank_candidates(strategy_signals, regime_str)
-            for s in ranked:
-                rr = float(s.get("weighted_rr_honest") or s.get("weighted_rr") or s.get("risk_reward") or 2.0)
-                score = float(s.get("composite_score", s.get("score", 0.0)))
-                s["tier_label"] = assign_tier(score, rr)
-            buy_ranked = [s for s in ranked if s["tier_label"] in ("Strong Buy", "Buy")]
-            strategy_counts[strategy.name] = len(buy_ranked)
-            all_signals.extend(buy_ranked)
-
+            strategy_counts[strategy.name] = len(strategy_signals)
+            all_signals.extend(strategy_signals)
             if hasattr(strategy, "signals_blocked"):
                 signals_blocked += strategy.signals_blocked
-            if hasattr(strategy, "signals_strong_buy"):
-                signals_strong_buy += strategy.signals_strong_buy
-            if hasattr(strategy, "signals_buy"):
-                signals_buy += strategy.signals_buy
         else:
             strategy_counts[strategy.name] = 0
 
@@ -717,100 +705,146 @@ def main():
 
     ranked_signals: list[dict] = []
     error_msg = None
+    rejected_signals_to_insert = []
 
     if all_signals:
-        # TASK 1: Log the applied weight vector on each run
-        REGIME_WEIGHTS = {
-            "bull":     {"mom": 0.30, "exp": 0.30, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
-            "sideways": {"mom": 0.25, "exp": 0.35, "wr": 0.15, "reg": 0.10, "ctx": 0.15},
-            "bear":     {"mom": 0.15, "exp": 0.35, "wr": 0.10, "reg": 0.10, "ctx": 0.30},
-        }
-        w = REGIME_WEIGHTS.get(regime_str.lower(), REGIME_WEIGHTS["sideways"])
-        logger.info(f"[WEIGHTS] Regime={regime_str}, weights={w}")
+        # P0-1 & P0-2: Central SignalRanker is single source of truth
+        candidates = deduplicate_by_ticker(all_signals)
+        logger.info(f"[CENTRAL RANKER] Processing {len(candidates)} candidates from all strategies...")
 
-        final_signals = deduplicate_by_ticker(all_signals)
-        
-        # High-Win-Probability Filter: Require Strong Buy or Buy tier for top recommendations
-        logger.info("[QUALITY GATE] Filtering signals to high-confidence setups (Strong Buy and Buy only)...")
-        strict_signals = [s for s in final_signals if s.get("tier_label") in ("Strong Buy", "Buy")]
-        
-        if strict_signals:
-            final_signals = strict_signals
-        else:
-            logger.info("[QUALITY GATE] No setups met Strong Buy or Buy tier; recommending NOTHING tonight.")
-            final_signals = []
-
-        final_signals.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
-        final_signals = final_signals[:TOP_N]
-
-        t1 = sum(1 for s in final_signals if s["tier_label"] == "Strong Buy")
-        t2 = sum(1 for s in final_signals if s["tier_label"] == "Buy")
-        t3 = sum(1 for s in final_signals if s["tier_label"] == "Watch")
-        t4 = sum(1 for s in final_signals if s["tier_label"] == "Speculative")
-        logger.info(
-            "Final recommendations: %d signals (T1: %d, T2: %d, T3: %d, Speculative: %d)",
-            len(final_signals),
-            t1,
-            t2,
-            t3,
-            t4,
+        from src.ranker import (
+            SignalRanker,
+            compute_momentum_score,
+            compute_expectancy_score,
+            compute_regime_alignment,
+            validate_candidate_features,
         )
+        from src.providers.context.aggregator import ContextAggregator
+        from src.scorers.context_scorer import ContextScorer
 
-        # === Post-Ranking Context Safety Net ===
-        # Ensure no final signals slip through without context_score (skip if SKIP_NLP=true)
+        ranker = SignalRanker()
+        context_aggregator = ContextAggregator()
+        context_scorer = ContextScorer()
         skip_nlp = os.getenv("SKIP_NLP", "false").lower() == "true"
-        if not skip_nlp:
-            from src.providers.context.aggregator import ContextAggregator
-            from src.scorers.context_scorer import ContextScorer
-            from src.ranker import SignalRanker
-            
-            context_aggregator = ContextAggregator()
-            context_scorer = ContextScorer()
-            ranker = SignalRanker()
-            
-            for sig in final_signals:
-                if sig.get("context_score", 0.0) == 0.0 or sig.get("context_score") is None:
-                    logger.info(f"[CONTEXT FALLBACK] Computing context on-the-fly for {sig['ticker']}")
-                    try:
-                        price_df = ranker._fetch_price_history(sig["ticker"])
-                        if price_df is not None and not price_df.empty:
-                            ctx = context_aggregator.get_aggregated(sig["ticker"], price_df)
-                            tech_data = {
-                                'rsi': sig.get("current_rsi", 50),
-                                'adx': sig.get("adx_value", 20),
-                                'volume_ratio': sig.get("volume_ratio", 1.0),
-                            }
-                            sig["context_score"], sig["context_analyst"], sig["context_earnings"], sig["context_fundamental"], sig["context_news"] = context_scorer.calculate_with_breakdown(ctx, float(sig["entry_price"]), tech_data)
-                            
-                            # Save to context_cache table on cache miss
-                            if ctx.cached_score is None:
-                                from src.providers.context.aggregator import save_context_to_cache
-                                save_context_to_cache(sig["ticker"], sig["context_score"], ctx)
-                                
-                            # Recompute composite score properly using regime-dependent weights
-                            # (context_score is now on [0,100] scale after the scorer fix)
-                            row_dict = {
-                                "momentum_score": float(sig.get("momentum_score", 50.0)),
-                                "expectancy_score": float(sig.get("expectancy_score", 50.0)),
-                                "winrate_score": float(sig.get("winrate_score", 50.0)),
-                                "context_score": float(sig["context_score"]),
-                                "current_rsi": float(sig.get("current_rsi", 50.0)),
-                                "price": float(sig.get("price", sig.get("entry_price", 0.0))),
-                                "dma_50": float(sig.get("dma_50", sig.get("ema20", sig.get("price", 0.0)))),
-                                "industry": sig.get("industry", ""),
-                            }
-                            res = ranker.compute_composite_score(row_dict, regime_str)
-                            sig["composite_score"] = round(res["total"], 4)
-                            sig["quality_score"] = round(res["total"], 4)
-                            sig["tier_label"] = res.get("tier_label") or assign_tier(sig["composite_score"], float(sig.get("weighted_rr_honest") or 2.0))
-                            logger.info(f"[CONTEXT FALLBACK] Computed context_score {sig['context_score']:.2f} for {sig['ticker']} (new composite: {sig['composite_score']:.1f}, tier: {sig['tier_label']})")
-                    except Exception as e:
-                        logger.warning(f"[CONTEXT FALLBACK] Failed for {sig['ticker']}: {e}")
-                        sig["context_score"] = 0.0
 
-            # Re-sort and enforce top 3 hard cap after context scoring
-            final_signals.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
-            final_signals = final_signals[:TOP_N]
+        # P0-2: Calculate technical momentum, win rate, expectancy, and regime scores
+        for sig in candidates:
+            # 1. Technical Momentum Score (from real indicator values)
+            try:
+                sig["momentum_score"] = compute_momentum_score(sig)
+            except Exception as m_err:
+                logger.warning(f"Could not compute momentum score for {sig.get('ticker')}: {m_err}")
+                sig["momentum_score"] = None
+
+            # 2. Historical Win Rate Score (from ticker metrics)
+            t_upper = sig["ticker"].upper()
+            w_val = sig.get("past_win_rate")
+            if w_val is None and t_upper in metrics_map:
+                w_val = metrics_map[t_upper].get("win_rate")
+            if w_val is not None:
+                sig["winrate_score"] = float(w_val)
+                sig["win_rate"] = float(w_val)
+                sig["past_win_rate"] = float(w_val)
+            else:
+                sig["winrate_score"] = None
+
+            # 3. Strategy Expectancy Score
+            strat_name = sig.get("strategy", "Trend Following")
+            sig["expectancy_score"] = compute_expectancy_score(strat_name)
+
+            # 4. Continuous Regime Score
+            sig["regime_score"] = compute_regime_alignment(strat_name, regime_str)
+
+        # Context Scoring with breakdown (P0-2)
+        if not skip_nlp and candidates:
+            logger.info(f"Computing context scoring for {len(candidates)} candidates in parallel...")
+            def _score_ctx(cand):
+                t = cand["ticker"]
+                try:
+                    price_df = ranker._fetch_price_history(t)
+                    if price_df is not None and not price_df.empty:
+                        ctx = context_aggregator.get_aggregated(t, price_df)
+                        tech_data = {
+                            'rsi': cand.get("current_rsi", 50),
+                            'adx': cand.get("adx_value", 20),
+                            'volume_ratio': cand.get("volume_ratio", 1.0),
+                        }
+                        c_score, c_analyst, c_earnings, c_fundamental, c_news = context_scorer.calculate_with_breakdown(
+                            ctx, float(cand.get("entry_price") or cand.get("price", 1.0)), tech_data
+                        )
+                        if ctx.cached_score is None:
+                            from src.providers.context.aggregator import save_context_to_cache
+                            save_context_to_cache(t, c_score, ctx)
+                        return (t, c_score, c_analyst, c_earnings, c_fundamental, c_news, getattr(ctx, "de_ratio", None), getattr(ctx, "current_ratio", None), getattr(ctx, "earnings_surprise_pct", None), getattr(ctx, "finbert_sentiment", None), getattr(ctx, "target_consensus", None))
+                except Exception as ctx_err:
+                    logger.warning(f"Context scoring failed for {t}: {ctx_err}")
+                return (t, 0.0, 0.0, 0.0, 0.0, 0.0, None, None, None, None, None)
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(_score_ctx, c): c for c in candidates}
+                ctx_map = {}
+                try:
+                    for future in as_completed(futures, timeout=60.0):
+                        res_data = future.result(timeout=10.0)
+                        ctx_map[res_data[0]] = res_data[1:]
+                except Exception as batch_err:
+                    logger.warning(f"Parallel context batch timeout: {batch_err}")
+
+            for c in candidates:
+                t = c["ticker"]
+                if t in ctx_map:
+                    c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"], c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"] = ctx_map[t]
+                else:
+                    c["context_score"] = 0.0
+                    c["context_analyst"] = 0.0
+                    c["context_earnings"] = 0.0
+                    c["context_fundamental"] = 0.0
+                    c["context_news"] = 0.0
+        else:
+            for c in candidates:
+                c["context_score"] = 0.0
+                c["context_analyst"] = 0.0
+                c["context_earnings"] = 0.0
+                c["context_fundamental"] = 0.0
+                c["context_news"] = 0.0
+
+        # P0-2: Central Composite Scoring with strict validation
+        scored_candidates = []
+        for sig in candidates:
+            is_valid_feat, feat_msg = validate_candidate_features(sig)
+            if not is_valid_feat:
+                logger.warning(f"[FEATURE VALIDATION FAIL] Dropping {sig.get('ticker')}: {feat_msg}")
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Validation failed: {feat_msg}"
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
+                rejected_signals_to_insert.append(sig)
+                continue
+
+            try:
+                res = ranker.compute_composite_score(sig, regime_str)
+                sig["composite_score"] = round(res["total"], 4)
+                sig["quality_score"] = round(res["total"], 4)
+                sig["score_breakdown"] = res["breakdown"]
+                scored_candidates.append(sig)
+            except Exception as score_err:
+                logger.warning(f"Scoring error for {sig.get('ticker')}: {score_err}")
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Scoring error: {score_err}"
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
+                rejected_signals_to_insert.append(sig)
+
+        # Sort ALL valid candidates by composite score DESC
+        # P0-3: DO NOT TRUNCATE TO TOP_N HERE!
+        scored_candidates.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
+        final_signals = scored_candidates
+        logger.info(f"Central ranking complete: {len(final_signals)} candidates scored.")
 
         # ponytail: Hybrid exit architecture — short-term keeps ATR-scaled T1/T2/T3,
         # trend/momentum strategies get None targets + trailing stop
@@ -1053,18 +1087,32 @@ def main():
                 rejected_signals_to_insert.append(sig)
                 continue
 
-            # Fix 1: Sizing adjustments based on smooth sigmoid win probability & Half-Kelly
+            # P0-5: Enforce Drawdown & VIX Risk Controls
+            from src.risk_controls import enforce_risk_controls
+            risk_allowed, combined_risk_mult, risk_reason = enforce_risk_controls(
+                sig, portfolio_value, peak_value, vix_size_mult=size_mult
+            )
+            if not risk_allowed or combined_risk_mult <= 0.0:
+                logger.info(f"[RISK CONTROL GATE] Dropping {ticker}: {risk_reason}")
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = risk_reason
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
+                rejected_signals_to_insert.append(sig)
+                continue
+
+            # P0-4: Sizing adjustments based on smooth sigmoid win probability & Adjusted Half-Kelly
             from src.position_sizer import calculate_p_win
             win_p = calculate_p_win(score)
             
             rr_val = calc_res.weighted_rr_honest if calc_res.weighted_rr_honest > 0 else 2.0
-            kelly_f = win_p - (1.0 - win_p) / rr_val
-            sig["kelly_fraction"] = round(kelly_f, 4)
-            half_kelly = max(0.0, kelly_f / 2.0)
-            sig["half_kelly_fraction"] = round(half_kelly * risk_multiplier * size_mult, 4)
-            sig["raw_dollar_demand"] = round(min(portfolio_value * sig["half_kelly_fraction"], 0.05 * portfolio_value), 2)
+            raw_kelly = win_p - (1.0 - win_p) / rr_val
+            sig["diagnostic_raw_kelly"] = round(raw_kelly, 4)
+            sig["kelly_fraction"] = round(raw_kelly, 4)  # Retained strictly for audit/diagnostics
 
-            if kelly_f <= 0.0:
+            if raw_kelly <= 0.0:
                 kelly_rejected_count += 1
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Kelly ≤ 0 (Honest R:R = {rr_val:.2f})"
@@ -1073,6 +1121,36 @@ def main():
                 sig["max_shares"] = 0
                 sig["position_sizing"] = "K: 0.0%"
                 kelly_rejected_list.append(sig)
+                rejected_signals_to_insert.append(sig)
+                continue
+
+            half_kelly = max(0.0, raw_kelly / 2.0)
+            final_adjusted_half_kelly = round(half_kelly * combined_risk_mult, 4)
+            sig["final_adjusted_half_kelly"] = final_adjusted_half_kelly
+            sig["half_kelly_fraction"] = final_adjusted_half_kelly
+            sig["raw_dollar_demand"] = round(min(portfolio_value * final_adjusted_half_kelly, 0.05 * portfolio_value), 2)
+
+            if final_adjusted_half_kelly <= 0.0:
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = "Adjusted Half-Kelly is 0 after risk multipliers"
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
+                rejected_signals_to_insert.append(sig)
+                continue
+
+            # P0-7: Validate candidate fields before allocation
+            from src.position_sizer import validate_candidate_for_allocation
+            is_valid_cand, val_err = validate_candidate_for_allocation(sig)
+            if not is_valid_cand:
+                logger.warning(f"[ALLOCATION VALIDATION FAIL] Dropping {ticker}: {val_err}")
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Validation failed: {val_err}"
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = "K: 0.0%"
                 rejected_signals_to_insert.append(sig)
                 continue
             

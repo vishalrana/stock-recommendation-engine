@@ -469,6 +469,7 @@ class SignalRanker:
         context_score_map = {}
         if top_50_tickers and not skip_nlp:
             logger.info("Starting parallel context scoring for %d candidates", len(top_50_tickers))
+            from concurrent.futures import as_completed, TimeoutError
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {
                     executor.submit(compute_context_score, row["ticker"], row.to_dict()): row["ticker"]
@@ -476,12 +477,16 @@ class SignalRanker:
                     if row["ticker"] in top_50_tickers
                 }
                 
-                for future in futures:
-                    try:
-                        ticker, c_score, c_analyst, c_earnings, c_fundamental, c_news = future.result()
-                        context_score_map[ticker] = (c_score, c_analyst, c_earnings, c_fundamental, c_news)
-                    except Exception as future_err:
-                        logger.warning("Future execution failed: %s", future_err)
+                try:
+                    for future in as_completed(futures, timeout=60.0):
+                        t_name = futures[future]
+                        try:
+                            ticker, c_score, c_analyst, c_earnings, c_fundamental, c_news = future.result(timeout=10.0)
+                            context_score_map[ticker] = (c_score, c_analyst, c_earnings, c_fundamental, c_news)
+                        except Exception as future_err:
+                            logger.warning("Context scoring failed for %s: %s", t_name, future_err)
+                except TimeoutError:
+                    logger.warning("Parallel context scoring batch timed out after 60s; proceeding with available scores.")
 
         # Build final scores
         context_scores = []

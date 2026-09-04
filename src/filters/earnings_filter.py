@@ -11,16 +11,11 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-# Strategy-Specific Earnings Blackout Windows (days prior to announcement)
-EARNINGS_BLACKOUT_DAYS: Dict[str, int] = {
-    'trend_following': 5,        # Avoid 5 days before earnings
-    '52w_high_breakout': 3,      # Avoid 3 days before
-    'pullback_recovery': 7,      # Avoid 7 days before (volatility kills mean-reversion)
-    'cross_sectional_momentum': 5,
-    'pead': 0,                   # PEAD is *about* earnings — no blackout, entry in 3d post announcement
-    'sector_rotation': 3,
-    'mean_reversion': 7,
-}
+# Canonical Quantitative Configuration (Single Source of Truth)
+from src.quant_config import (
+    EARNINGS_BLACKOUT_DAYS,
+    EARNINGS_CACHE_TTL_SECONDS,
+)
 
 
 def normalize_strategy_key(strategy: str) -> str:
@@ -146,14 +141,48 @@ def earnings_risk_filter(
     }
 
 
+def is_earnings_record_fresh(record: Optional[Dict[str, Any]], max_age_seconds: int = EARNINGS_CACHE_TTL_SECONDS) -> bool:
+    """
+    Check if an earnings cache record is fresh (<= 24 hours old).
+    Returns False for missing or stale records.
+    """
+    if not record or not isinstance(record, dict):
+        return False
+    updated_at_val = record.get("updated_at") or record.get("cached_at")
+    if not updated_at_val:
+        return False
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if isinstance(updated_at_val, (int, float)):
+            dt = datetime.datetime.fromtimestamp(updated_at_val, tz=datetime.timezone.utc)
+        elif isinstance(updated_at_val, str):
+            s = updated_at_val.replace("Z", "+00:00")
+            dt = datetime.datetime.fromisoformat(s)
+        elif isinstance(updated_at_val, datetime.datetime):
+            dt = updated_at_val
+        elif isinstance(updated_at_val, datetime.date):
+            dt = datetime.datetime.combine(updated_at_val, datetime.time.min, tzinfo=datetime.timezone.utc)
+        else:
+            return False
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+        age = (now - dt).total_seconds()
+        return 0 <= age <= max_age_seconds
+    except Exception:
+        return False
+
+
 def fetch_earnings_calendar(tickers: List[str], supabase=None) -> Dict[str, Dict[str, Any]]:
     """
     Populates and retrieves upcoming earnings dates for universe tickers.
     Checks Supabase DB cache first to avoid hitting external API rate limits.
+    Refreshes records older than 24 hours and fetches missing records.
     Falls back gracefully to Yahoo Finance if Finnhub is rate-limited or unavailable.
     """
     calendar_map: Dict[str, Dict[str, Any]] = {}
-    today = datetime.date.today()
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # 1. Check local Supabase table cache first
     if supabase is not None:
@@ -170,10 +199,16 @@ def fetch_earnings_calendar(tickers: List[str], supabase=None) -> Dict[str, Dict
         except Exception as e:
             logger.warning(f"Could not load earnings_calendar from DB: {e}")
 
-    # Identify tickers needing refresh (missing or older than 24 hours)
-    tickers_to_fetch = [t.upper() for t in tickers if t.upper() not in calendar_map]
+    # 2. Identify tickers needing fetch (missing) or refresh (stale > 24 hours)
+    tickers_to_fetch = []
+    for t in tickers:
+        t_up = t.upper()
+        if t_up not in calendar_map:
+            tickers_to_fetch.append(t_up)
+        elif not is_earnings_record_fresh(calendar_map[t_up], EARNINGS_CACHE_TTL_SECONDS):
+            tickers_to_fetch.append(t_up)
 
-    # # ponytail: Lazy batch fetch using yfinance fallback if Finnhub is omitted
+    # 3. Fetch missing/stale records using fallback
     for t in tickers_to_fetch[:30]:  # Cap batch to avoid long waits
         try:
             import yfinance as yf
@@ -188,7 +223,7 @@ def fetch_earnings_calendar(tickers: List[str], supabase=None) -> Dict[str, Dict
                 "next_earnings_date": next_date,
                 "last_earnings_date": None,
                 "fiscal_period": None,
-                "updated_at": today.isoformat(),
+                "updated_at": now_iso,
             }
         except Exception as e:
             logger.debug(f"Earnings fetch skipped for {t}: {e}")
@@ -196,7 +231,7 @@ def fetch_earnings_calendar(tickers: List[str], supabase=None) -> Dict[str, Dict
                 "next_earnings_date": None,
                 "last_earnings_date": None,
                 "fiscal_period": None,
-                "updated_at": today.isoformat(),
+                "updated_at": now_iso,
             }
 
     return calendar_map

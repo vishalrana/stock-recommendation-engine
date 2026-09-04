@@ -35,45 +35,28 @@ from src.position_sizer import (
 logger = logging.getLogger(__name__)
 
 
-# Strategy-Specific Constants & Refactored Scoring Tables
+# Import canonical single source of truth configuration
+from src.quant_config import (
+    STRATEGY_WEIGHT_VECTORS,
+    REGIME_SCORE_MATRIX,
+    STRATEGY_HISTORICAL_EXPECTANCY,
+    SURVIVORSHIP_BIAS_HAIRCUT,
+    EXPECTANCY_BASE,
+    EXPECTANCY_SLOPE,
+    CONTEXT_VETO_THRESHOLDS,
+)
 
-SURVIVORSHIP_BIAS_HAIRCUT = 0.85  # 15% reduction for survivorship bias mitigation
-
-STRATEGY_HISTORICAL_EXPECTANCY = {
-    'trend_following': 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT,          # +1.44% (was +1.69%)
-    '52w_high_breakout': 0.0210 * SURVIVORSHIP_BIAS_HAIRCUT,        # +1.79% (was +2.10%)
-    'pullback_recovery': 0.0145 * SURVIVORSHIP_BIAS_HAIRCUT,        # +1.23% (was +1.45%)
-    'cross_sectional_momentum': 0.0180 * SURVIVORSHIP_BIAS_HAIRCUT, # +1.53% (was +1.80%)
-    'pead': 0.0225 * SURVIVORSHIP_BIAS_HAIRCUT,                     # +1.91% (was +2.25%)
-    'sector_rotation': 0.0120 * SURVIVORSHIP_BIAS_HAIRCUT,          # +1.02% (was +1.20%)
-    'mean_reversion': 0.0085 * SURVIVORSHIP_BIAS_HAIRCUT,           # +0.72% (was +0.85%)
-}
-
-STRATEGY_WEIGHT_VECTORS = {
-    'trend_following':         {'mom': 0.45, 'exp': 0.20, 'wr': 0.15, 'reg': 0.10, 'ctx': 0.10},
-    '52w_high_breakout':       {'mom': 0.35, 'exp': 0.20, 'wr': 0.20, 'reg': 0.15, 'ctx': 0.10},
-    'pullback_recovery':       {'mom': 0.20, 'exp': 0.25, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.25},
-    'cross_sectional_momentum': {'mom': 0.40, 'exp': 0.20, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.10},
-    'pead':                    {'mom': 0.15, 'exp': 0.30, 'wr': 0.15, 'reg': 0.10, 'ctx': 0.30},
-    'sector_rotation':         {'mom': 0.25, 'exp': 0.25, 'wr': 0.20, 'reg': 0.20, 'ctx': 0.10},
-    'mean_reversion':          {'mom': 0.10, 'exp': 0.20, 'wr': 0.15, 'reg': 0.15, 'ctx': 0.40},
-}
-
+# Backward-compatibility aliases
 STRATEGY_OPTIMAL_REGIME = {
-    'trend_following':        100,  # Loves bull
-    '52w_high_breakout':      100,  # Loves bull
-    'pullback_recovery':       50,  # Works in sideways and bull
-    'cross_sectional_momentum': 75, # Prefers bull, tolerates sideways
-    'pead':                    50,  # Regime-agnostic micro event
-    'sector_rotation':         75,  # Prefers bull
-    'mean_reversion':           0,  # Loves bear oversold
+    'trend_following': 100,
+    '52w_high_breakout': 100,
+    'pullback_recovery': 70,
+    'cross_sectional_momentum': 85,
+    'pead': 75,
+    'sector_rotation': 80,
+    'mean_reversion': 30,
 }
-
-MARKET_REGIME_SCORE = {
-    'bull':     100,
-    'sideways':  50,
-    'bear':       0,
-}
+MARKET_REGIME_SCORE = {'bull': 100.0, 'sideways': 70.0, 'bear': 20.0}
 
 
 def normalize_strategy_key(strategy: str) -> str:
@@ -98,31 +81,31 @@ def normalize_strategy_key(strategy: str) -> str:
     return s
 
 
-def compute_expectancy_score(strategy: str) -> float:
+def compute_expectancy_score(strategy: str, adjusted_expectancy_pct: Optional[float] = None) -> float:
     """
-    Fix 2: Break circular R:R dependency by using historical strategy expectancy.
-    S_exp = clip((StrategyHistExpectancy_% + 2.0) / 10.0 * 100, 0, 100)
+    Master Spec v2.3+ formula: S_exp = 30 + 20 * E_adjusted
+    where E_adjusted is expressed in percentage points (e.g. +1.44% -> 1.44 -> 58.8).
     """
-    strat_key = normalize_strategy_key(strategy)
-    hist_exp = STRATEGY_HISTORICAL_EXPECTANCY.get(strat_key, 0.0169)
-    hist_exp_pct = hist_exp * 100.0  # e.g., 1.69% -> 1.69
-    score = ((hist_exp_pct + 2.0) / 10.0) * 100.0
-    return max(0.0, min(100.0, float(score)))
+    if adjusted_expectancy_pct is not None:
+        e_val = float(adjusted_expectancy_pct)
+    else:
+        strat_key = normalize_strategy_key(strategy)
+        hist_exp = STRATEGY_HISTORICAL_EXPECTANCY.get(strat_key, 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT)
+        e_val = round(hist_exp * 100.0, 2)
+    return round(EXPECTANCY_BASE + EXPECTANCY_SLOPE * e_val, 4)
 
 
 def compute_regime_alignment(strategy: str, market_regime: str) -> float:
     """
-    Fix 5: Continuous, strategy-dependent regime alignment.
-    Penalty = abs(optimal - actual) * 0.6
-    S_reg = clip(100 - penalty, 0, 100)
+    Master Spec v2.3+ Exact Regime Score Matrix.
+    Direct discrete matrix lookup across Bull, Sideways, and Bear regimes.
     """
     strat_key = normalize_strategy_key(strategy)
-    optimal = STRATEGY_OPTIMAL_REGIME.get(strat_key, 75)
-    regime_str = str(market_regime).strip().lower()
-    actual = MARKET_REGIME_SCORE.get(regime_str, 50)
-    distance = abs(optimal - actual)
-    penalty = distance * 0.6
-    return max(0.0, min(100.0, float(100.0 - penalty)))
+    regime_key = str(market_regime).strip().lower()
+    if strat_key not in REGIME_SCORE_MATRIX:
+        strat_key = "trend_following"
+    regime_dict = REGIME_SCORE_MATRIX[strat_key]
+    return float(regime_dict.get(regime_key, regime_dict.get("sideways", 70.0)))
 
 
 def compute_context_score(
@@ -138,44 +121,48 @@ def compute_context_score(
     price: Optional[float] = None,
 ) -> float:
     """
-    Fix 3: Context Score with Veto Gates.
-    Caps or penalizes context score when fundamentals/news are dangerous.
+    Master Spec v2.3+ Context Score with Veto Gates:
+    - Balance Sheet Distress: D/E > 2.5 AND Current Ratio < 1.0 -> cap context at 30.0
+    - Negative News Sentiment: FinBERT < -0.30 -> cap context at 40.0
+    - Severe Earnings Miss: Surprise < -10.0% -> penalty -20.0
+    - Analyst Downside: Target < Price -> penalty -15.0
     """
     raw = float(analyst_pts or 0.0) + float(earnings_pts or 0.0) + float(fundamental_pts or 0.0) + float(news_pts or 0.0)
 
-    # Veto Gate 1: Dangerous leverage + poor liquidity
+    # Veto Gate 1: Dangerous leverage + poor liquidity (D/E > 2.5 AND Current Ratio < 1.0)
     if de_ratio is not None and current_ratio is not None:
         try:
-            if float(de_ratio) > 2.0 and float(current_ratio) < 0.8:
+            if float(de_ratio) > 2.5 and float(current_ratio) < 1.0:
                 raw = min(raw, 30.0)
         except (ValueError, TypeError):
             pass
 
-    # Veto Gate 2: Severely negative news sentiment
+    # Veto Gate 2: Negative news sentiment (FinBERT < -0.30)
     if finbert_sentiment is not None:
         try:
-            if float(finbert_sentiment) < -0.20:
+            if float(finbert_sentiment) < -0.30:
                 raw = min(raw, 40.0)
         except (ValueError, TypeError):
             pass
 
-    # Veto Gate 3: Significant earnings miss
+    # Veto Gate 3: Severe earnings miss (Surprise < -10.0%)
     if earnings_surprise_pct is not None:
         try:
-            if float(earnings_surprise_pct) < -0.05:
-                raw = raw - 20.0
+            s_val = float(earnings_surprise_pct)
+            # Handle both decimal ratio (e.g. -0.101) and percentage (e.g. -10.1)
+            pct_val = s_val * 100.0 if -1.0 <= s_val <= 1.0 and s_val != 0.0 else s_val
+            if pct_val < -10.0:
+                raw = max(0.0, raw - 20.0)
         except (ValueError, TypeError):
             pass
 
-    # Veto Gate 4: Analyst downside (not just zero)
+    # Veto Gate 4: Analyst downside (Target < Entry Price)
     if target_consensus is not None and price is not None:
         try:
             p = float(price)
             tc = float(target_consensus)
-            if p > 0:
-                analyst_upside_pct = (tc - p) / p
-                if analyst_upside_pct < 0:
-                    raw = raw - 15.0  # Penalty for negative consensus
+            if p > 0 and tc < p:
+                raw = max(0.0, raw - 15.0)
         except (ValueError, TypeError):
             pass
 

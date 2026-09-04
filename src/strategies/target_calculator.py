@@ -18,93 +18,13 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Strategy Configuration Table: Fixed floors, ATR multipliers, hold periods, and reach probability minimums
-STRATEGY_TARGET_CONFIG: Dict[str, Dict[str, Any]] = {
-    "trend_following": {
-        "fixed_t1": 0.12,
-        "fixed_t2": 0.22,
-        "fixed_t3": 0.35,
-        "atr_k1": 2.5,
-        "atr_k2": 4.5,
-        "atr_k3": 7.0,
-        "hold_days": 20,
-        "t1_min": 0.30,
-        "t2_min": 0.12,
-        "t3_min": 0.05,
-    },
-    "52w_high_breakout": {
-        "fixed_t1": 0.10,
-        "fixed_t2": 0.18,
-        "fixed_t3": 0.28,
-        "atr_k1": 2.0,
-        "atr_k2": 3.5,
-        "atr_k3": 5.5,
-        "hold_days": 25,
-        "t1_min": 0.25,
-        "t2_min": 0.10,
-        "t3_min": 0.04,
-    },
-    "pullback_recovery": {
-        "fixed_t1": 0.08,
-        "fixed_t2": 0.14,
-        "fixed_t3": 0.20,
-        "atr_k1": 1.5,
-        "atr_k2": 2.5,
-        "atr_k3": 4.0,
-        "hold_days": 10,
-        "t1_min": 0.40,
-        "t2_min": 0.20,
-        "t3_min": 0.08,
-    },
-    "cross_sectional_momentum": {
-        "fixed_t1": 0.10,
-        "fixed_t2": 0.16,
-        "fixed_t3": 0.24,
-        "atr_k1": 2.0,
-        "atr_k2": 3.0,
-        "atr_k3": 5.0,
-        "hold_days": 15,
-        "t1_min": 0.35,
-        "t2_min": 0.15,
-        "t3_min": 0.06,
-    },
-    "pead": {
-        "fixed_t1": 0.06,
-        "fixed_t2": 0.10,
-        "fixed_t3": 0.15,
-        "atr_k1": 1.0,
-        "atr_k2": 1.5,
-        "atr_k3": 2.5,
-        "hold_days": 5,
-        "t1_min": 0.45,
-        "t2_min": 0.25,
-        "t3_min": 0.10,
-    },
-    "sector_rotation": {
-        "fixed_t1": 0.08,
-        "fixed_t2": 0.14,
-        "fixed_t3": 0.22,
-        "atr_k1": 1.5,
-        "atr_k2": 2.5,
-        "atr_k3": 4.0,
-        "hold_days": 20,
-        "t1_min": 0.35,
-        "t2_min": 0.18,
-        "t3_min": 0.07,
-    },
-    "mean_reversion": {
-        "fixed_t1": 0.05,
-        "fixed_t2": 0.08,
-        "fixed_t3": 0.12,
-        "atr_k1": 0.8,
-        "atr_k2": 1.2,
-        "atr_k3": 2.0,
-        "hold_days": 5,
-        "t1_min": 0.50,
-        "t2_min": 0.30,
-        "t3_min": 0.12,
-    },
-}
+# Canonical Quantitative Configuration (Single Source of Truth)
+from src.quant_config import (
+    STRATEGY_TARGET_CONFIG,
+    T3_REACH_PROB_SURVIVAL_THRESHOLD,
+    SCALE_OUT_WEIGHTS,
+    MIN_REACH_PROB_WINDOWS,
+)
 
 
 def normalize_strategy_name(name: str) -> str:
@@ -250,12 +170,16 @@ def get_reach_prob(
     lookback_days: int = 504,
 ) -> float:
     """
-    Calculate empirical reach probability: count(max_gain_d >= target_pct) / total_windows
+    Calculate empirical reach probability: count(max_gain_d >= target_pct) / total_windows.
+    If insufficient historical gain evidence exists, returns 0.0 (does not manufacture 35%).
     """
     gains = get_reach_prob_distribution(ticker, holding_days, price_df, lookback_days)
-    if len(gains) == 0:
-        # If no history is available, return default probability based on reasonable estimate
-        return 0.35
+    if len(gains) < MIN_REACH_PROB_WINDOWS:
+        logger.debug(
+            "Insufficient historical gain evidence for %s: windows=%d (min %d). Empirical reach prob is 0.0.",
+            ticker, len(gains), MIN_REACH_PROB_WINDOWS
+        )
+        return 0.0
     return float(np.sum(gains >= target_pct) / len(gains))
 
 
@@ -314,11 +238,16 @@ def calculate_targets(
 
     t1_min = cfg["t1_min"]
     t2_min = cfg["t2_min"]
-    t3_min = cfg["t3_min"]
 
     # Layer 2 & 3 — Decision Tree & Honest Weighted R:R
+    # Gate 1: Check Target 1 survival
     if rp_t1 < t1_min:
         # REJECT signal entirely (do not emit)
+        rej_msg = (
+            "Insufficient historical data for reach probability"
+            if rp_t1 == 0.0 and raw_t1 == 0.0
+            else f"ReachProb(T1) {rp_t1:.1%} < StrategyMin.T1 ({t1_min:.1%})"
+        )
         return TargetCalculationResult(
             target_1=None,
             target_2=None,
@@ -335,112 +264,55 @@ def calculate_targets(
             scale_out_weights="0/0/0",
             weighted_rr_honest=0.0,
             is_valid=False,
-            rejection_reason=f"ReachProb(T1) {rp_t1:.1%} < StrategyMin.T1 ({t1_min:.1%})",
+            rejection_reason=rej_msg,
             reach_prob_raw=round(raw_t1, 4),
             reach_prob_adjusted=round(rp_t1, 4),
         )
 
-    elif rp_t2 < t2_min:
-        # Keep only T1. Scale-out: 70% at T1, 30% runner to breakeven. T2 and T3 are NULL.
-        t1 = cand_t1
-        weighted_reward = 0.70 * (t1 - entry)
-        weighted_rr = round(weighted_reward / risk, 2)
-        return TargetCalculationResult(
-            target_1=t1,
-            target_2=None,
-            target_3=None,
-            target_1_atr=t1_atr,
-            target_2_atr=t2_atr,
-            target_3_atr=t3_atr,
-            target_1_pct=round((t1 / entry - 1.0) * 100.0, 1),
-            target_2_pct=None,
-            target_3_pct=None,
-            reach_prob_t1=round(rp_t1, 4),
-            reach_prob_t2=round(rp_t2, 4),
-            reach_prob_t3=round(rp_t3, 4),
-            scale_out_weights="70/30/0",
-            weighted_rr_honest=weighted_rr,
-            is_valid=True,
-            reach_prob_raw=round(raw_t1, 4),
-            reach_prob_adjusted=round(rp_t1, 4),
-        )
+    t2_survives = (rp_t2 >= t2_min)
+    t3_survives = (rp_t3 >= T3_REACH_PROB_SURVIVAL_THRESHOLD)
 
-    elif rp_t3 < t3_min:
-        # Keep T1 and T2. Scale-out: 60% at T1, 30% at T2, 10% runner. T3 is NULL.
-        t1 = cand_t1
-        t2 = cand_t2
-        weighted_reward = 0.60 * (t1 - entry) + 0.30 * (t2 - entry)
-        weighted_rr = round(weighted_reward / risk, 2)
-        return TargetCalculationResult(
-            target_1=t1,
-            target_2=t2,
-            target_3=None,
-            target_1_atr=t1_atr,
-            target_2_atr=t2_atr,
-            target_3_atr=t3_atr,
-            target_1_pct=round((t1 / entry - 1.0) * 100.0, 1),
-            target_2_pct=round((t2 / entry - 1.0) * 100.0, 1),
-            target_3_pct=None,
-            reach_prob_t1=round(rp_t1, 4),
-            reach_prob_t2=round(rp_t2, 4),
-            reach_prob_t3=round(rp_t3, 4),
-            scale_out_weights="60/30/10",
-            weighted_rr_honest=weighted_rr,
-            is_valid=True,
-            reach_prob_raw=round(raw_t1, 4),
-            reach_prob_adjusted=round(rp_t1, 4),
-        )
-
-    elif rp_t3 < 0.15:
-        # Keep all three. Scale-out: 60% at T1, 30% at T2, 10% at T3.
-        t1 = cand_t1
-        t2 = cand_t2
-        t3 = cand_t3
-        weighted_reward = 0.60 * (t1 - entry) + 0.30 * (t2 - entry) + 0.10 * (t3 - entry)
-        weighted_rr = round(weighted_reward / risk, 2)
-        return TargetCalculationResult(
-            target_1=t1,
-            target_2=t2,
-            target_3=t3,
-            target_1_atr=t1_atr,
-            target_2_atr=t2_atr,
-            target_3_atr=t3_atr,
-            target_1_pct=round((t1 / entry - 1.0) * 100.0, 1),
-            target_2_pct=round((t2 / entry - 1.0) * 100.0, 1),
-            target_3_pct=round((t3 / entry - 1.0) * 100.0, 1),
-            reach_prob_t1=round(rp_t1, 4),
-            reach_prob_t2=round(rp_t2, 4),
-            reach_prob_t3=round(rp_t3, 4),
-            scale_out_weights="60/30/10",
-            weighted_rr_honest=weighted_rr,
-            is_valid=True,
-            reach_prob_raw=round(raw_t1, 4),
-            reach_prob_adjusted=round(rp_t1, 4),
-        )
-
-    else:
-        # Keep all three. Scale-out: 50% at T1, 30% at T2, 20% at T3.
-        t1 = cand_t1
-        t2 = cand_t2
-        t3 = cand_t3
+    # Determine surviving targets and scale-out weights per Master Spec v2.3+
+    if t2_survives and t3_survives:
+        # All three survive: 50% at T1, 30% at T2, 20% at T3
+        t1, t2, t3 = cand_t1, cand_t2, cand_t3
+        weights_label = "50/30/20"
         weighted_reward = 0.50 * (t1 - entry) + 0.30 * (t2 - entry) + 0.20 * (t3 - entry)
-        weighted_rr = round(weighted_reward / risk, 2)
-        return TargetCalculationResult(
-            target_1=t1,
-            target_2=t2,
-            target_3=t3,
-            target_1_atr=t1_atr,
-            target_2_atr=t2_atr,
-            target_3_atr=t3_atr,
-            target_1_pct=round((t1 / entry - 1.0) * 100.0, 1),
-            target_2_pct=round((t2 / entry - 1.0) * 100.0, 1),
-            target_3_pct=round((t3 / entry - 1.0) * 100.0, 1),
-            reach_prob_t1=round(rp_t1, 4),
-            reach_prob_t2=round(rp_t2, 4),
-            reach_prob_t3=round(rp_t3, 4),
-            scale_out_weights="50/30/20",
-            weighted_rr_honest=weighted_rr,
-            is_valid=True,
-            reach_prob_raw=round(raw_t1, 4),
-            reach_prob_adjusted=round(rp_t1, 4),
-        )
+        t2_pct = round((t2 / entry - 1.0) * 100.0, 1)
+        t3_pct = round((t3 / entry - 1.0) * 100.0, 1)
+    elif t2_survives and not t3_survives:
+        # T1 and T2 survive, T3 pruned: 60% at T1, 40% at T2, 0% at T3
+        t1, t2, t3 = cand_t1, cand_t2, None
+        weights_label = "60/40/0"
+        weighted_reward = 0.60 * (t1 - entry) + 0.40 * (t2 - entry)
+        t2_pct = round((t2 / entry - 1.0) * 100.0, 1)
+        t3_pct = None
+    else:
+        # Only T1 survives (T2 failed): 70% at T1, 30% runner to breakeven
+        t1, t2, t3 = cand_t1, None, None
+        weights_label = "70/30/0"
+        weighted_reward = 0.70 * (t1 - entry)
+        t2_pct = None
+        t3_pct = None
+
+    weighted_rr = round(weighted_reward / risk, 2)
+
+    return TargetCalculationResult(
+        target_1=t1,
+        target_2=t2,
+        target_3=t3,
+        target_1_atr=t1_atr,
+        target_2_atr=t2_atr,
+        target_3_atr=t3_atr,
+        target_1_pct=round((t1 / entry - 1.0) * 100.0, 1),
+        target_2_pct=t2_pct,
+        target_3_pct=t3_pct,
+        reach_prob_t1=round(rp_t1, 4),
+        reach_prob_t2=round(rp_t2, 4),
+        reach_prob_t3=round(rp_t3, 4),
+        scale_out_weights=weights_label,
+        weighted_rr_honest=weighted_rr,
+        is_valid=True,
+        reach_prob_raw=round(raw_t1, 4),
+        reach_prob_adjusted=round(rp_t1, 4),
+    )

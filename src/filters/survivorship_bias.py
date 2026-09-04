@@ -14,8 +14,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Mandatory conservative haircut for backtest expectancy
-SURVIVORSHIP_BIAS_HAIRCUT: float = 0.85  # 15% reduction
+# Canonical Single Source of Truth
+from src.quant_config import SURVIVORSHIP_BIAS_HAIRCUT
 
 
 def load_delisted_tickers() -> List[Dict[str, Any]]:

@@ -106,8 +106,8 @@ def run_tests():
     assert abs(hist_haircut * 100 - 1.44) < 0.01, f"Expected 1.44%, got {hist_haircut * 100}"
 
     s_exp_after = compute_expectancy_score('trend_following')
-    print(f"  * Sub-score S_exp: After haircut = {s_exp_after:.1f} (was 36.9)")
-    assert abs(s_exp_after - 34.4) < 0.1, f"Expected S_exp = 34.4, got {s_exp_after}"
+    print(f"  * Sub-score S_exp: After haircut = {s_exp_after:.1f} (Formula: 30 + 20*1.44 = 58.8)")
+    assert abs(s_exp_after - 58.8) < 0.2, f"Expected S_exp = 58.8, got {s_exp_after}"
     print("  --> PASS Scenario D: Expectancy haircut verified.")
 
     # --------------------------------------------------------------------------

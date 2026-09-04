@@ -62,7 +62,7 @@ def run_tests():
     print(f"  * Dangerous Context (D/E=3.0, Current=0.5): {ctx_unhealthy:.1f} (capped at 30.0)")
 
     assert p_win_pltr > 0.35, f"Expected p_win > 0.35, got {p_win_pltr}"
-    assert abs(exp_pltr - 34.4) < 0.2, f"Expected S_exp ≈ 34.4 (with 15% survivorship haircut), got {exp_pltr}"
+    assert abs(exp_pltr - 58.8) < 0.2, f"Expected S_exp ≈ 58.8 (with 15% survivorship haircut: 30 + 20*1.44), got {exp_pltr}"
     assert weights_pltr == {'mom': 0.45, 'exp': 0.20, 'wr': 0.15, 'reg': 0.10, 'ctx': 0.10}
     assert reg_pltr == 100.0, f"Expected S_reg = 100.0, got {reg_pltr}"
     assert ctx_healthy == 75.0, f"Expected ctx_healthy = 75.0, got {ctx_healthy}"
@@ -84,7 +84,7 @@ def run_tests():
     print(f"  * Strategy Weight Vector: {weights_crl}")
     print(f"  * Bull Regime Alignment: S_reg = {reg_crl:.1f}")
 
-    assert abs(exp_crl - 35.3) < 0.2, f"Expected S_exp ≈ 35.3 (with 15% survivorship haircut), got {exp_crl}"
+    assert abs(exp_crl - 60.6) < 0.2, f"Expected S_exp ≈ 60.6 (with 15% survivorship haircut: 30 + 20*1.53), got {exp_crl}"
     assert weights_crl == {'mom': 0.40, 'exp': 0.20, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.10}
     print("  --> PASS Scenario B: CRL weights and historical expectancy validated.")
 
@@ -187,7 +187,7 @@ def run_tests():
     print(f"  * PLTR Composite Output: {res_pltr['total']:.2f} (Weights: {res_pltr['weights']})")
     print(f"  * Breakdown: {res_pltr['breakdown']}")
     assert 'expectancy' in res_pltr['breakdown']
-    assert abs(res_pltr['breakdown']['expectancy'] - 34.4) < 0.2
+    assert abs(res_pltr['breakdown']['expectancy'] - 58.8) < 0.2
     assert res_pltr['breakdown']['regime'] == 100.0
 
     print("\n" + "=" * 80)

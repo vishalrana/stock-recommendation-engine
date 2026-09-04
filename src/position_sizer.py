@@ -189,12 +189,14 @@ def allocate_capital(
         score = float(_get(signal, "composite_score", _get(signal, "score", 50.0)) or 50.0)
         rr = float(_get(signal, "weighted_rr_honest", _get(signal, "weighted_rr", 2.0)) or 2.0)
 
-        # P0-4: Consume ONLY final adjusted half-Kelly, NEVER raw/full kelly_fraction!
+        # P0-4 & P1-A: Consume ONLY final adjusted half-Kelly; do NOT calculate raw unadjusted Half-Kelly
         hk_frac = _get(signal, "final_adjusted_half_kelly")
         if hk_frac is None:
             hk_frac = _get(signal, "half_kelly_fraction")
+            if hk_frac is None:
+                hk_frac = _get(signal, "kelly_fraction")
         if hk_frac is None:
-            hk_frac = calculate_half_kelly(score, rr)
+            hk_frac = 0.0
         else:
             hk_frac = float(hk_frac)
 

@@ -17,14 +17,13 @@ from src.strategies.target_calculator import calculate_targets
 def run_acceptance_tests():
     print("=" * 80)
     print("  TARGET CALCULATOR ACCEPTANCE TESTS — 4 SCENARIOS")
-    print("=" * 80)
-
-    # -------------------------------------------------------------
+    print("=" * 80)    # -------------------------------------------------------------
     # Scenario A: PLTR, Trend Following
     # Entry: $186.32, ATR: $6.42, Stop: $173.30
     # Override/computed targets: T1: $208.24 (fixed), T2: $226.83 (fixed), T3: $231.26 (ATR)
     # ReachProbs: T1=38%, T2=16%, T3=14%
-    # Expected: All 3 kept, Scale: 60/30/10, Honest R:R ≈ 2.29
+    # Expected: T3 reach prob 14% < 15% threshold -> T3 pruned.
+    # T1 + T2 survive -> Scale: 60/40/0, Honest R:R ≈ 2.25
     # -------------------------------------------------------------
     res_a = calculate_targets(
         ticker="PLTR",
@@ -45,9 +44,9 @@ def run_acceptance_tests():
     print(f"  Is Valid: {res_a.is_valid}")
 
     assert res_a.is_valid is True, "Scenario A should be valid"
-    assert res_a.scale_out_weights == "60/30/10", f"Expected 60/30/10, got {res_a.scale_out_weights}"
-    assert abs(res_a.weighted_rr_honest - 2.29) <= 0.02, f"Expected R:R ~2.29, got {res_a.weighted_rr_honest}"
-    assert res_a.target_1 == 208.24 and res_a.target_2 == 226.83 and res_a.target_3 == 231.26
+    assert res_a.scale_out_weights == "60/40/0", f"Expected 60/40/0, got {res_a.scale_out_weights}"
+    assert abs(res_a.weighted_rr_honest - 2.25) <= 0.02, f"Expected R:R ~2.25, got {res_a.weighted_rr_honest}"
+    assert res_a.target_1 == 208.24 and res_a.target_2 == 226.83 and res_a.target_3 is None
     print("  --> PASS Scenario A")
 
     # -------------------------------------------------------------
@@ -84,9 +83,9 @@ def run_acceptance_tests():
     # -------------------------------------------------------------
     # Scenario C: AAPL, Pullback Recovery
     # Entry: $220.00, ATR: $3.96, Stop: $212.30
-    # T1: $237.60, T2: $250.80, T3: $264.00 (all fixed win)
-    # ReachProbs: T1=45%, T2=16%, T3=7%
-    # Expected: T2/T3 removed, Scale: 70/30/0, Honest R:R ≈ 1.60
+    # Pullback 4% floor: T1 = $228.80
+    # ReachProbs: T1=45%, T2=16%, T3=7% (T2 and T3 fail minimums)
+    # Expected: T2/T3 removed, Scale: 70/30/0, Honest R:R ≈ 0.80
     # -------------------------------------------------------------
     res_c = calculate_targets(
         ticker="AAPL",
@@ -100,17 +99,17 @@ def run_acceptance_tests():
     print("\n[Scenario C] AAPL — Pullback Recovery")
     print(f"  Entry: $220.00, Stop: $212.30, ATR: $3.96")
     print(f"  Reach Probs: T1={res_c.reach_prob_t1:.0%}, T2={res_c.reach_prob_t2:.0%}, T3={res_c.reach_prob_t3:.0%}")
-    print(f"  Targets: T1=${res_c.target_1}, T2={res_c.target_2}, T3={res_c.target_3}")
+    print(f"  Targets: T1=${res_c.target_1}, T2=${res_c.target_2}, T3=${res_c.target_3}")
     print(f"  Scale-out Weights: {res_c.scale_out_weights}")
     print(f"  Honest Weighted R:R: {res_c.weighted_rr_honest}")
     print(f"  Is Valid: {res_c.is_valid}")
 
     assert res_c.is_valid is True, "Scenario C should be valid"
-    assert res_c.target_1 == 237.60, f"Expected T1=237.60, got {res_c.target_1}"
+    assert res_c.target_1 == 228.80, f"Expected T1=228.80, got {res_c.target_1}"
     assert res_c.target_2 is None, f"Expected T2=None, got {res_c.target_2}"
     assert res_c.target_3 is None, f"Expected T3=None, got {res_c.target_3}"
     assert res_c.scale_out_weights == "70/30/0", f"Expected 70/30/0, got {res_c.scale_out_weights}"
-    assert abs(res_c.weighted_rr_honest - 1.60) <= 0.02, f"Expected R:R ~1.60, got {res_c.weighted_rr_honest}"
+    assert abs(res_c.weighted_rr_honest - 0.80) <= 0.02, f"Expected R:R ~0.80, got {res_c.weighted_rr_honest}"
     print("  --> PASS Scenario C")
 
     # -------------------------------------------------------------

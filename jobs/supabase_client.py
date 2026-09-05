@@ -86,48 +86,17 @@ def update_signals_price(ticker, current_price):
 
 
 def update_portfolio_realized_pnl(pnl_dollars):
-    if not supabase:
-        return
-    try:
-        from datetime import datetime
-        res = supabase.table("portfolio_state").select("*").order("created_at", desc=True).limit(1).execute()
-        portfolio_value = 10000.0
-        peak_value = 10000.0
-        if res.data:
-            state = res.data[0]
-            portfolio_value = float(state.get("portfolio_value") or 10000.0)
-            peak_value = float(state.get("peak_value") or 10000.0)
-            
-        new_portfolio_value = portfolio_value + pnl_dollars
-        new_peak_value = max(peak_value, new_portfolio_value)
-        new_dd = ((new_peak_value - new_portfolio_value) / new_peak_value) * 100.0 if new_peak_value > 0 else 0.0
-        
-        today_str = datetime.now().date().isoformat()
-        supabase.table("portfolio_state").insert({
-            "date": today_str,
-            "portfolio_value": new_portfolio_value,
-            "peak_value": new_peak_value,
-            "current_drawdown_pct": new_dd
-        }).execute()
-        
-        print(f"[PORTFOLIO UPDATE] Realized PNL: ${pnl_dollars:.2f}, New Value: ${new_portfolio_value:.2f}")
-    except Exception as e:
-        print(f"[PORTFOLIO UPDATE] Failed to update portfolio state realized PNL: {e}")
+    """[DEPRECATED] Decommissioned. Portfolio state tracking is not part of recommendation engine."""
+    import warnings
+    warnings.warn("update_portfolio_realized_pnl is deprecated and decommissioned", DeprecationWarning, stacklevel=2)
+    return
 
 
 def execute_position_exit(signal_id, exit_price, outcome, reason, split_fraction=1, live_price=None):
-    if not supabase:
-        return None
-    res = supabase.rpc("execute_position_exit", {
-        "p_signal_id": str(signal_id),
-        "p_exit_price": exit_price,
-        "p_outcome": outcome,
-        "p_reason": reason,
-        "p_split_fraction": split_fraction,
-        "p_live_price": live_price if live_price is not None else exit_price,
-        "p_move_stop_to_entry": outcome == "hit_t1",
-    }).execute()
-    return res.data
+    """[DEPRECATED] Decommissioned. Automated position exits are not part of recommendation engine."""
+    import warnings
+    warnings.warn("execute_position_exit is deprecated and decommissioned", DeprecationWarning, stacklevel=2)
+    return None
 
 
 def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_dollars=None, max_shares=None):

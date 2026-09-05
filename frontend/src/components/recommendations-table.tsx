@@ -57,7 +57,6 @@ interface TableProps {
   data?: Recommendation[];
   regime: string | null;
   scanLog: ScanLog | null;
-  latestPortfolioValue?: number;
 }
 
 function RegimeBanner({ scanLog }: { scanLog: ScanLog | null }) {
@@ -247,9 +246,6 @@ export default function RecommendationsTable({
 
   const router = useRouter();
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isRecalculating, setIsRecalculating] = useState(false);
-  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
-  const [syncMessage, setSyncMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
   // Derived datasets
   const portfolioSignals = useMemo(() => {
@@ -270,81 +266,11 @@ export default function RecommendationsTable({
 
   const activeDataset = activeTab === 'portfolio' ? portfolioSignals : scanLogSignals;
 
-  // Recalculate only active/pending portfolio signals
-  const handleRecalculateAll = async () => {
-    setIsRecalculating(true);
-    setSyncMessage(null);
-    try {
-      const res = await fetch('/api/signals/recalculate', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        const s = data.summary;
-        const msg = `${s.updatedCount} signals updated: ${s.openCount} open, ${s.hitT1Count} hit T1, ${s.hitT2Count} hit T2, ${s.hitT3Count} hit T3, ${s.stoppedCount} stopped.`;
-        setSyncMessage({
-          text: msg,
-          isError: false,
-        });
-        router.refresh();
-      } else {
-        setSyncMessage({
-          text: `Recalculation error: ${data.error || 'Failed'}`,
-          isError: true,
-        });
-      }
-    } catch (e: any) {
-      setSyncMessage({
-        text: `Recalculation failed: ${e.message || e}`,
-        isError: true,
-      });
-    } finally {
-      setIsRecalculating(false);
-      setTimeout(() => setSyncMessage(null), 8000);
-    }
-  };
-
-  // Centralized evaluation loop HTTP trigger
-  const handleSyncMarket = async () => {
+  // Read-only server component refresh
+  const handleRefresh = () => {
     setIsRefreshing(true);
-    setSyncMessage(null);
-    try {
-      const res = await fetch('/api/sync-market', { method: 'POST' });
-      const result = await res.json();
-
-      if (res.status === 403) {
-        setSyncMessage({
-          text: `Market is currently closed: ${result.reason}`,
-          isError: true,
-        });
-      } else if (!res.ok) {
-        setSyncMessage({
-          text: `Failed to sync market: ${result.error || 'Unknown error'}`,
-          isError: true,
-        });
-      } else {
-        const now = new Date();
-        const nyTimeStr = now.toLocaleTimeString('en-US', {
-          timeZone: 'America/New_York',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false,
-        });
-        setLastSyncTime(`${nyTimeStr} ET`);
-        setSyncMessage({
-          text: 'Market synced successfully!',
-          isError: false,
-        });
-        router.refresh();
-      }
-    } catch (e: any) {
-      setSyncMessage({
-        text: `Sync failed: ${e.message || e}`,
-        isError: true,
-      });
-    } finally {
-      setIsRefreshing(false);
-      setTimeout(() => setSyncMessage(null), 5000);
-    }
+    router.refresh();
+    setTimeout(() => setIsRefreshing(false), 800);
   };
 
   // 1. Portfolio View Columns
@@ -816,44 +742,20 @@ export default function RecommendationsTable({
               />
             </div>
 
-            {/* Recalculate & Sync Buttons are ONLY active on Portfolio Tab */}
+            {/* Refresh Button on Recommendations Tab */}
             {activeTab === 'portfolio' && (
               <div className="flex items-center gap-3">
-                {lastSyncTime && (
-                  <span className="text-xs text-gray-400 font-medium select-none">
-                    Last Sync: {lastSyncTime}
-                  </span>
-                )}
                 <button
-                  onClick={handleRecalculateAll}
-                  disabled={isRecalculating}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-blue-200 rounded-lg text-sm font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-4 h-4 text-blue-600 ${isRecalculating ? 'animate-spin' : ''}`} />
-                  <span>{isRecalculating ? 'Recalculating...' : '🔄 Recalculate All'}</span>
-                </button>
-                <button
-                  onClick={handleSyncMarket}
+                  onClick={handleRefresh}
                   disabled={isRefreshing}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 bg-white hover:bg-gray-50 transition-colors shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                 >
                   <RefreshCw className={`w-4 h-4 text-gray-500 ${isRefreshing ? 'animate-spin' : ''}`} />
-                  <span>Sync Live Market</span>
+                  <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
                 </button>
               </div>
             )}
           </div>
-
-          {/* Sync status message toast */}
-          {syncMessage && (
-            <div className={`mb-6 p-4 rounded-xl border text-xs font-semibold shadow-sm transition-all duration-300 ${
-              syncMessage.isError
-                ? 'bg-rose-50 border-rose-200 text-rose-800'
-                : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-            }`}>
-              {syncMessage.text}
-            </div>
-          )}
 
           {/* Responsive Table Wrapper */}
           <div className="overflow-x-auto border border-gray-200 rounded-lg shadow bg-white">

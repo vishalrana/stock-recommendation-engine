@@ -2,7 +2,6 @@ import React from 'react';
 import { Recommendation, ScanLog } from '../types/database';
 
 interface PortfolioSummaryProps {
-  latestPortfolioValue?: number;
   openPositions: Recommendation[];
   regime?: string | null;
   scanLog?: ScanLog | null;

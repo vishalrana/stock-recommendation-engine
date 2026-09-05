@@ -1,4 +1,4 @@
-import { fetchPortfolioSignals, fetchScanLogSignals, getLatestScanLog, getLatestPortfolioValue } from '../lib/database';
+import { fetchPortfolioSignals, fetchScanLogSignals, getLatestScanLog } from '../lib/database';
 import { Recommendation, ScanLog } from '../types/database';
 import RecommendationsTable from '../components/recommendations-table';
 import PortfolioSummary from '../components/portfolio-summary';
@@ -29,20 +29,17 @@ export default async function Page() {
   let errorMsg = '';
   let regime: string | null = null;
   let scanLog: ScanLog | null = null;
-  let latestPortfolioValue = 10000.0;
 
   try {
-    const [portfolioSignals, scanLogs, latestScanLog, portfolioVal] = await Promise.all([
+    const [portfolioSignals, scanLogs, latestScanLog] = await Promise.all([
       fetchPortfolioSignals(),
       fetchScanLogSignals(),
       getLatestScanLog(),
-      getLatestPortfolioValue(),
     ]);
 
     portfolioData = portfolioSignals;
     scanLogData = scanLogs;
     scanLog = latestScanLog;
-    latestPortfolioValue = portfolioVal;
     regime = scanLog?.regime || (portfolioData.length > 0 ? portfolioData[0].regime : null);
   } catch (e: any) {
     errorMsg = e.message || 'Failed to load recommendations';
@@ -88,14 +85,13 @@ export default async function Page() {
           </div>
         ) : (
           <div className="space-y-6">
-            <PortfolioSummary latestPortfolioValue={latestPortfolioValue} openPositions={openPositions} />
+            <PortfolioSummary openPositions={openPositions} />
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200/80 p-6">
               <RecommendationsTable
                 portfolioData={portfolioData}
                 scanLogData={scanLogData}
                 regime={regime}
                 scanLog={scanLog}
-                latestPortfolioValue={latestPortfolioValue}
               />
             </div>
           </div>

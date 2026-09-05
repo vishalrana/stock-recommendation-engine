@@ -145,24 +145,6 @@ export async function getLatestScanLog(): Promise<ScanLog | null> {
   }
 }
 
-export async function getLatestPortfolioValue(): Promise<number> {
-  try {
-    const { data, error } = await getSupabase()
-      .from('portfolio_state')
-      .select('portfolio_value')
-      .order('created_at', { ascending: false })
-      .limit(1);
-
-    if (error || !data || data.length === 0) {
-      return 10000.0;
-    }
-
-    return parseFloat(data[0].portfolio_value) || 10000.0;
-  } catch {
-    return 10000.0;
-  }
-}
-
 export function calculatePWin(score: number): number {
   const z = -0.15 * (score - 65.0);
   const sigmoid = 1.0 / (1.0 + Math.exp(z));

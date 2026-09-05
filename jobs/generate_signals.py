@@ -245,110 +245,31 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
     return list(best.values())
 
 
-def archive_current_signals(supabase, regime_str: str, metrics_map: dict):
-    """Evaluate existing open positions, update their statuses, and archive outcomes."""
+def refresh_active_signals_prices(supabase):
+    """
+    Refresh current market prices on active recommendations.
+    Pure recommendation engine behavior: updates market quotes without simulated trades,
+    selling shares, or updating portfolio P&L.
+    """
     try:
-        from jobs.supabase_client import get_latest_bar, update_signals_price, execute_position_exit
+        from jobs.supabase_client import get_latest_bar, update_signals_price
         
-        # 1. Fetch current signals
-        res = supabase.table("signals").select("*").execute()
+        res = supabase.table("signals").select("id, ticker, status").in_("status", ["open", "pending"]).execute()
         current_signals = res.data or []
         
         if not current_signals:
-            logger.info("No existing signals in the database to process.")
-            return []
+            logger.info("No active recommendations in database to refresh.")
+            return
             
-        logger.info("Evaluating %d existing positions...", len(current_signals))
-        
+        logger.info("Refreshing market prices for %d active recommendations...", len(current_signals))
         for existing in current_signals:
-            # Only evaluate open positions
-            if existing.get('status', 'open') != 'open':
-                continue
-                
-            ticker = existing['ticker']
-            entry_price = float(existing['entry_price'])
-            stop_loss = float(existing['stop_loss'])
-            target_1 = float(existing['target_1']) if existing.get('target_1') is not None else None
-            target_2 = float(existing['target_2']) if existing.get('target_2') is not None else None
-            target_3 = float(existing['target_3']) if existing.get('target_3') is not None else None
-            has_targets = target_1 is not None
-            
+            ticker = existing["ticker"]
             bar = get_latest_bar(ticker)
-            if bar is None or "close" not in bar:
-                logger.warning(f"Could not fetch latest bar for {ticker}. Skipping evaluation.")
-                continue
-                
-            current_price = float(bar["close"])
-            high_price = float(bar.get("high", current_price))
-            low_price = float(bar.get("low", current_price))
-            atr = float(bar.get("atr", current_price * 0.02))
-            
-            # Determine status
-            exit_price = None
-            sell_signal = None
-            is_partial_exit = False
-            partial_fraction = 0.0
-            exit_outcome = ''
-            
-            # 1. Stop loss check using low_price
-            if low_price <= stop_loss:
-                exit_price = min(stop_loss, low_price)
-                sell_signal = 'Stop loss hit'
-                exit_outcome = 'stopped'
-            # 2. Target 3 check using high_price
-            elif has_targets and high_price >= target_3:
-                exit_price = target_3
-                sell_signal = 'Target 3 hit – full exit'
-                exit_outcome = 'hit_t3'
-            # 3. Target 2 check using high_price
-            elif has_targets and high_price >= target_2:
-                if not (existing.get('sell_signal_reason') and 'Target 2' in existing['sell_signal_reason']):
-                    exit_price = target_2
-                    sell_signal = 'Target 2 hit – sell 30%'
-                    is_partial_exit = True
-                    partial_fraction = 0.30
-                    exit_outcome = 'hit_t2'
-            # 4. Target 1 check using high_price
-            elif has_targets and high_price >= target_1:
-                if not (existing.get('sell_signal_reason') and 'Target 1' in existing['sell_signal_reason']):
-                    exit_price = target_1
-                    sell_signal = 'Target 1 hit – sell 50%'
-                    is_partial_exit = True
-                    partial_fraction = 0.50
-                    exit_outcome = 'hit_t1'
-                
-            if sell_signal is not None:
-                logger.info(f"[SELL SIGNAL] {ticker} triggered {sell_signal} at {exit_price}")
-                result = execute_position_exit(
-                    existing["id"],
-                    exit_price,
-                    exit_outcome,
-                    sell_signal,
-                    partial_fraction if is_partial_exit else 1,
-                    current_price,
-                )
-                logger.info(f"[POSITION EXIT] {ticker}: {result}")
-            else:
-                # Nightly Trailing Stop Ratcheting
-                # If stock price has risen, ratchet stop loss upwards to protect profits
-                new_stop = round(max(stop_loss, current_price - 2.0 * atr), 2)
-                if new_stop > stop_loss:
-                    logger.info(f"[MONITOR] Ratcheting trailing stop for {ticker}: {stop_loss} -> {new_stop}")
-                    supabase.table("signals").update({"stop_loss": new_stop, "price": current_price}).eq("id", existing["id"]).execute()
-                    supabase.table("signals_history").update({"stop_loss": new_stop}).eq("scan_date", existing["scan_date"]).eq("ticker", ticker).execute()
-                    stop_loss = new_stop
-                else:
-                    update_signals_price(ticker, current_price)
-                logger.info(f"[POSITION HOLD] {ticker} remains open. Current price: {current_price:.2f}, Stop Loss: {stop_loss:.2f}")
-                
-        # Return list of active open tickers to skip in daily scan insertion
-        res_updated = supabase.table("signals").select("ticker").eq("status", "open").execute()
-        open_tickers = [row['ticker'] for row in (res_updated.data or [])]
-        return open_tickers
-        
+            if bar and "close" in bar:
+                update_signals_price(ticker, float(bar["close"]))
+                logger.info(f"[PRICE REFRESH] {ticker}: updated to ${float(bar['close']):.2f}")
     except Exception as e:
-        logger.error("Failed to archive/evaluate current signals: %s", e)
-        return []
+        logger.warning("Could not refresh active signals prices: %s", e)
 
 
 def get_next_trading_day(date_obj):
@@ -1095,13 +1016,13 @@ def main():
 
     if not args.dry_run:
         try:
-            archive_current_signals(supabase, regime_str, metrics_map)
-            logger.info("Clearing closed signals from Supabase (keeping open)...")
-            supabase.table("signals").delete().neq("status", "open").execute()
-            logger.info("Closed signals cleared.")
+            refresh_active_signals_prices(supabase)
+            logger.info("Clearing previous rejected audit entries from Supabase...")
+            supabase.table("signals").delete().eq("status", "rejected").execute()
+            logger.info("Previous audit entries cleared.")
         except Exception as e:
-            logger.error("Failed to clear/archive signals: %s", e)
-            error_msg = f"Archive/Clear failed: {e}"
+            logger.error("Failed to refresh/clear signals: %s", e)
+            error_msg = f"Refresh/Clear failed: {e}"
 
         try:
             if ranked_signals:

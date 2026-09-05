@@ -141,7 +141,10 @@ def allocate_capital(
     cash_balance: float,
 ) -> Tuple[List[Any], List[Any]]:
     """
-    P0-4, P0-5, P0-6: Ranked sequential capital allocation.
+    [DEPRECATED] Legacy Ranked sequential capital allocation.
+    NOTE: The recommendation engine no longer performs capital allocation.
+    Recommendations are generated independently of portfolio cash and position sizing.
+    Retained strictly for backwards-compatibility with historical test suites.
     
     Rules:
     - Sort signals by composite_score DESC, fund sequentially.

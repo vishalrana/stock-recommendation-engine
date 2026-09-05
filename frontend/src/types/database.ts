@@ -56,6 +56,7 @@ export interface Recommendation {
   sell_signal?: boolean | null;
   sell_signal_reason?: string | null;
   sell_price?: number | null;
+  rejection_reason?: string | null;
   context_analyst?: number | null;
   context_earnings?: number | null;
   context_fundamental?: number | null;

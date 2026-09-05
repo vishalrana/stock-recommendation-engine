@@ -4,23 +4,22 @@ import { Recommendation, ScanLog } from '../types/database';
 export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
   const supabase = getSupabase();
 
-  // 1. Fetch active signals with allocated_dollars > 0
+  // 1. Fetch active qualified recommendations without capital constraints
   const { data: activeSignals, error: activeError } = await supabase
     .from('signals')
     .select('*')
-    .gt('allocated_dollars', 0)
+    .neq('status', 'rejected')
     .in('status', ['pending', 'open', 'hit_t1', 'hit_t2'])
     .order('scan_date', { ascending: false });
 
   if (activeError) {
-    console.error('Error fetching portfolio signals:', activeError);
+    console.error('Error fetching active recommendations:', activeError);
   }
 
-  // 2. Fetch closed trades with allocated_dollars > 0 from signals_history
+  // 2. Fetch closed trades / outcomes from signals_history
   const { data: closedHistory, error: historyError } = await supabase
     .from('signals_history')
     .select('*')
-    .gt('allocated_dollars', 0)
     .neq('outcome', 'open')
     .order('scan_date', { ascending: false });
 
@@ -36,7 +35,7 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
     return {
       ...s,
-      tier_label: s.tier_label || 'Rejected',
+      tier_label: s.tier_label || 'Buy',
       status: s.status || 'pending',
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate ?? 0,
@@ -61,7 +60,7 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
 
     return {
       ...h,
-      tier_label: h.tier_label || 'Rejected',
+      tier_label: h.tier_label || 'Buy',
       entry_date: h.scan_date,
       exit_date: h.outcome_date,
       status: status || 'closed',
@@ -94,11 +93,11 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
   const sevenDaysAgoStr = sevenDaysAgo.toISOString().split('T')[0];
 
-  // Fetch signals where allocated_dollars = 0 OR status IN ('rejected', 'cancelled_gap_up')
+  // Fetch audit log / rejected signals
   const { data: scanLogSignals, error } = await supabase
     .from('signals')
     .select('*')
-    .or('allocated_dollars.eq.0,status.in.(rejected,cancelled_gap_up)')
+    .in('status', ['rejected', 'cancelled_gap_up'])
     .gte('scan_date', sevenDaysAgoStr)
     .order('scan_date', { ascending: false })
     .order('composite_score', { ascending: false });
@@ -172,39 +171,29 @@ export function calculatePWin(score: number): number {
 }
 
 export function getRejectionReason(sig: Recommendation): string {
-  if (sig.sell_signal_reason && sig.sell_signal_reason.includes('Earnings in')) {
+  if (sig.rejection_reason) {
+    return sig.rejection_reason;
+  }
+  if (sig.sell_signal_reason) {
     return sig.sell_signal_reason;
   }
   if (sig.earnings_rejected) {
     const days = sig.days_to_earnings !== undefined && sig.days_to_earnings !== null ? `${sig.days_to_earnings}d` : '';
-    return `Earnings in ${days}`;
+    return `Earnings risk filter (${days})`;
   }
   if (sig.status === 'cancelled_gap_up') {
     return 'Cancelled: Gap > 3%';
   }
-  if (sig.reach_prob_t1 !== undefined && sig.reach_prob_t1 !== null && Number(sig.reach_prob_t1) < 0.50) {
-    return `ReachProb T1 < 50% (${(Number(sig.reach_prob_t1) * 100).toFixed(0)}%)`;
+  if (sig.reach_prob_t1 !== undefined && sig.reach_prob_t1 !== null && Number(sig.reach_prob_t1) < 0.25) {
+    return `ReachProb T1 < 25% (${(Number(sig.reach_prob_t1) * 100).toFixed(0)}%)`;
   }
 
   const rr = sig.weighted_rr_honest ?? sig.weighted_rr ?? 0;
   const score = sig.composite_score || 50;
 
-  const winRate = calculatePWin(score);
-
-  const r = Number(rr) > 0 ? Number(rr) : 1.0;
-  const kelly = winRate - (1 - winRate) / r;
-
-  if (Number(rr) <= 1.0 || kelly <= 0) {
-    return `Kelly ≤ 0 (Honest R:R = ${Number(rr).toFixed(2)})`;
+  if (sig.tier_label === 'Rejected' || Number(score) < 65) {
+    return `Tier Rejected (Score ${Number(score).toFixed(1)}, R:R ${Number(rr).toFixed(2)})`;
   }
 
-  if (Number(sig.allocated_dollars) === 0) {
-    return 'Cash constrained';
-  }
-
-  if (sig.target_2 === null && sig.reach_prob_t2 !== undefined && sig.reach_prob_t2 !== null && Number(sig.reach_prob_t2) < 0.30) {
-    return 'ReachProb T2 < 30%';
-  }
-
-  return 'Kelly ≤ 0 (Honest R:R = 1.00)';
+  return 'Setup criteria not met';
 }

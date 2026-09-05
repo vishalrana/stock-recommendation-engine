@@ -530,25 +530,8 @@ def main():
     except Exception as ec_err:
         logger.warning(f"Could not load earnings calendar: {ec_err}")
 
-    # TASK 3: Drawdown Circuit Breaker
-    portfolio_value = 10000.0
-    peak_value = 10000.0
-    try:
-        # Fetch the latest record in portfolio_state
-        res_state = supabase.table("portfolio_state").select("*").order("created_at", desc=True).limit(1).execute()
-        if res_state.data:
-            state = res_state.data[0]
-            portfolio_value = float(state["portfolio_value"])
-            peak_value = float(state["peak_value"])
-            logger.info(f"[PORTFOLIO] Found state: Value=${portfolio_value:.2f}, Peak=${peak_value:.2f}")
-        else:
-            logger.info("[PORTFOLIO] No state entries found in portfolio_state. Using default 10k values.")
-    except Exception as e:
-        logger.warning(f"Failed to fetch portfolio state: {e}. Using default 10k values.")
-
-    from src.risk_controls import get_drawdown_multiplier
-    risk_multiplier, risk_status = get_drawdown_multiplier(portfolio_value, peak_value)
-    logger.info(f"[RISK CONTROL] Drawdown Multiplier={risk_multiplier:.2f} ({risk_status})")
+    # Recommendation engine operates independently of portfolio equity / simulated cash state
+    risk_multiplier = 1.0
 
     # ── Ticker Metrics (with local cache for zero-network local mode) ─
     metrics_map: dict = {}
@@ -851,127 +834,27 @@ def main():
         SHORT_TERM_STRATEGIES = {'Pullback Recovery', 'Mean Reversion', 'Post-Earnings Drift'}
         TREND_STRATEGIES = {'Trend Following', 'Sector Rotation', '52-Week High', '52-Week High Breakout', 'Cross-Sectional Momentum'}
 
-        # Fetch active open positions from Supabase to prevent duplicates and calculate current portfolio allocation
+        # Fetch active open recommendations from Supabase to prevent duplicate active recommendations
         open_positions = []
         open_tickers = []
-        open_positions_allocated_sum = 0.0
         try:
-            res_open = supabase.table("signals").select("*").eq("status", "open").execute()
+            res_open = supabase.table("signals").select("ticker, status").in_("status", ["open", "pending"]).execute()
             open_positions = res_open.data or []
             open_tickers = [row['ticker'].upper() for row in open_positions]
-            
-            # Sum up allocated_dollars of all currently 'open' positions
-            for pos in open_positions:
-                allocated = pos.get("allocated_dollars")
-                if allocated is not None and float(allocated) > 0:
-                    pos_val = float(allocated)
-                else:
-                    # Fallback to estimate if allocated_dollars is missing/NULL
-                    ps_str = pos.get("position_sizing") or ""
-                    pct = 0.05
-                    # Do not parse slash formats (legacy)
-                    clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
-                    try:
-                        if clean and '/' not in clean:
-                            pct = min(float(clean) / 100.0, 0.05)  # Hard cap at 5.0%
-                    except ValueError:
-                        pass
-                    pos_val = pct * portfolio_value
-                open_positions_allocated_sum += pos_val
-                
-            logger.info(f"[PORTFOLIO] Allocated capital in open positions: ${open_positions_allocated_sum:.2f}")
+            logger.info(f"[RECOMMENDATIONS] Found {len(open_tickers)} existing active recommendations in database.")
         except Exception as e:
-            logger.warning("Failed to fetch active open positions/allocated capital from Supabase: %s", e)
+            logger.warning("Failed to fetch active recommendations from Supabase: %s", e)
 
-        # ── Capital Rotation Protocol ──────────────────────────────────────
-        try:
-            # 1. Identify Tier-1 Candidates (Score >= 85)
-            tier1_candidates = [sig for sig in final_signals if float(sig.get("composite_score") or 0.0) >= 85.0]
-            # 2. Identify Weak Holdings (Score <= 55)
-            weak_holdings = [pos for pos in open_positions if float(pos.get("composite_score") or 0.0) <= 55.0]
-            # Estimate raw Kelly weights & total raw dollars needed for new signals
-            from src.position_sizer import calculate_p_win
-            total_raw_dollars_needed = 0.0
-            for sig in final_signals:
-                score = float(sig.get("composite_score", 0.0))
-                win_p = calculate_p_win(score)
-                
-                rr_val = sig.get('weighted_rr_honest') or sig.get('weighted_rr') or 2.0
-                rr_val = float(rr_val) if float(rr_val) > 0 else 2.0
-                kelly_f = win_p - (1.0 - win_p) / rr_val
-                half_kelly = max(0.0, kelly_f / 2.0)
-                
-                half_kelly_fraction = half_kelly * risk_multiplier * size_mult
-                raw_dollar_sizing = min(portfolio_value * half_kelly_fraction, 0.05 * portfolio_value)
-                total_raw_dollars_needed += raw_dollar_sizing
-            
-            # Sort weak holdings lowest score first to rotate the weakest ones first
-            weak_holdings = sorted(weak_holdings, key=lambda x: float(x.get("composite_score") or 0.0))
-            
-            # Pair them up and trigger rotation if cash-constrained
-            from jobs.supabase_client import execute_position_exit
-            
-            for t1_cand in tier1_candidates:
-                    # Check cash constraint
-                    unallocated_cash = portfolio_value - open_positions_allocated_sum
-                    if total_raw_dollars_needed <= unallocated_cash:
-                        break # No longer cash-constrained, stop rotating
-                        
-                    if not weak_holdings:
-                        break # No more weak holdings to rotate
-                        
-                    weak_pos = weak_holdings[0]
-                    spread = float(t1_cand.get("composite_score") or 0.0) - float(weak_pos.get("composite_score") or 0.0)
-                    
-                    if spread >= 30.0:
-                        exit_price = float(weak_pos.get("price") or weak_pos.get("entry_price") or 0.0)
-                        reason = f"Capital Rotation Triggered (Reallocating to {t1_cand['ticker']})"
-                        
-                        logger.info(f"[ROTATION] Rotating out of weak holding {weak_pos['ticker']} (Score: {weak_pos['composite_score']}) "
-                                    f"to fund {t1_cand['ticker']} (Score: {t1_cand['composite_score']}) | Spread: {spread:.2f}")
-                        
-                        execute_position_exit(weak_pos["id"], exit_price, "closed", reason, 1, exit_price)
-                        
-                        # Deduct weak position allocated dollars from Occupied pool
-                        allocated = weak_pos.get("allocated_dollars")
-                        if allocated is not None and float(allocated) > 0:
-                            pos_val = float(allocated)
-                        else:
-                            ps_str = weak_pos.get("position_sizing") or ""
-                            pct = 0.05
-                            clean = ps_str.replace("Kelly:", "").replace("K:", "").replace("%", "").strip()
-                            try:
-                                if clean and '/' not in clean:
-                                    pct = min(float(clean) / 100.0, 0.05)
-                            except ValueError:
-                                pass
-                            pos_val = pct * portfolio_value
-                        
-                        open_positions_allocated_sum -= pos_val
-                        
-                        # Remove from tracking lists
-                        weak_holdings.pop(0)
-                        if weak_pos['ticker'].upper() in open_tickers:
-                            open_tickers.remove(weak_pos['ticker'].upper())
-                        open_positions = [p for p in open_positions if p['ticker'].upper() != weak_pos['ticker'].upper()]
-        except Exception as rotation_err:
-            logger.error(f"[ROTATION ERROR] Failed during rotation evaluation: {rotation_err}")
-
-        # Compute available cash constraints: Portfolio Value - Sum(Allocated Dollars of Open Positions) (Floored at 0.0)
-        available_cash = max(0.0, portfolio_value - open_positions_allocated_sum)
-        logger.info(f"[PORTFOLIO] Available cash for new setups: ${available_cash:.2f}")
-
-        # Phase 1: Pre-calculate raw Kelly weights and metrics for potential new setups
+        # Pre-calculate trade setups, risk analytics, and tier qualification
         earnings_rejected_count = 0
         reach_rejected_count = 0
-        kelly_rejected_count = 0
-        kelly_rejected_list = []
         rejected_signals_to_insert = []
-        candidates_to_size = []
+        qualified_recommendations = []
+
         for sig in final_signals:
             ticker = sig["ticker"]
             if ticker.upper() in open_tickers:
-                logger.info(f"Ticker {ticker} is already an active open position. Skipping recommendation insertion.")
+                logger.info(f"Ticker {ticker} is already an active recommendation. Skipping duplicate insertion.")
                 continue
 
             entry_price = float(sig["entry_price"])
@@ -980,8 +863,7 @@ def main():
 
             score = float(sig.get("composite_score", sig.get("score", 0.0)))
 
-            # 0. Earnings Date Risk Filter (Feature 1)
-            # ponytail: reject before expensive target calculation
+            # 0. Earnings Date Risk Filter
             from datetime import datetime as dt_cls
             scan_dt = dt_cls.strptime(sig["scan_date"], "%Y-%m-%d").date() if isinstance(sig["scan_date"], str) else sig["scan_date"]
             er_res = earnings_risk_filter(
@@ -1000,7 +882,7 @@ def main():
                 sig["allocated_dollars"] = 0.0
                 sig["exact_shares"] = 0.0
                 sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
+                sig["position_sizing"] = "N/A - Earnings Risk"
                 earnings_rejected_count += 1
                 logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']}")
                 rejected_signals_to_insert.append(sig)
@@ -1049,7 +931,7 @@ def main():
                 sig["allocated_dollars"] = 0.0
                 sig["exact_shares"] = 0.0
                 sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
+                sig["position_sizing"] = "N/A - Invalid Setup"
                 sig["reach_prob_raw"] = calc_res.reach_prob_raw
                 sig["reach_prob_adjusted"] = calc_res.reach_prob_adjusted
                 rejected_signals_to_insert.append(sig)
@@ -1073,128 +955,53 @@ def main():
             sig["weighted_rr"] = calc_res.weighted_rr_honest
             sig["weighted_rr_honest"] = calc_res.weighted_rr_honest
 
-            # Fix 2: Assign tier AFTER composite score & honest R:R are calculated
+            # Assign tier based on composite score & honest R:R
             from src.position_sizer import assign_tier
             sig["tier_label"] = assign_tier(score, calc_res.weighted_rr_honest)
             if sig["tier_label"] not in ("Strong Buy", "Buy"):
-                logger.info(f"[TIER FILTER] Dropping {ticker} ({strategy_name}): tier is {sig['tier_label']} (Score={score:.2f}, Honest R:R={calc_res.weighted_rr_honest:.2f})")
+                logger.info(f"[TIER FILTER] Candidate {ticker} ({strategy_name}) not in buy tier: {sig['tier_label']} (Score={score:.2f}, Honest R:R={calc_res.weighted_rr_honest:.2f})")
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Tier {sig['tier_label']} (Score {score:.1f}, R:R {calc_res.weighted_rr_honest:.2f})"
                 sig["allocated_dollars"] = 0.0
                 sig["exact_shares"] = 0.0
                 sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
+                sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
                 rejected_signals_to_insert.append(sig)
                 continue
 
-            # P0-5: Enforce Drawdown & VIX Risk Controls
-            from src.risk_controls import enforce_risk_controls
-            risk_allowed, combined_risk_mult, risk_reason = enforce_risk_controls(
-                sig, portfolio_value, peak_value, vix_size_mult=size_mult
-            )
-            if not risk_allowed or combined_risk_mult <= 0.0:
-                logger.info(f"[RISK CONTROL GATE] Dropping {ticker}: {risk_reason}")
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = risk_reason
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
-                rejected_signals_to_insert.append(sig)
-                continue
-
-            # P0-4: Sizing adjustments based on smooth sigmoid win probability & Adjusted Half-Kelly
+            # Diagnostic win probability and Kelly fraction (informational opportunity analytics only, NEVER gates recommendation)
             from src.position_sizer import calculate_p_win
             win_p = calculate_p_win(score)
-            
             rr_val = calc_res.weighted_rr_honest if calc_res.weighted_rr_honest > 0 else 2.0
-            raw_kelly = win_p - (1.0 - win_p) / rr_val
-            sig["diagnostic_raw_kelly"] = round(raw_kelly, 4)
-            sig["kelly_fraction"] = round(raw_kelly, 4)  # Retained strictly for audit/diagnostics
+            diagnostic_raw_kelly = win_p - (1.0 - win_p) / rr_val
+            sig["diagnostic_raw_kelly"] = round(diagnostic_raw_kelly, 4)
+            sig["kelly_fraction"] = round(diagnostic_raw_kelly, 4)
+            sig["final_adjusted_half_kelly"] = round(max(0.0, diagnostic_raw_kelly / 2.0), 4)
+            sig["half_kelly_fraction"] = sig["final_adjusted_half_kelly"]
 
-            if raw_kelly <= 0.0:
-                kelly_rejected_count += 1
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = f"Kelly ≤ 0 (Honest R:R = {rr_val:.2f})"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
-                kelly_rejected_list.append(sig)
-                rejected_signals_to_insert.append(sig)
-                continue
+            # Qualified Recommendation Setup!
+            sig["status"] = "pending"
+            sig["rejection_reason"] = None
+            sig["allocated_dollars"] = 0.0
+            sig["exact_shares"] = 0.0
+            sig["max_shares"] = 0
+            sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
 
-            half_kelly = max(0.0, raw_kelly / 2.0)
-            final_adjusted_half_kelly = round(half_kelly * combined_risk_mult, 4)
-            sig["final_adjusted_half_kelly"] = final_adjusted_half_kelly
-            sig["half_kelly_fraction"] = final_adjusted_half_kelly
-            sig["raw_dollar_demand"] = round(min(portfolio_value * final_adjusted_half_kelly, 0.05 * portfolio_value), 2)
+            qualified_recommendations.append(sig)
 
-            if final_adjusted_half_kelly <= 0.0:
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = "Adjusted Half-Kelly is 0 after risk multipliers"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
-                rejected_signals_to_insert.append(sig)
-                continue
-
-            # P0-7: Validate candidate fields before allocation
-            from src.position_sizer import validate_candidate_for_allocation
-            is_valid_cand, val_err = validate_candidate_for_allocation(sig)
-            if not is_valid_cand:
-                logger.warning(f"[ALLOCATION VALIDATION FAIL] Dropping {ticker}: {val_err}")
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = f"Validation failed: {val_err}"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
-                rejected_signals_to_insert.append(sig)
-                continue
-            
-            candidates_to_size.append(sig)
-
-        # Phase 2: Ranked Sequential Cash Allocation (Fix 1)
-        from src.position_sizer import allocate_capital
-        funded_signals, cash_constrained_signals = allocate_capital(candidates_to_size, portfolio_value, available_cash)
-
-        for s in cash_constrained_signals:
-            s["status"] = "rejected"
-            s["rejection_reason"] = "Cash constrained"
-            s["allocated_dollars"] = 0.0
-            s["exact_shares"] = 0.0
-            s["max_shares"] = 0
-            s["position_sizing"] = "K: 0.0%"
-
-        for s in funded_signals:
-            s["status"] = "pending"
-
-        cash_used = sum(float(s.get("allocated_dollars", 0.0)) for s in funded_signals)
-        remaining_cash = max(0.0, available_cash - cash_used)
-
-        # Fix 3: Update Scan Summary Logging
         logger.info(
             f"Scan Summary: {scanned_count} scanned | "
-            f"{len(funded_signals)} funded | "
-            f"{len(kelly_rejected_list)} Kelly≤0 | "
-            f"{len(cash_constrained_signals)} cash-constrained | "
+            f"{len(qualified_recommendations)} qualified recommendations | "
             f"{earnings_rejected_count} earnings-rejected | "
             f"{reach_rejected_count} reach-prob-rejected | "
-            f"Cash used: ${cash_used:.2f} / ${portfolio_value:.2f}"
+            f"{len(rejected_signals_to_insert)} total rejected/audit logged"
         )
 
         # Phase 3: Construct final ranked signals list for database insertion
-        all_signals_to_save = funded_signals + cash_constrained_signals + rejected_signals_to_insert
+        all_signals_to_save = qualified_recommendations + rejected_signals_to_insert
         for sig in all_signals_to_save:
             is_rejected = sig.get("status") == "rejected"
-            final_alloc_pct = 0.0
-            if portfolio_value > 0 and not is_rejected:
-                final_alloc_pct = (sig.get("allocated_dollars", 0.0) / portfolio_value) * 100.0
-            position_sizing_str = f"K: {final_alloc_pct:.1f}%"
-            if final_alloc_pct == 0.0 or available_cash <= 0 or is_rejected:
-                position_sizing_str = "K: 0.0%"
+            position_sizing_str = sig.get("position_sizing") or "N/A"
 
             ranked_signals.append(
                 {

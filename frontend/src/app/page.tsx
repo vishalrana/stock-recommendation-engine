@@ -45,9 +45,9 @@ export default async function Page() {
     errorMsg = e.message || 'Failed to load recommendations';
   }
 
-  // Active trade setups (open, pending, or partial scale-outs)
+  // Active recommendations (open or pending)
   const openPositions = portfolioData.filter(
-    (p) => p.status === 'open' || p.status === 'pending' || p.status === 'hit_t1' || p.status === 'hit_t2'
+    (p) => p.status === 'open' || p.status === 'pending'
   );
 
   return (

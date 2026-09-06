@@ -1,4 +1,5 @@
 export interface Recommendation {
+  id?: string;
   scan_date: string;
   ticker: string;
   company_name: string | null;
@@ -78,6 +79,13 @@ export interface Recommendation {
   earnings_rejected?: boolean | null;
   reach_prob_adjusted?: number | null;
   reach_prob_raw?: number | null;
+  outcome?: string | null;
+  outcome_date?: string | null;
+  outcome_return_pct?: number | null;
+  outcome_holding_days?: number | null;
+  removal_reason?: string | null;
+  removal_note?: string | null;
+  removed_at?: string | null;
 }
 
 export interface ScanLog {

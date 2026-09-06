@@ -59,11 +59,12 @@ except Exception:
     supabase = None
 
 
-def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_reason=None):
+def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_reason=None, removal_reason=None, removal_note=None):
     from datetime import datetime
     if not supabase:
         return
     today = datetime.now().date().isoformat()
+    now_ts = datetime.now().isoformat()
     update_data = {
         'status': status,
         'exit_price': exit_price,
@@ -74,7 +75,23 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
         'exit_date': today,
         'price': exit_price,
     }
-    supabase.table('signals').update(update_data).eq('ticker', ticker).eq('status', 'open').execute()
+    if removal_reason:
+        update_data['removal_reason'] = removal_reason
+    if removal_note:
+        update_data['removal_note'] = removal_note
+    if status == 'manually_removed':
+        update_data['removed_at'] = now_ts
+
+    try:
+        supabase.table('signals').update(update_data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+    except Exception as e:
+        new_cols = ['removal_reason', 'removal_note', 'removed_at']
+        if any(col in str(e) for col in new_cols):
+            for col in new_cols:
+                update_data.pop(col, None)
+            supabase.table('signals').update(update_data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+        else:
+            raise e
 
 
 def update_signals_price(ticker, current_price):
@@ -99,7 +116,7 @@ def execute_position_exit(signal_id, exit_price, outcome, reason, split_fraction
     return None
 
 
-def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_dollars=None, max_shares=None):
+def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocated_dollars=None, max_shares=None, removal_reason=None, removal_note=None):
     if not supabase:
         return
     from datetime import datetime
@@ -108,6 +125,8 @@ def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_do
         'take_profit_1': 'hit_t1',
         'take_profit_2': 'hit_t2',
         'take_profit_3': 'hit_t3',
+        'invalidated': 'invalidated',
+        'manually_removed': 'manually_removed',
     }
     outcome = outcome_map.get(status, status)
     
@@ -140,8 +159,23 @@ def update_history_outcome(ticker, status, exit_price, sell_signal, allocated_do
             update_data['allocated_dollars'] = allocated_dollars
         if max_shares is not None:
             update_data['max_shares'] = max_shares
+        if removal_reason:
+            update_data['removal_reason'] = removal_reason
+        if removal_note:
+            update_data['removal_note'] = removal_note
+        if status == 'manually_removed':
+            update_data['removed_at'] = datetime.now().isoformat()
 
-        supabase.table('signals_history').update(update_data).eq('ticker', ticker).eq('outcome', 'open').execute()
+        try:
+            supabase.table('signals_history').update(update_data).eq('ticker', ticker).eq('outcome', 'open').execute()
+        except Exception as e:
+            new_cols = ['removal_reason', 'removal_note', 'removed_at']
+            if any(col in str(e) for col in new_cols):
+                for col in new_cols:
+                    update_data.pop(col, None)
+                supabase.table('signals_history').update(update_data).eq('ticker', ticker).eq('outcome', 'open').execute()
+            else:
+                raise e
 
 
 def get_latest_price(ticker):

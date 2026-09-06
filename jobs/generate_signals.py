@@ -248,13 +248,12 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
 def refresh_active_signals_prices(supabase):
     """
     Refresh current market prices on active recommendations.
-    Pure recommendation engine behavior: updates market quotes without simulated trades,
-    selling shares, or updating portfolio P&L.
+    Evaluates stop losses without modifying portfolio P&L or trading.
     """
     try:
-        from jobs.supabase_client import get_latest_bar, update_signals_price
+        from jobs.supabase_client import get_latest_bar, update_signals_price, update_signals_status, update_history_outcome
         
-        res = supabase.table("signals").select("id, ticker, status").in_("status", ["open", "pending"]).execute()
+        res = supabase.table("signals").select("id, ticker, status, stop_loss, price").in_("status", ["open", "pending"]).execute()
         current_signals = res.data or []
         
         if not current_signals:
@@ -263,13 +262,85 @@ def refresh_active_signals_prices(supabase):
             
         logger.info("Refreshing market prices for %d active recommendations...", len(current_signals))
         for existing in current_signals:
-            ticker = existing["ticker"]
+            ticker = existing["ticker"].upper()
             bar = get_latest_bar(ticker)
             if bar and "close" in bar:
-                update_signals_price(ticker, float(bar["close"]))
-                logger.info(f"[PRICE REFRESH] {ticker}: updated to ${float(bar['close']):.2f}")
+                close_p = float(bar["close"])
+                low_p = float(bar.get("low", close_p))
+                stop_loss = float(existing.get("stop_loss") or 0.0)
+                
+                if stop_loss > 0 and low_p <= stop_loss:
+                    exit_p = min(close_p, stop_loss)
+                    logger.info(f"[PRICE REFRESH STOP HIT] {ticker}: low ${low_p:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
+                    update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit")
+                    update_history_outcome(ticker, "stopped", exit_p, True)
+                else:
+                    update_signals_price(ticker, close_p)
+                    logger.info(f"[PRICE REFRESH] {ticker}: updated to ${close_p:.2f}")
     except Exception as e:
         logger.warning("Could not refresh active signals prices: %s", e)
+
+
+def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set):
+    """
+    Reconcile active recommendations against latest market prices and scan qualification.
+    Pure recommendation engine lifecycle:
+    1. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
+    2. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
+    3. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
+       status/outcome -> 'invalidated' with reason 'No longer qualifies in subsequent scan'.
+    4. Still Active: If still qualified and stop not hit, status remains 'open', price updated.
+    
+    Crucial: None of these actions blacklist the stock. Tickers remain eligible for future scans.
+    """
+    try:
+        from jobs.supabase_client import get_latest_bar, update_signals_price, update_signals_status, update_history_outcome
+        
+        res = supabase.table("signals").select("id, ticker, status, stop_loss, entry_price, price, target_1, target_2, target_3, strategy").in_("status", ["open", "pending"]).execute()
+        active_signals = res.data or []
+        
+        if not active_signals:
+            logger.info("No active recommendations in database for lifecycle reconciliation.")
+            return
+            
+        logger.info("Reconciling recommendation lifecycle for %d active recommendations...", len(active_signals))
+        for existing in active_signals:
+            ticker = existing["ticker"].upper()
+            bar = get_latest_bar(ticker)
+            close_price = float(bar["close"]) if bar and "close" in bar else float(existing.get("price") or 0.0)
+            low_price = float(bar["low"]) if bar and "low" in bar else close_price
+            high_price = float(bar["high"]) if bar and "high" in bar else close_price
+            
+            stop_loss = float(existing.get("stop_loss") or 0.0)
+            target_3 = float(existing.get("target_3") or 0.0)
+            
+            # 1. Stop Loss Hit
+            if stop_loss > 0 and low_price <= stop_loss:
+                exit_p = min(close_price, stop_loss)
+                logger.info(f"[LIFECYCLE STOP LOSS HIT] {ticker}: low ${low_price:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
+                update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit")
+                update_history_outcome(ticker, "stopped", exit_p, True)
+                continue
+                
+            # 2. Target 3 Hit (Full Exit)
+            if target_3 > 0 and high_price >= target_3:
+                logger.info(f"[LIFECYCLE TARGET HIT] {ticker}: high ${high_price:.2f} >= T3 ${target_3:.2f}. Transitioning to hit_t3.")
+                update_signals_status(ticker, "hit_t3", target_3, True, "Target 3 hit")
+                update_history_outcome(ticker, "hit_t3", target_3, True)
+                continue
+                
+            # 3. Subsequent Scan Invalidation
+            if ticker not in qualified_tickers:
+                logger.info(f"[LIFECYCLE INVALIDATION] {ticker}: no longer qualifies in new scan. Transitioning to invalidated.")
+                update_signals_status(ticker, "invalidated", close_price, True, "No longer qualifies in subsequent scan")
+                update_history_outcome(ticker, "invalidated", close_price, True)
+                continue
+                
+            # 4. Still Active — update price
+            update_signals_price(ticker, close_price)
+            logger.info(f"[LIFECYCLE ACTIVE] {ticker}: still qualified, price refreshed to ${close_price:.2f}")
+    except Exception as e:
+        logger.warning("Could not reconcile recommendation lifecycle: %s", e)
 
 
 def get_next_trading_day(date_obj):
@@ -757,11 +828,11 @@ def main():
 
         # Fetch active open recommendations from Supabase to prevent duplicate active recommendations
         open_positions = []
-        open_tickers = []
+        open_tickers = set()
         try:
             res_open = supabase.table("signals").select("ticker, status").in_("status", ["open", "pending"]).execute()
             open_positions = res_open.data or []
-            open_tickers = [row['ticker'].upper() for row in open_positions]
+            open_tickers = {row['ticker'].upper() for row in open_positions}
             logger.info(f"[RECOMMENDATIONS] Found {len(open_tickers)} existing active recommendations in database.")
         except Exception as e:
             logger.warning("Failed to fetch active recommendations from Supabase: %s", e)
@@ -771,12 +842,10 @@ def main():
         reach_rejected_count = 0
         rejected_signals_to_insert = []
         qualified_recommendations = []
+        qualified_tickers = set()
 
         for sig in final_signals:
             ticker = sig["ticker"]
-            if ticker.upper() in open_tickers:
-                logger.info(f"Ticker {ticker} is already an active recommendation. Skipping duplicate insertion.")
-                continue
 
             entry_price = float(sig["entry_price"])
             stop_loss = float(sig["stop_loss"])
@@ -888,6 +957,13 @@ def main():
                 sig["max_shares"] = 0
                 sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
                 rejected_signals_to_insert.append(sig)
+                continue
+
+            # Candidate passes all filters and qualifies!
+            qualified_tickers.add(ticker.upper())
+
+            if ticker.upper() in open_tickers:
+                logger.info(f"Ticker {ticker} is already an active recommendation and continues to qualify.")
                 continue
 
             # Diagnostic win probability and Kelly fraction (informational opportunity analytics only, NEVER gates recommendation)
@@ -1014,15 +1090,19 @@ def main():
     duration = round(time.time() - start_time, 2)
     status = "success"
 
+    if args.dry_run:
+        logger.info(f"[DRY RUN] Qualified tickers tonight ({len(qualified_tickers)}): {sorted(list(qualified_tickers))}")
+        logger.info("[DRY RUN] Would reconcile active recommendations against qualified tickers and market quotes.")
+
     if not args.dry_run:
         try:
-            refresh_active_signals_prices(supabase)
+            reconcile_recommendation_lifecycle(supabase, qualified_tickers)
             logger.info("Clearing previous rejected audit entries from Supabase...")
             supabase.table("signals").delete().eq("status", "rejected").execute()
             logger.info("Previous audit entries cleared.")
         except Exception as e:
-            logger.error("Failed to refresh/clear signals: %s", e)
-            error_msg = f"Refresh/Clear failed: {e}"
+            logger.error("Failed to reconcile lifecycle or clear signals: %s", e)
+            error_msg = f"Lifecycle reconciliation failed: {e}"
 
         try:
             if ranked_signals:

@@ -13,7 +13,7 @@ export default function PortfolioSummary({
   scanLog,
 }: PortfolioSummaryProps) {
   const activeOpportunities = openPositions.filter(
-    (p) => p.status === 'pending' || p.status === 'open' || p.status === 'hit_t1' || p.status === 'hit_t2'
+    (p) => p.status === 'pending' || p.status === 'open'
   );
 
   const regime = propRegime || scanLog?.regime || (openPositions.length > 0 ? openPositions[0].regime : 'BULL');

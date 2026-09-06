@@ -13,10 +13,11 @@ import {
   ExpandedState,
 } from '@tanstack/react-table';
 import { Recommendation, ScanLog } from '../types/database';
-import { ArrowUpDown, ArrowUp, ArrowDown, Search, Info, RefreshCw, AlertCircle, Sparkles, History } from 'lucide-react';
+import { ArrowUpDown, ArrowUp, ArrowDown, Search, Info, RefreshCw, AlertCircle, Sparkles, History, Trash2, X, Check, Loader2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import SignalExitPlan from './SignalExitPlan';
 import { getRejectionReason } from '../lib/database';
+import { removeRecommendationAction } from '../app/actions';
 
 function getDaysHeld(entryDateStr: string | null | undefined, exitDateStr: string | null | undefined): string {
   if (!entryDateStr) return '-';
@@ -197,13 +198,16 @@ function ExpandableDetails({ row, isScanLog }: { row: { original: Recommendation
             </div>
           </div>
 
-          {/* Recommendation Lifecycle / Sell Alert */}
-          {(sell_signal || row.original.status === 'closed') && (
+          {/* Recommendation Lifecycle / Outcome */}
+          {(sell_signal || row.original.status === 'closed' || row.original.status === 'stopped' || row.original.status === 'invalidated' || row.original.status === 'manually_removed') && (
             <div className="bg-white p-4 border border-gray-200 rounded-xl shadow-sm">
-              <h5 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">⚡ Recommendation Status & Exit Alert</h5>
-              <div className="text-xs font-bold text-red-600 leading-relaxed">
-                {row.original.status === 'closed' ? '🏁 Exit complete:' : '⚠️ Active sell alert:'} {sell_signal_reason}
-                {sell_price && <span className="block font-mono text-gray-700 mt-1">at ${Number(sell_price).toFixed(2)}</span>}
+              <h5 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">⚡ Recommendation Outcome</h5>
+              <div className="text-xs font-bold text-gray-800 leading-relaxed">
+                <span className="text-rose-700">{sell_signal_reason || getRejectionReason(row.original)}</span>
+                {sell_price && <span className="block font-mono text-gray-600 mt-1">Outcome Price: ${Number(sell_price).toFixed(2)}</span>}
+                {row.original.status === 'manually_removed' && row.original.removal_note && (
+                  <span className="block text-[11px] text-gray-500 italic mt-1">&ldquo;{row.original.removal_note}&rdquo;</span>
+                )}
               </div>
             </div>
           )}
@@ -247,24 +251,54 @@ export default function RecommendationsTable({
   const router = useRouter();
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Derived datasets
+  // Manual Removal Modal State
+  const [selectedForRemoval, setSelectedForRemoval] = useState<Recommendation | null>(null);
+  const [removalReason, setRemovalReason] = useState<string>('Technical structure changed');
+  const [removalNote, setRemovalNote] = useState<string>('');
+  const [isRemoving, setIsRemoving] = useState<boolean>(false);
+  const [removalFeedback, setRemovalFeedback] = useState<string | null>(null);
+  const [removedTickerSet, setRemovedTickerSet] = useState<Set<string>>(new Set());
+
+  // Derived datasets with optimistic removal
   const portfolioSignals = useMemo(() => {
-    if (initialPortfolioData) return initialPortfolioData;
-    if (initialLegacyData) {
-      return initialLegacyData.filter(r => r.status !== 'rejected' && r.status !== 'cancelled_gap_up');
-    }
-    return [];
-  }, [initialPortfolioData, initialLegacyData]);
+    const raw = initialPortfolioData || (initialLegacyData ? initialLegacyData.filter(r => r.status !== 'rejected' && r.status !== 'cancelled_gap_up') : []);
+    return raw.filter(r => !removedTickerSet.has(r.ticker?.toUpperCase()));
+  }, [initialPortfolioData, initialLegacyData, removedTickerSet]);
 
   const scanLogSignals = useMemo(() => {
-    if (initialScanLogData) return initialScanLogData;
-    if (initialLegacyData) {
-      return initialLegacyData.filter(r => r.status === 'rejected' || r.status === 'cancelled_gap_up');
-    }
-    return [];
+    const raw = initialScanLogData || (initialLegacyData ? initialLegacyData.filter(r => r.status === 'rejected' || r.status === 'cancelled_gap_up') : []);
+    return raw;
   }, [initialScanLogData, initialLegacyData]);
 
   const activeDataset = activeTab === 'portfolio' ? portfolioSignals : scanLogSignals;
+
+  const handleConfirmRemoval = async () => {
+    if (!selectedForRemoval) return;
+    setIsRemoving(true);
+    try {
+      const res = await removeRecommendationAction({
+        ticker: selectedForRemoval.ticker,
+        id: selectedForRemoval.id,
+        reason: removalReason,
+        note: removalNote,
+      });
+
+      if (res.success) {
+        setRemovedTickerSet(prev => new Set(prev).add(selectedForRemoval.ticker.toUpperCase()));
+        setRemovalFeedback(`Recommendation for ${selectedForRemoval.ticker} removed.`);
+        setTimeout(() => setRemovalFeedback(null), 4000);
+        setSelectedForRemoval(null);
+        setRemovalNote('');
+        router.refresh();
+      } else {
+        alert(res.error || 'Failed to remove recommendation');
+      }
+    } catch (e: any) {
+      alert(e.message || 'Error removing recommendation');
+    } finally {
+      setIsRemoving(false);
+    }
+  };
 
   // Read-only server component refresh
   const handleRefresh = () => {
@@ -495,7 +529,7 @@ export default function RecommendationsTable({
               </span>
               {status === 'closed' && (
                 <span className="text-[9px] text-gray-400 font-semibold uppercase tracking-wider leading-none mt-0.5">
-                  Final
+                  Outcome
                 </span>
               )}
             </div>
@@ -506,13 +540,36 @@ export default function RecommendationsTable({
       {
         id: 'days_held',
         accessorFn: (row) => getDaysHeldNumeric(row.entry_date, row.exit_date),
-        header: 'Days',
+        header: 'Days Active',
         cell: ({ row }) => {
           const entry = row.original.entry_date;
           const exit = row.original.exit_date;
           return <span className="font-mono text-xs text-gray-600">{getDaysHeld(entry, exit)}</span>;
         },
-        size: 60,
+        size: 80,
+      },
+      {
+        id: 'action',
+        header: '',
+        cell: ({ row }) => {
+          return (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSelectedForRemoval(row.original);
+                setRemovalReason('Technical structure changed');
+                setRemovalNote('');
+              }}
+              className="px-2.5 py-1 text-xs font-semibold text-gray-500 hover:text-rose-700 bg-white hover:bg-rose-50 border border-gray-200 hover:border-rose-200 rounded-md transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+              title="Remove recommendation"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-gray-400 hover:text-rose-600" />
+              <span>Remove</span>
+            </button>
+          );
+        },
+        size: 90,
       },
     ],
     [scanLog]
@@ -550,16 +607,52 @@ export default function RecommendationsTable({
       },
       {
         accessorKey: 'tier_label',
-        header: 'Tier',
+        header: 'Outcome / Status',
         cell: ({ row }) => {
-          const tier = row.original.tier_label;
+          const status = row.original.status || row.original.outcome || 'rejected';
+          if (status === 'stopped') {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200 shadow-xs">
+                🛑 Stop Loss Hit
+              </span>
+            );
+          }
+          if (status === 'invalidated') {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200 shadow-xs">
+                ⚠️ Invalidated
+              </span>
+            );
+          }
+          if (status === 'manually_removed') {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200 shadow-xs">
+                📋 Manually Removed
+              </span>
+            );
+          }
+          if (status === 'hit_t3' || status === 'hit_t2' || status === 'hit_t1') {
+            const tLabel = status === 'hit_t3' ? 'Target 3 Hit' : status === 'hit_t2' ? 'Target 2 Hit' : 'Target 1 Hit';
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-xs">
+                🎯 {tLabel}
+              </span>
+            );
+          }
+          if (status === 'rejected') {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-50 text-slate-600 border border-slate-200 shadow-xs">
+                🔍 Filter Rejected
+              </span>
+            );
+          }
           return (
-            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${getTierBadge(tier)}`}>
-              {tier || 'Neutral'}
+            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${getTierBadge(row.original.tier_label)}`}>
+              {row.original.tier_label || 'Neutral'}
             </span>
           );
         },
-        size: 100,
+        size: 155,
       },
       {
         accessorKey: 'composite_score',
@@ -669,6 +762,23 @@ export default function RecommendationsTable({
 
   return (
     <div className="w-full">
+      {/* Removal Confirmation Toast / Banner */}
+      {removalFeedback && (
+        <div className="mb-4 p-3 bg-purple-50 border border-purple-200 text-purple-900 rounded-xl text-xs font-semibold flex items-center justify-between shadow-xs animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center gap-2">
+            <Check className="w-4 h-4 text-purple-600" />
+            <span>{removalFeedback}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRemovalFeedback(null)}
+            className="text-purple-400 hover:text-purple-700 p-0.5 rounded transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Top Market Regime Banner */}
       <RegimeBanner scanLog={scanLog} />
 
@@ -833,6 +943,115 @@ export default function RecommendationsTable({
             <span>Click rows to expand details and load TradingView chart | Column headers to sort</span>
           </div>
         </>
+      )}
+
+      {/* Remove Recommendation Modal Dialog */}
+      {selectedForRemoval && (
+        <div
+          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs"
+          onClick={() => !isRemoving && setSelectedForRemoval(null)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-200 relative animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-start justify-between pb-3 border-b border-gray-100">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <Trash2 className="w-5 h-5 text-rose-600" />
+                  Remove Recommendation
+                </h3>
+                <span className="text-xs font-semibold text-gray-500">
+                  {selectedForRemoval.ticker} • {selectedForRemoval.company_name || 'Stock Opportunity'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isRemoving && setSelectedForRemoval(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors"
+                disabled={isRemoving}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Non-Blacklisting Notice */}
+            <div className="my-4 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 leading-relaxed">
+              <span className="font-bold text-slate-900 block mb-1">ℹ️ Scan History Policy</span>
+              Removing this recommendation marks it as <span className="font-semibold text-purple-700">Manually Removed</span> and transfers it to <span className="font-semibold text-gray-900">Scan Audit & History</span>. This stock is <strong className="text-gray-900">not blacklisted</strong> and remains fully eligible for future scans if a qualified setup reforms.
+            </div>
+
+            {/* Reason Selection */}
+            <div className="space-y-2 mb-4">
+              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider">
+                Removal Reason <span className="text-rose-500">*</span>
+              </label>
+              <div className="space-y-1.5">
+                {[
+                  'Technical structure changed',
+                  'Material negative development',
+                  'Thesis invalidated',
+                  'Other',
+                ].map((r) => (
+                  <label
+                    key={r}
+                    className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-xs font-medium cursor-pointer transition-all ${
+                      removalReason === r
+                        ? 'border-blue-500 bg-blue-50/50 text-blue-900 font-semibold'
+                        : 'border-gray-200 hover:bg-gray-50 text-gray-700'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="modalRemovalReason"
+                      value={r}
+                      checked={removalReason === r}
+                      onChange={(e) => setRemovalReason(e.target.value)}
+                      className="text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>{r}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Optional Note */}
+            <div className="mb-6">
+              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                Optional Notes / Context
+              </label>
+              <textarea
+                value={removalNote}
+                onChange={(e) => setRemovalNote(e.target.value)}
+                placeholder="e.g. Breached $142 support level on high volume..."
+                rows={2}
+                className="w-full text-xs p-2.5 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 text-gray-800 placeholder-gray-400 resize-none"
+              />
+            </div>
+
+            {/* Dialog Action Buttons */}
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setSelectedForRemoval(null)}
+                disabled={isRemoving}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRemoval}
+                disabled={isRemoving}
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {isRemoving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isRemoving ? 'Removing...' : 'Confirm Removal'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

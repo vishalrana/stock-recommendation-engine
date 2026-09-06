@@ -4,27 +4,15 @@ import { Recommendation, ScanLog } from '../types/database';
 export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
   const supabase = getSupabase();
 
-  // 1. Fetch active qualified recommendations without capital constraints
+  // 1. Fetch ONLY active qualified recommendations without capital constraints
   const { data: activeSignals, error: activeError } = await supabase
     .from('signals')
     .select('*')
-    .neq('status', 'rejected')
-    .in('status', ['pending', 'open', 'hit_t1', 'hit_t2'])
+    .in('status', ['open', 'pending'])
     .order('scan_date', { ascending: false });
 
   if (activeError) {
     console.error('Error fetching active recommendations:', activeError);
-  }
-
-  // 2. Fetch closed trades / outcomes from signals_history
-  const { data: closedHistory, error: historyError } = await supabase
-    .from('signals_history')
-    .select('*')
-    .neq('outcome', 'open')
-    .order('scan_date', { ascending: false });
-
-  if (historyError) {
-    console.error('Error fetching closed history:', historyError);
   }
 
   // Fetch ticker metrics for win rates and trades
@@ -36,7 +24,7 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
     return {
       ...s,
       tier_label: s.tier_label || 'Buy',
-      status: s.status || 'pending',
+      status: s.status || 'open',
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate ?? 0,
       total_trades: (m.wins ?? 0) + (m.losses ?? 0),
@@ -46,24 +34,80 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
     };
   });
 
-  const closedFormatted = (closedHistory || []).map((h: any) => {
-    const m = metricsMap.get(h.ticker?.replace(' (P)', '').toUpperCase()) || {};
-    let status = h.outcome;
-    if (['stopped', 'stop_loss', 'hit_t3', 'hit_t2', 'hit_t1', 'closed'].includes(h.outcome)) {
-      status = 'closed';
-    }
-    let reason = 'Closed';
-    if (h.outcome === 'stopped') reason = 'Stop loss hit';
-    else if (h.outcome === 'hit_t3') reason = 'Target 3 hit – full exit';
-    else if (h.outcome === 'hit_t2') reason = 'Target 2 hit – sell 30%';
-    else if (h.outcome === 'hit_t1') reason = 'Target 1 hit – sell 50%';
+  activeFormatted.sort((a: any, b: any) => {
+    const dateA = new Date(a.scan_date || 0).getTime();
+    const dateB = new Date(b.scan_date || 0).getTime();
+    if (dateB !== dateA) return dateB - dateA;
+    return (Number(b.composite_score) || 0) - (Number(a.composite_score) || 0);
+  });
 
-    return {
+  return activeFormatted as Recommendation[];
+}
+
+export async function fetchScanLogSignals(): Promise<Recommendation[]> {
+  const supabase = getSupabase();
+
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 14);
+  const cutoffDateStr = sevenDaysAgo.toISOString().split('T')[0];
+
+  // 1. Fetch historical completed recommendation outcomes from signals_history
+  const { data: closedHistory, error: historyError } = await supabase
+    .from('signals_history')
+    .select('*')
+    .neq('outcome', 'open')
+    .order('scan_date', { ascending: false });
+
+  if (historyError) {
+    console.error('Error fetching closed history:', historyError);
+  }
+
+  // 2. Fetch completed or rejected signals from signals table
+  const { data: scanLogSignals, error: scanError } = await supabase
+    .from('signals')
+    .select('*')
+    .in('status', ['rejected', 'cancelled_gap_up', 'stopped', 'invalidated', 'manually_removed'])
+    .gte('scan_date', cutoffDateStr)
+    .order('scan_date', { ascending: false })
+    .order('composite_score', { ascending: false });
+
+  if (scanError) {
+    console.error('Error fetching scan log signals:', scanError);
+  }
+
+  // Attach ticker metrics
+  const { data: metricsData } = await supabase.from('ticker_metrics').select('*');
+  const metricsMap = new Map((metricsData || []).map((m: any) => [m.ticker?.toUpperCase(), m]));
+
+  const seenKeys = new Set<string>();
+  const combined: Recommendation[] = [];
+
+  // Add historical outcomes first
+  for (const h of (closedHistory || [])) {
+    const key = `${h.scan_date}_${h.ticker?.toUpperCase()}`;
+    seenKeys.add(key);
+
+    const m = metricsMap.get(h.ticker?.replace(' (P)', '').toUpperCase()) || {};
+    const outcome = h.outcome || 'closed';
+    let reason = h.sell_signal_reason || 'Recommendation Outcome';
+    if (outcome === 'stopped') reason = 'Stop loss hit';
+    else if (outcome === 'invalidated') reason = h.sell_signal_reason || 'No longer qualifies in subsequent scan';
+    else if (outcome === 'manually_removed') {
+      const parts = [h.removal_reason || 'Manually removed'];
+      if (h.removal_note) parts.push(h.removal_note);
+      reason = parts.join(': ');
+    }
+    else if (outcome === 'hit_t3') reason = 'Target 3 hit';
+    else if (outcome === 'hit_t2') reason = 'Target 2 hit';
+    else if (outcome === 'hit_t1') reason = 'Target 1 hit';
+
+    combined.push({
       ...h,
       tier_label: h.tier_label || 'Buy',
       entry_date: h.scan_date,
-      exit_date: h.outcome_date,
-      status: status || 'closed',
+      exit_date: h.outcome_date || h.exit_date,
+      status: outcome,
+      outcome: outcome,
       sell_signal: true,
       sell_signal_reason: reason,
       sell_price: h.exit_price || h.price,
@@ -72,59 +116,37 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
       expectancy_pct: m.expectancy_pct ?? 0,
       wins: m.wins ?? 0,
       losses: m.losses ?? 0,
-    };
-  });
-
-  const result = [...activeFormatted, ...closedFormatted];
-  result.sort((a: any, b: any) => {
-    const dateA = new Date(a.scan_date || 0).getTime();
-    const dateB = new Date(b.scan_date || 0).getTime();
-    if (dateB !== dateA) return dateB - dateA;
-    return (Number(b.composite_score) || 0) - (Number(a.composite_score) || 0);
-  });
-
-  return result as Recommendation[];
-}
-
-export async function fetchScanLogSignals(): Promise<Recommendation[]> {
-  const supabase = getSupabase();
-
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-  const sevenDaysAgoStr = sevenDaysAgo.toISOString().split('T')[0];
-
-  // Fetch audit log / rejected signals
-  const { data: scanLogSignals, error } = await supabase
-    .from('signals')
-    .select('*')
-    .in('status', ['rejected', 'cancelled_gap_up'])
-    .gte('scan_date', sevenDaysAgoStr)
-    .order('scan_date', { ascending: false })
-    .order('composite_score', { ascending: false });
-
-  if (error) {
-    console.error('Error fetching scan log signals:', error);
+    });
   }
 
-  // Attach ticker metrics
-  const { data: metricsData } = await supabase.from('ticker_metrics').select('*');
-  const metricsMap = new Map((metricsData || []).map((m: any) => [m.ticker?.toUpperCase(), m]));
+  // Add scan rejections and lifecycle transitions from signals
+  for (const s of (scanLogSignals || [])) {
+    const key = `${s.scan_date}_${s.ticker?.toUpperCase()}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
 
-  const formatted = (scanLogSignals || []).map((s: any) => {
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
-    return {
+    combined.push({
       ...s,
-      tier_label: s.tier_label || 'Rejected',
+      tier_label: s.tier_label || (s.status === 'rejected' ? 'Rejected' : 'Buy'),
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate ?? 0,
       total_trades: (m.wins ?? 0) + (m.losses ?? 0),
       expectancy_pct: m.expectancy_pct ?? 0,
       wins: m.wins ?? 0,
       losses: m.losses ?? 0,
-    };
+    });
+  }
+
+  // Sort by scan_date DESC, composite_score DESC
+  combined.sort((a, b) => {
+    const dateA = new Date(a.scan_date || 0).getTime();
+    const dateB = new Date(b.scan_date || 0).getTime();
+    if (dateB !== dateA) return dateB - dateA;
+    return (Number(b.composite_score) || 0) - (Number(a.composite_score) || 0);
   });
 
-  return formatted as Recommendation[];
+  return combined;
 }
 
 export async function getLatestScanLog(): Promise<ScanLog | null> {
@@ -153,6 +175,25 @@ export function calculatePWin(score: number): number {
 }
 
 export function getRejectionReason(sig: Recommendation): string {
+  if (sig.status === 'manually_removed' || sig.outcome === 'manually_removed') {
+    const reason = sig.removal_reason || 'Manually removed by user';
+    return sig.removal_note ? `${reason}: ${sig.removal_note}` : reason;
+  }
+  if (sig.status === 'invalidated' || sig.outcome === 'invalidated') {
+    return sig.sell_signal_reason || 'No longer qualifies in subsequent scan';
+  }
+  if (sig.status === 'stopped' || sig.outcome === 'stopped') {
+    return 'Stop loss hit';
+  }
+  if (sig.status === 'hit_t3' || sig.outcome === 'hit_t3') {
+    return 'Target 3 hit';
+  }
+  if (sig.status === 'hit_t2' || sig.outcome === 'hit_t2') {
+    return 'Target 2 hit';
+  }
+  if (sig.status === 'hit_t1' || sig.outcome === 'hit_t1') {
+    return 'Target 1 hit';
+  }
   if (sig.rejection_reason) {
     return sig.rejection_reason;
   }

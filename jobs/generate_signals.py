@@ -702,6 +702,7 @@ def main():
     ranked_signals: list[dict] = []
     error_msg = None
     rejected_signals_to_insert = []
+    qualified_tickers: set = set()
 
     if all_signals:
         # P0-1 & P0-2: Central SignalRanker is single source of truth
@@ -1115,34 +1116,34 @@ def main():
     duration = round(time.time() - start_time, 2)
     status = "success"
 
+    # Collect disqualification reasons from rejected signals
+    disqualification_reasons = {}
+    for r_sig in rejected_signals_to_insert:
+        t = r_sig.get("ticker", "").upper()
+        if t:
+            disqualification_reasons[t] = r_sig.get("rejection_reason") or "Filter rejected"
+
     if args.dry_run:
         logger.info(f"[DRY RUN] Qualified tickers tonight ({len(qualified_tickers)}): {sorted(list(qualified_tickers))}")
         logger.info("[DRY RUN] Would reconcile active recommendations against qualified tickers and market quotes.")
-
-        # Collect disqualification reasons from rejected signals
-        disqualification_reasons = {}
-        for r_sig in rejected_signals_to_insert:
-            t = r_sig.get("ticker", "").upper()
-            if t:
-                disqualification_reasons[t] = r_sig.get("rejection_reason") or "Filter rejected"
-
-        if not args.dry_run:
-            min_req = min(50, len(tickers) // 4) if len(tickers) >= 50 else 1
-            try:
-                reconcile_recommendation_lifecycle(
-                    supabase=supabase,
-                    qualified_tickers=qualified_tickers,
-                    scan_successful=True,
-                    scanned_count=scanned_count,
-                    min_required_scanned=min_req,
-                    disqualification_reasons=disqualification_reasons,
-                )
-                logger.info("Clearing previous rejected audit entries from Supabase...")
-                supabase.table("signals").delete().eq("status", "rejected").execute()
-                logger.info("Previous audit entries cleared.")
-            except Exception as e:
-                logger.error("Failed to reconcile lifecycle or clear signals: %s", e)
-                error_msg = f"Lifecycle reconciliation failed: {e}"
+        logger.info("[DRY RUN] Skipped lifecycle reconciliation, archiving, clearing, and inserting signals.")
+    else:
+        min_req = min(50, len(tickers) // 4) if len(tickers) >= 50 else 1
+        try:
+            reconcile_recommendation_lifecycle(
+                supabase=supabase,
+                qualified_tickers=qualified_tickers,
+                scan_successful=True,
+                scanned_count=scanned_count,
+                min_required_scanned=min_req,
+                disqualification_reasons=disqualification_reasons,
+            )
+            logger.info("Clearing previous rejected audit entries from Supabase...")
+            supabase.table("signals").delete().eq("status", "rejected").execute()
+            logger.info("Previous audit entries cleared.")
+        except Exception as e:
+            logger.error("Failed to reconcile lifecycle or clear signals: %s", e)
+            error_msg = f"Lifecycle reconciliation failed: {e}"
 
         try:
             if ranked_signals:
@@ -1259,8 +1260,6 @@ def main():
             status = "failed"
             error_msg = str(e)
             logger.error("Database insertion failed: %s", e)
-    else:
-        logger.info("[DRY RUN] Skipped archiving, clearing, and inserting signals.")
 
     logger.info(
         "RSI breadth: %d/%d tickers passed RSI gate (%.1f%%)",

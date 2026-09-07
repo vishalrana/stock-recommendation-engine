@@ -378,6 +378,82 @@ class TestRecommendationLifecycle(unittest.TestCase):
             mock_update_price.assert_called_once_with("NVDA", 126.50)
             mock_update_sig.assert_not_called()
 
+    def test_production_mode_calls_lifecycle_reconciliation(self):
+        """TEST A: Production mode (dry_run=False) actually calls lifecycle reconciliation."""
+        import argparse
+        mock_client = MagicMock()
+        mock_client.table().select().in_().execute.return_value.data = []
+        mock_client.table().select().execute.return_value.data = []
+
+        mock_cm = MagicMock()
+        mock_cm.is_stale.return_value = False
+        mock_cm.get_last_cached_date.return_value = "2026-09-01"
+
+        with patch("jobs.generate_signals.get_client", return_value=mock_client), \
+             patch("jobs.generate_signals.get_regime", return_value={"regime": "bull", "spy_price": 500, "spy_200dma": 450}), \
+             patch("jobs.generate_signals.apply_vix_override", return_value=("bull", ["Pullback Recovery"], 1.0)), \
+             patch("jobs.generate_signals.glob.glob", return_value=["dummy.parquet"]), \
+             patch("jobs.generate_signals.load_universe", return_value=(["AAPL"], {"AAPL": "Apple"}, {"AAPL": "Tech"})), \
+             patch("jobs.generate_signals.get_cache_manager", return_value=mock_cm), \
+             patch("jobs.generate_signals.fetch_earnings_calendar", return_value={}), \
+             patch("jobs.generate_signals.load_cached_metrics", return_value={}), \
+             patch("jobs.generate_signals.STRATEGIES", []), \
+             patch("jobs.generate_signals.reconcile_recommendation_lifecycle") as mock_rec, \
+             patch("argparse.ArgumentParser.parse_args", return_value=argparse.Namespace(dry_run=False, force_refresh=False, verbose=False, cache_mode="local")):
+            from jobs.generate_signals import main
+            main()
+
+            self.assertTrue(mock_rec.called, "Production mode (dry_run=False) MUST call reconcile_recommendation_lifecycle()")
+            _, kwargs = mock_rec.call_args
+            self.assertTrue(kwargs.get("scan_successful"), "scan_successful must be True in production scan")
+            self.assertIn("min_required_scanned", kwargs)
+            self.assertIn("disqualification_reasons", kwargs)
+
+    def test_dry_run_mode_skips_reconciliation_and_mutations(self):
+        """TEST B: Dry-run mode (dry_run=True) does NOT call lifecycle reconciliation or mutate lifecycle state."""
+        import argparse
+        mock_client = MagicMock()
+        mock_signals_table = MagicMock()
+        mock_history_table = MagicMock()
+        mock_scan_log_table = MagicMock()
+
+        def table_router(name):
+            if name == "signals":
+                return mock_signals_table
+            if name == "signals_history":
+                return mock_history_table
+            if name == "scan_log":
+                return mock_scan_log_table
+            return MagicMock()
+
+        mock_client.table.side_effect = table_router
+        mock_signals_table.select().in_().execute.return_value.data = []
+        mock_signals_table.select().execute.return_value.data = []
+
+        mock_cm = MagicMock()
+        mock_cm.is_stale.return_value = False
+        mock_cm.get_last_cached_date.return_value = "2026-09-01"
+
+        with patch("jobs.generate_signals.get_client", return_value=mock_client), \
+             patch("jobs.generate_signals.get_regime", return_value={"regime": "bull", "spy_price": 500, "spy_200dma": 450}), \
+             patch("jobs.generate_signals.apply_vix_override", return_value=("bull", ["Pullback Recovery"], 1.0)), \
+             patch("jobs.generate_signals.glob.glob", return_value=["dummy.parquet"]), \
+             patch("jobs.generate_signals.load_universe", return_value=(["AAPL"], {"AAPL": "Apple"}, {"AAPL": "Tech"})), \
+             patch("jobs.generate_signals.get_cache_manager", return_value=mock_cm), \
+             patch("jobs.generate_signals.fetch_earnings_calendar", return_value={}), \
+             patch("jobs.generate_signals.load_cached_metrics", return_value={}), \
+             patch("jobs.generate_signals.STRATEGIES", []), \
+             patch("jobs.generate_signals.reconcile_recommendation_lifecycle") as mock_rec, \
+             patch("argparse.ArgumentParser.parse_args", return_value=argparse.Namespace(dry_run=True, force_refresh=False, verbose=False, cache_mode="local")):
+            from jobs.generate_signals import main
+            main()
+
+            self.assertFalse(mock_rec.called, "Dry-run mode (dry_run=True) must NEVER call reconcile_recommendation_lifecycle()")
+            self.assertFalse(mock_signals_table.delete.called, "Dry-run mode must NEVER delete from signals table")
+            self.assertFalse(mock_signals_table.insert.called, "Dry-run mode must NEVER insert into signals table")
+            self.assertFalse(mock_history_table.upsert.called, "Dry-run mode must NEVER upsert into signals_history")
+            self.assertFalse(mock_scan_log_table.upsert.called, "Dry-run mode must NEVER upsert into scan_log")
+
 
 if __name__ == "__main__":
     unittest.main()

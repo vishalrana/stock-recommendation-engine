@@ -279,6 +279,7 @@ export default function RecommendationsTable({
       const res = await removeRecommendationAction({
         ticker: selectedForRemoval.ticker,
         id: selectedForRemoval.id,
+        scanDate: selectedForRemoval.scan_date,
         reason: removalReason,
         note: removalNote,
       });

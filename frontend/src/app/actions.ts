@@ -6,6 +6,7 @@ import { getSupabase } from '../lib/supabase';
 export interface RemoveRecommendationParams {
   ticker: string;
   id?: string;
+  scanDate?: string;
   reason: string;
   note?: string;
 }
@@ -13,6 +14,7 @@ export interface RemoveRecommendationParams {
 export async function removeRecommendationAction({
   ticker,
   id,
+  scanDate,
   reason,
   note,
 }: RemoveRecommendationParams) {
@@ -35,15 +37,30 @@ export async function removeRecommendationAction({
       removed_at: nowIso,
     };
 
+    let targetScanDate = scanDate;
+
     try {
-      let query = supabase.from('signals').update(updateSignalsData);
       if (id) {
-        query = query.eq('id', id);
+        if (!targetScanDate) {
+          const { data: sigRow } = await supabase
+            .from('signals')
+            .select('scan_date, ticker')
+            .eq('id', id)
+            .maybeSingle();
+          if (sigRow?.scan_date) {
+            targetScanDate = sigRow.scan_date;
+          }
+        }
+        const { error: sigError } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
+        if (sigError) throw sigError;
       } else {
-        query = query.eq('ticker', tickerClean).in('status', ['open', 'pending']);
+        const { error: sigError } = await supabase
+          .from('signals')
+          .update(updateSignalsData)
+          .eq('ticker', tickerClean)
+          .in('status', ['open', 'pending']);
+        if (sigError) throw sigError;
       }
-      const { error: sigError } = await query;
-      if (sigError) throw sigError;
     } catch (err: any) {
       // Graceful fallback if removal_reason/note/removed_at columns are pending DB migration
       if (
@@ -56,50 +73,62 @@ export async function removeRecommendationAction({
         delete updateSignalsData.removal_note;
         delete updateSignalsData.removed_at;
 
-        let query = supabase.from('signals').update(updateSignalsData);
         if (id) {
-          query = query.eq('id', id);
+          await supabase.from('signals').update(updateSignalsData).eq('id', id);
         } else {
-          query = query.eq('ticker', tickerClean).in('status', ['open', 'pending']);
+          await supabase.from('signals').update(updateSignalsData).eq('ticker', tickerClean).in('status', ['open', 'pending']);
         }
-        await query;
       } else {
         console.error('Error updating signals on manual removal:', err);
       }
     }
 
-    // 2. Update signals_history table
+    // 2. Update signals_history table for the EXACT recommendation instance
     const updateHistoryData: any = {
       outcome: 'manually_removed',
       outcome_date: today,
+      sell_signal_reason: sellReason,
       removal_reason: reason,
       removal_note: note?.trim() || null,
       removed_at: nowIso,
     };
 
+    const isNumericId = id && /^\d+$/.test(id);
+
+    const executeHistoryUpdate = async (data: any) => {
+      // Priority 1: Exact history numeric primary key if provided
+      if (isNumericId) {
+        return supabase.from('signals_history').update(data).eq('id', Number(id));
+      }
+      // Priority 2: Exact (ticker, scan_date) instance key
+      if (targetScanDate) {
+        return supabase.from('signals_history').update(data).eq('ticker', tickerClean).eq('scan_date', targetScanDate);
+      }
+      // Priority 3: Exact signal_id linkage if column exists
+      if (id) {
+        const res = await supabase.from('signals_history').update(data).eq('signal_id', id);
+        if (!res.error) return res;
+      }
+      // Priority 4 (Fallback only if no instance date/id available): ticker + outcome='open'
+      return supabase.from('signals_history').update(data).eq('ticker', tickerClean).eq('outcome', 'open');
+    };
+
     try {
-      const { error: histError } = await supabase
-        .from('signals_history')
-        .update(updateHistoryData)
-        .eq('ticker', tickerClean)
-        .eq('outcome', 'open');
+      const { error: histError } = await executeHistoryUpdate(updateHistoryData);
       if (histError) throw histError;
     } catch (err: any) {
       if (
         err.message?.includes('removal_reason') ||
         err.message?.includes('removal_note') ||
         err.message?.includes('removed_at') ||
+        err.message?.includes('signal_id') ||
         err.code === '42703'
       ) {
         delete updateHistoryData.removal_reason;
         delete updateHistoryData.removal_note;
         delete updateHistoryData.removed_at;
 
-        await supabase
-          .from('signals_history')
-          .update(updateHistoryData)
-          .eq('ticker', tickerClean)
-          .eq('outcome', 'open');
+        await executeHistoryUpdate(updateHistoryData);
       } else {
         console.error('Error updating signals_history on manual removal:', err);
       }

@@ -59,7 +59,7 @@ except Exception:
     supabase = None
 
 
-def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_reason=None, removal_reason=None, removal_note=None):
+def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_reason=None, removal_reason=None, removal_note=None, signal_id=None):
     from datetime import datetime
     if not supabase:
         return
@@ -82,14 +82,20 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
     if status == 'manually_removed':
         update_data['removed_at'] = now_ts
 
+    def _execute_update(data):
+        if signal_id:
+            return supabase.table('signals').update(data).eq('id', signal_id).execute()
+        else:
+            return supabase.table('signals').update(data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+
     try:
-        supabase.table('signals').update(update_data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+        _execute_update(update_data)
     except Exception as e:
         new_cols = ['removal_reason', 'removal_note', 'removed_at']
         if any(col in str(e) for col in new_cols):
             for col in new_cols:
                 update_data.pop(col, None)
-            supabase.table('signals').update(update_data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+            _execute_update(update_data)
         else:
             raise e
 
@@ -116,7 +122,7 @@ def execute_position_exit(signal_id, exit_price, outcome, reason, split_fraction
     return None
 
 
-def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocated_dollars=None, max_shares=None, removal_reason=None, removal_note=None):
+def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocated_dollars=None, max_shares=None, removal_reason=None, removal_note=None, history_id=None, signal_id=None, scan_date=None, sell_signal_reason=None):
     if not supabase:
         return
     from datetime import datetime
@@ -130,21 +136,76 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
     }
     outcome = outcome_map.get(status, status)
     
-    res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('outcome', 'open').execute()
-    if res.data:
-        record = res.data[0]
+    # Exact record lookup priority:
+    # 1. history_id (exact primary key in signals_history)
+    # 2. signal_id (exact foreign key if present)
+    # 3. (ticker, scan_date) (unique constraint in signals_history)
+    # 4. fallback: ticker + outcome='open' (only if no instance identifier available)
+    record = None
+    target_filter_type = 'fallback'
+    target_filter_val = None
+
+    if history_id is not None:
+        try:
+            h_res = supabase.table('signals_history').select('*').eq('id', history_id).execute()
+            if h_res.data:
+                record = h_res.data[0]
+                target_filter_type = 'history_id'
+                target_filter_val = history_id
+        except Exception:
+            pass
+
+    if record is None and signal_id is not None:
+        try:
+            s_res = supabase.table('signals_history').select('*').eq('signal_id', signal_id).execute()
+            if s_res.data:
+                record = s_res.data[0]
+                target_filter_type = 'signal_id'
+                target_filter_val = signal_id
+        except Exception:
+            pass
+        if record is None and scan_date is None:
+            try:
+                sig_lookup = supabase.table('signals').select('scan_date, ticker').eq('id', signal_id).execute()
+                if sig_lookup.data:
+                    scan_date = sig_lookup.data[0].get('scan_date')
+                    if not ticker:
+                        ticker = sig_lookup.data[0].get('ticker')
+            except Exception:
+                pass
+
+    if record is None and scan_date is not None and ticker:
+        try:
+            d_res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('scan_date', scan_date).execute()
+            if d_res.data:
+                record = d_res.data[0]
+                target_filter_type = 'scan_date'
+                target_filter_val = scan_date
+        except Exception:
+            pass
+
+    if record is None and ticker:
+        try:
+            res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('outcome', 'open').execute()
+            if res.data:
+                record = res.data[0]
+                target_filter_type = 'fallback'
+        except Exception:
+            pass
+
+    if record:
         entry_price = float(record.get('entry_price') or 0)
         scan_date_str = record.get('scan_date')
         
         return_pct = None
         if entry_price > 0 and exit_price is not None:
-            return_pct = ((exit_price - entry_price) / entry_price) * 100
+            return_pct = round(((exit_price - entry_price) / entry_price) * 100, 2)
             
         holding_days = None
         if scan_date_str:
             try:
-                scan_date = datetime.strptime(scan_date_str, '%Y-%m-%d').date()
-                holding_days = (datetime.now().date() - scan_date).days
+                scan_dt = datetime.strptime(str(scan_date_str)[:10], '%Y-%m-%d').date()
+                holding_days = (datetime.now().date() - scan_dt).days
             except Exception:
                 pass
                 
@@ -155,6 +216,8 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
             'outcome_return_pct': return_pct,
             'outcome_holding_days': holding_days
         }
+        if sell_signal_reason:
+            update_data['sell_signal_reason'] = sell_signal_reason
         if allocated_dollars is not None:
             update_data['allocated_dollars'] = allocated_dollars
         if max_shares is not None:
@@ -166,14 +229,25 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
         if status == 'manually_removed':
             update_data['removed_at'] = datetime.now().isoformat()
 
+        def _execute_history_update(data):
+            rec_id = record.get('id')
+            if rec_id is not None:
+                return supabase.table('signals_history').update(data).eq('id', rec_id).execute()
+            elif target_filter_type == 'scan_date':
+                return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('scan_date', target_filter_val).execute()
+            elif target_filter_type == 'signal_id':
+                return supabase.table('signals_history').update(data).eq('signal_id', target_filter_val).execute()
+            else:
+                return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('outcome', 'open').execute()
+
         try:
-            supabase.table('signals_history').update(update_data).eq('ticker', ticker).eq('outcome', 'open').execute()
+            _execute_history_update(update_data)
         except Exception as e:
-            new_cols = ['removal_reason', 'removal_note', 'removed_at']
+            new_cols = ['removal_reason', 'removal_note', 'removed_at', 'signal_id']
             if any(col in str(e) for col in new_cols):
                 for col in new_cols:
                     update_data.pop(col, None)
-                supabase.table('signals_history').update(update_data).eq('ticker', ticker).eq('outcome', 'open').execute()
+                _execute_history_update(update_data)
             else:
                 raise e
 

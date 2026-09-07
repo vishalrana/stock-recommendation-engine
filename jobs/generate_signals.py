@@ -281,22 +281,34 @@ def refresh_active_signals_prices(supabase):
         logger.warning("Could not refresh active signals prices: %s", e)
 
 
-def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set):
+def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_successful: bool = True, scanned_count: int = 0, min_required_scanned: int = 50, disqualification_reasons: dict = None):
     """
     Reconcile active recommendations against latest market prices and scan qualification.
     Pure recommendation engine lifecycle:
-    1. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
-    2. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
-    3. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
-       status/outcome -> 'invalidated' with reason 'No longer qualifies in subsequent scan'.
-    4. Still Active: If still qualified and stop not hit, status remains 'open', price updated.
+    1. Scan Failure Safeguard: If scan failed or scanned_count < min_required_scanned, skip invalidation.
+    2. Per-Ticker Quote Safeguard: If market quote is unavailable, skip lifecycle transition.
+    3. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
+    4. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
+    5. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
+       status/outcome -> 'invalidated' with specific disqualification reason.
+    6. Still Active: If still qualified and stop not hit, status remains 'open', price updated.
     
-    Crucial: None of these actions blacklist the stock. Tickers remain eligible for future scans.
+    Crucial:
+    - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
+    - None of these actions blacklist the stock. Tickers remain 100% eligible for future scans.
     """
+    if not scan_successful:
+        logger.warning("[LIFECYCLE SAFEGUARD] Scan did not complete successfully. Skipping automatic invalidation to protect active recommendations.")
+        return
+
+    if scanned_count < min_required_scanned:
+        logger.warning(f"[LIFECYCLE SAFEGUARD] Incomplete scan detected ({scanned_count} < {min_required_scanned} tickers scanned). Skipping automatic invalidation.")
+        return
+
     try:
         from jobs.supabase_client import get_latest_bar, update_signals_price, update_signals_status, update_history_outcome
         
-        res = supabase.table("signals").select("id, ticker, status, stop_loss, entry_price, price, target_1, target_2, target_3, strategy").in_("status", ["open", "pending"]).execute()
+        res = supabase.table("signals").select("id, ticker, status, stop_loss, entry_price, price, target_1, target_2, target_3, strategy, scan_date").in_("status", ["open", "pending"]).execute()
         active_signals = res.data or []
         
         if not active_signals:
@@ -306,10 +318,17 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set):
         logger.info("Reconciling recommendation lifecycle for %d active recommendations...", len(active_signals))
         for existing in active_signals:
             ticker = existing["ticker"].upper()
+            signal_id = existing.get("id")
+            scan_date = existing.get("scan_date")
+
             bar = get_latest_bar(ticker)
-            close_price = float(bar["close"]) if bar and "close" in bar else float(existing.get("price") or 0.0)
-            low_price = float(bar["low"]) if bar and "low" in bar else close_price
-            high_price = float(bar["high"]) if bar and "high" in bar else close_price
+            if not bar or "close" not in bar or bar["close"] is None or float(bar["close"]) <= 0:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: Unable to retrieve current quote data. Skipping lifecycle transition.")
+                continue
+
+            close_price = float(bar["close"])
+            low_price = float(bar.get("low", close_price))
+            high_price = float(bar.get("high", close_price))
             
             stop_loss = float(existing.get("stop_loss") or 0.0)
             target_3 = float(existing.get("target_3") or 0.0)
@@ -318,22 +337,24 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set):
             if stop_loss > 0 and low_price <= stop_loss:
                 exit_p = min(close_price, stop_loss)
                 logger.info(f"[LIFECYCLE STOP LOSS HIT] {ticker}: low ${low_price:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
-                update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit")
-                update_history_outcome(ticker, "stopped", exit_p, True)
+                update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit", signal_id=signal_id)
+                update_history_outcome(ticker, "stopped", exit_p, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Stop loss hit")
                 continue
                 
             # 2. Target 3 Hit (Full Exit)
             if target_3 > 0 and high_price >= target_3:
                 logger.info(f"[LIFECYCLE TARGET HIT] {ticker}: high ${high_price:.2f} >= T3 ${target_3:.2f}. Transitioning to hit_t3.")
-                update_signals_status(ticker, "hit_t3", target_3, True, "Target 3 hit")
-                update_history_outcome(ticker, "hit_t3", target_3, True)
+                update_signals_status(ticker, "hit_t3", target_3, True, "Target 3 hit", signal_id=signal_id)
+                update_history_outcome(ticker, "hit_t3", target_3, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Target 3 hit")
                 continue
                 
             # 3. Subsequent Scan Invalidation
             if ticker not in qualified_tickers:
-                logger.info(f"[LIFECYCLE INVALIDATION] {ticker}: no longer qualifies in new scan. Transitioning to invalidated.")
-                update_signals_status(ticker, "invalidated", close_price, True, "No longer qualifies in subsequent scan")
-                update_history_outcome(ticker, "invalidated", close_price, True)
+                raw_reason = (disqualification_reasons or {}).get(ticker)
+                dq_reason = f"No longer qualifies in subsequent scan: {raw_reason}" if raw_reason else "No longer qualifies in subsequent scan"
+                logger.info(f"[LIFECYCLE INVALIDATION] {ticker}: no longer qualifies in new scan ({dq_reason}). Transitioning to invalidated.")
+                update_signals_status(ticker, "invalidated", close_price, True, dq_reason, signal_id=signal_id)
+                update_history_outcome(ticker, "invalidated", close_price, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason=dq_reason)
                 continue
                 
             # 4. Still Active — update price
@@ -996,12 +1017,16 @@ def main():
 
         # Phase 3: Construct final ranked signals list for database insertion
         all_signals_to_save = qualified_recommendations + rejected_signals_to_insert
+        import uuid
         for sig in all_signals_to_save:
             is_rejected = sig.get("status") == "rejected"
             position_sizing_str = sig.get("position_sizing") or "N/A"
+            sig_id = sig.get("id") or str(uuid.uuid4())
+            sig["id"] = sig_id
 
             ranked_signals.append(
                 {
+                    "id": sig_id,
                     "scan_date": sig["scan_date"],
                     "ticker": sig["ticker"],
                     "company_name": sig["company_name"],
@@ -1094,15 +1119,30 @@ def main():
         logger.info(f"[DRY RUN] Qualified tickers tonight ({len(qualified_tickers)}): {sorted(list(qualified_tickers))}")
         logger.info("[DRY RUN] Would reconcile active recommendations against qualified tickers and market quotes.")
 
-    if not args.dry_run:
-        try:
-            reconcile_recommendation_lifecycle(supabase, qualified_tickers)
-            logger.info("Clearing previous rejected audit entries from Supabase...")
-            supabase.table("signals").delete().eq("status", "rejected").execute()
-            logger.info("Previous audit entries cleared.")
-        except Exception as e:
-            logger.error("Failed to reconcile lifecycle or clear signals: %s", e)
-            error_msg = f"Lifecycle reconciliation failed: {e}"
+        # Collect disqualification reasons from rejected signals
+        disqualification_reasons = {}
+        for r_sig in rejected_signals_to_insert:
+            t = r_sig.get("ticker", "").upper()
+            if t:
+                disqualification_reasons[t] = r_sig.get("rejection_reason") or "Filter rejected"
+
+        if not args.dry_run:
+            min_req = min(50, len(tickers) // 4) if len(tickers) >= 50 else 1
+            try:
+                reconcile_recommendation_lifecycle(
+                    supabase=supabase,
+                    qualified_tickers=qualified_tickers,
+                    scan_successful=True,
+                    scanned_count=scanned_count,
+                    min_required_scanned=min_req,
+                    disqualification_reasons=disqualification_reasons,
+                )
+                logger.info("Clearing previous rejected audit entries from Supabase...")
+                supabase.table("signals").delete().eq("status", "rejected").execute()
+                logger.info("Previous audit entries cleared.")
+            except Exception as e:
+                logger.error("Failed to reconcile lifecycle or clear signals: %s", e)
+                error_msg = f"Lifecycle reconciliation failed: {e}"
 
         try:
             if ranked_signals:
@@ -1114,6 +1154,7 @@ def main():
                     ticker = sig.get("ticker", "")
                     m = metrics_map.get(ticker.upper(), {})
                     history_rows.append({
+                        "signal_id": sig.get("id"),
                         "scan_date": sig.get("scan_date"),
                         "ticker": ticker,
                         "company_name": sig.get("company_name"),
@@ -1189,7 +1230,7 @@ def main():
                     "scale_out_weights", "weighted_rr_honest", "exact_shares",
                     "de_ratio", "current_ratio", "earnings_surprise_pct", "finbert_sentiment",
                     "next_earnings_date", "days_to_earnings", "earnings_rejected",
-                    "reach_prob_adjusted", "reach_prob_raw", "rejection_reason"
+                    "reach_prob_adjusted", "reach_prob_raw", "rejection_reason", "signal_id"
                 )
                 try:
                     supabase.table("signals").insert(ranked_signals).execute()

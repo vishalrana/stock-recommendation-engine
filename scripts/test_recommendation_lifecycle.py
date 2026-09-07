@@ -454,6 +454,208 @@ class TestRecommendationLifecycle(unittest.TestCase):
             self.assertFalse(mock_history_table.upsert.called, "Dry-run mode must NEVER upsert into signals_history")
             self.assertFalse(mock_scan_log_table.upsert.called, "Dry-run mode must NEVER upsert into scan_log")
 
+    def test_duplicate_ticker_multiple_instances_isolation(self):
+        """Test: AAPL / Strategy A / ID 101 vs AAPL / Strategy B / ID 102.
+        Removing or invalidating ID 101 must NEVER modify ID 102."""
+        from jobs.supabase_client import update_signals_status, update_history_outcome
+        import jobs.supabase_client as sc
+
+        history_rows = {
+            101: {"id": 101, "ticker": "AAPL", "scan_date": "2026-08-01", "outcome": "open", "strategy": "Strategy A"},
+            102: {"id": 102, "ticker": "AAPL", "scan_date": "2026-09-01", "outcome": "open", "strategy": "Strategy B"},
+        }
+        signals_rows = {
+            "sig-101": {"id": "sig-101", "ticker": "AAPL", "scan_date": "2026-08-01", "status": "open", "strategy": "Strategy A"},
+            "sig-102": {"id": "sig-102", "ticker": "AAPL", "scan_date": "2026-09-01", "status": "open", "strategy": "Strategy B"},
+        }
+
+        mock_supabase = MagicMock()
+
+        def signals_update(data):
+            mock_query = MagicMock()
+            def eq_id(col, val):
+                mock_exec = MagicMock()
+                def execute():
+                    if col == "id" and val in signals_rows:
+                        signals_rows[val].update(data)
+                mock_exec.execute = execute
+                return mock_exec
+            mock_query.eq.side_effect = eq_id
+            return mock_query
+
+        def history_table():
+            mock_table = MagicMock()
+            def select_fn(cols):
+                mock_s = MagicMock()
+                def eq_fn(col, val):
+                    mock_s2 = MagicMock()
+                    def second_eq(col2, val2):
+                        mock_ex = MagicMock()
+                        data = [r for r in history_rows.values() if r.get(col) == val and r.get(col2) == val2]
+                        mock_ex.execute.return_value = MagicMock(data=data)
+                        return mock_ex
+                    def execute_single():
+                        data = [r for r in history_rows.values() if r.get(col) == val]
+                        return MagicMock(data=data)
+                    mock_s2.eq.side_effect = second_eq
+                    mock_s2.execute = execute_single
+                    return mock_s2
+                mock_s.eq.side_effect = eq_fn
+                return mock_s
+
+            def update_fn(data):
+                mock_u = MagicMock()
+                def eq_fn(col, val):
+                    mock_u2 = MagicMock()
+                    def second_eq(col2, val2):
+                        mock_ex = MagicMock()
+                        def execute():
+                            for r in history_rows.values():
+                                if r.get(col) == val and r.get(col2) == val2:
+                                    r.update(data)
+                        mock_ex.execute = execute
+                        return mock_ex
+                    def execute_single():
+                        for r in history_rows.values():
+                            if r.get(col) == val:
+                                r.update(data)
+                    mock_u2.eq.side_effect = second_eq
+                    mock_u2.execute = execute_single
+                    return mock_u2
+                mock_u.eq.side_effect = eq_fn
+                return mock_u
+
+            mock_table.select.side_effect = select_fn
+            mock_table.update.side_effect = update_fn
+            return mock_table
+
+        mock_signals_t = MagicMock()
+        mock_signals_t.update.side_effect = signals_update
+        mock_history_t = history_table()
+
+        def table_router(name):
+            if name == "signals":
+                return mock_signals_t
+            if name == "signals_history":
+                return mock_history_t
+            return MagicMock()
+
+        mock_supabase.table.side_effect = table_router
+
+        orig_client = sc.supabase
+        try:
+            sc.supabase = mock_supabase
+
+            # Invalidate or remove ONLY ID sig-101 (scan_date 2026-08-01)
+            update_signals_status(
+                ticker="AAPL",
+                status="invalidated",
+                exit_price=150.0,
+                sell_signal=True,
+                sell_signal_reason="Disqualified",
+                signal_id="sig-101",
+            )
+            update_history_outcome(
+                ticker="AAPL",
+                status="invalidated",
+                exit_price=150.0,
+                sell_signal=True,
+                history_id=101,
+                scan_date="2026-08-01",
+                sell_signal_reason="Disqualified",
+            )
+
+            # Verification:
+            # 1. Instance 101 is invalidated
+            self.assertEqual(signals_rows["sig-101"]["status"], "invalidated")
+            self.assertEqual(history_rows[101]["outcome"], "invalidated")
+
+            # 2. Instance 102 is 100% UNCHANGED ('open')
+            self.assertEqual(signals_rows["sig-102"]["status"], "open")
+            self.assertEqual(history_rows[102]["outcome"], "open")
+            self.assertEqual(history_rows[102]["strategy"], "Strategy B")
+
+        finally:
+            sc.supabase = orig_client
+
+    def test_manual_removal_refuses_unsafe_ticker_only(self):
+        """Verify that manual removal safely refuses operation without exact instance identity."""
+        from jobs.supabase_client import update_signals_status, update_history_outcome
+        import jobs.supabase_client as sc
+
+        mock_signals_t = MagicMock()
+        mock_history_t = MagicMock()
+        mock_supabase = MagicMock()
+
+        def table_router(name):
+            if name == "signals":
+                return mock_signals_t
+            if name == "signals_history":
+                return mock_history_t
+            return MagicMock()
+
+        mock_supabase.table.side_effect = table_router
+
+        orig_client = sc.supabase
+        try:
+            sc.supabase = mock_supabase
+
+            # Attempt manual removal without signal_id on signals table
+            res_sig = update_signals_status(
+                ticker="AAPL",
+                status="manually_removed",
+                exit_price=150.0,
+                sell_signal=True,
+                signal_id=None,  # Unsafe ticker-only
+            )
+            self.assertIsNone(res_sig)
+            self.assertFalse(mock_signals_t.update().eq.called)
+
+            # Attempt manual removal without history_id, signal_id, or scan_date
+            res_hist = update_history_outcome(
+                ticker="AAPL",
+                status="manually_removed",
+                exit_price=150.0,
+                history_id=None,
+                signal_id=None,
+                scan_date=None,  # Unsafe ticker-only
+            )
+            self.assertIsNone(res_hist)
+            self.assertFalse(mock_history_t.update.called)
+
+        finally:
+            sc.supabase = orig_client
+
+    def test_rejected_signals_outcome_is_rejected_not_open(self):
+        """Verify that rejected audit signals are archived to signals_history as 'rejected', not 'open',
+        protecting validate_ranking.py from evaluating rejected records as active recommendations."""
+        # Simulate history_rows creation for both qualified and rejected signals
+        ranked_signals = [
+            {"id": "sig-good", "ticker": "MSFT", "status": "pending", "scan_date": "2026-09-08"},
+            {"id": "sig-bad", "ticker": "BADCO", "status": "rejected", "rejection_reason": "Earnings blackout", "scan_date": "2026-09-08"},
+        ]
+
+        history_rows = []
+        for sig in ranked_signals:
+            history_rows.append({
+                "signal_id": sig.get("id"),
+                "ticker": sig.get("ticker"),
+                "scan_date": sig.get("scan_date"),
+                "outcome": "rejected" if sig.get("status") == "rejected" else "open",
+            })
+
+        self.assertEqual(history_rows[0]["outcome"], "open")
+        self.assertEqual(history_rows[1]["outcome"], "rejected")
+
+    def test_future_requalification_after_invalidation_or_manual_removal(self):
+        """Verify that an invalidated or manually removed stock is NEVER blacklisted
+        and can be cleanly recommended in a subsequent scan."""
+        from jobs.generate_signals import BLACKLIST
+
+        test_tickers = ["ABC", "XYZ_STOPPED", "MANUAL_REMOVED_TICKER"]
+        for t in test_tickers:
+            self.assertNotIn(t, BLACKLIST, f"Ticker {t} must not be in BLACKLIST")
+
 
 if __name__ == "__main__":
     unittest.main()

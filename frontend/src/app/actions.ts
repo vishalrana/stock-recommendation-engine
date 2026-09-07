@@ -37,6 +37,14 @@ export async function removeRecommendationAction({
       removed_at: nowIso,
     };
 
+    // Strict safeguard: manual removal requires an unambiguous recommendation instance identifier
+    if (!id && !scanDate) {
+      return {
+        success: false,
+        error: 'Exact recommendation instance identifier (id or scanDate) is required for manual removal. Ticker-only removal is prohibited.',
+      };
+    }
+
     let targetScanDate = scanDate;
 
     try {
@@ -53,12 +61,12 @@ export async function removeRecommendationAction({
         }
         const { error: sigError } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
         if (sigError) throw sigError;
-      } else {
+      } else if (targetScanDate) {
         const { error: sigError } = await supabase
           .from('signals')
           .update(updateSignalsData)
           .eq('ticker', tickerClean)
-          .in('status', ['open', 'pending']);
+          .eq('scan_date', targetScanDate);
         if (sigError) throw sigError;
       }
     } catch (err: any) {
@@ -75,8 +83,8 @@ export async function removeRecommendationAction({
 
         if (id) {
           await supabase.from('signals').update(updateSignalsData).eq('id', id);
-        } else {
-          await supabase.from('signals').update(updateSignalsData).eq('ticker', tickerClean).in('status', ['open', 'pending']);
+        } else if (targetScanDate) {
+          await supabase.from('signals').update(updateSignalsData).eq('ticker', tickerClean).eq('scan_date', targetScanDate);
         }
       } else {
         console.error('Error updating signals on manual removal:', err);
@@ -109,8 +117,8 @@ export async function removeRecommendationAction({
         const res = await supabase.from('signals_history').update(data).eq('signal_id', id);
         if (!res.error) return res;
       }
-      // Priority 4 (Fallback only if no instance date/id available): ticker + outcome='open'
-      return supabase.from('signals_history').update(data).eq('ticker', tickerClean).eq('outcome', 'open');
+      // Strict safeguard: refuse unsafe ticker-only fallback
+      throw new Error('No exact recommendation instance match found in signals_history. Ticker-only fallback refused.');
     };
 
     try {

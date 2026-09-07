@@ -85,6 +85,10 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
     def _execute_update(data):
         if signal_id:
             return supabase.table('signals').update(data).eq('id', signal_id).execute()
+        elif status == 'manually_removed':
+            import logging
+            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only update for {ticker}. Exact signal_id is required.")
+            return None
         else:
             return supabase.table('signals').update(data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
 
@@ -185,6 +189,10 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
             pass
 
     if record is None and ticker:
+        if status == 'manually_removed':
+            import logging
+            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only fallback for {ticker}. Exact instance identifier (history_id, signal_id, or scan_date) is required.")
+            return None
         try:
             res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('outcome', 'open').execute()
             if res.data:
@@ -237,8 +245,12 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
                 return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('scan_date', target_filter_val).execute()
             elif target_filter_type == 'signal_id':
                 return supabase.table('signals_history').update(data).eq('signal_id', target_filter_val).execute()
-            else:
+            elif target_filter_type == 'fallback':
+                if status == 'manually_removed':
+                    return None
                 return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('outcome', 'open').execute()
+            else:
+                return None
 
         try:
             _execute_history_update(update_data)

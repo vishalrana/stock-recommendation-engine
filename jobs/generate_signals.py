@@ -1202,7 +1202,7 @@ def main():
                         "position_sizing": sig.get("position_sizing", "50/30/20"),
                         "narrative": sig.get("narrative"),
                         "strategy_name": sig.get("strategy_name"),
-                        "outcome": "open",
+                        "outcome": "rejected" if sig.get("status") == "rejected" else "open",
                         "sell_signal_reason": sig.get("rejection_reason"),
                         "rejection_reason": sig.get("rejection_reason"),
                         "context_score": sig.get("context_score", 0.0),

@@ -100,6 +100,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
     else if (outcome === 'hit_t3') reason = 'Target 3 hit';
     else if (outcome === 'hit_t2') reason = 'Target 2 hit';
     else if (outcome === 'hit_t1') reason = 'Target 1 hit';
+    else if (outcome === 'rejected') reason = h.sell_signal_reason || 'Filter rejected';
 
     combined.push({
       ...h,

@@ -102,3 +102,14 @@ export interface ScanLog {
   skipped_strategies?: Record<string, string>;
   rsi_breadth_pct?: number;
 }
+
+export interface ScanHistoryEntry {
+  scan_date: string;
+  tickers_scanned: number;
+  signals_generated: number;
+  signals_qualified: number;
+  regime: string;
+  status: string;
+  newIdeas: Array<{ ticker: string; strategy: string; company_name?: string | null }>;
+  filteredSetups: Array<{ ticker: string; strategy?: string | null; reason: string }>;
+}

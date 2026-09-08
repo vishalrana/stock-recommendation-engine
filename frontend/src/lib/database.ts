@@ -1,5 +1,5 @@
 import { getSupabase } from './supabase';
-import { Recommendation, ScanLog } from '../types/database';
+import { Recommendation, ScanLog, ScanHistoryEntry } from '../types/database';
 
 export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
   const supabase = getSupabase();
@@ -165,6 +165,200 @@ export async function getLatestScanLog(): Promise<ScanLog | null> {
     return data[0] as ScanLog;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Authoritative fetch for Closed Stock Ideas
+ * Uses `signals_history` as the primary/authoritative source of truth for all historical
+ * recommendation outcomes: stopped, hit_t1, hit_t2, hit_t3, invalidated, manually_removed.
+ * Preserves exact recommendation instances using id / signal_id / scan_date.
+ * Does NOT merge distinct historical instances for the same ticker.
+ */
+export async function fetchClosedSignals(): Promise<Recommendation[]> {
+  const supabase = getSupabase();
+
+  const { data: closedHistory, error: historyError } = await supabase
+    .from('signals_history')
+    .select('*')
+    .in('outcome', ['stopped', 'hit_t1', 'hit_t2', 'hit_t3', 'invalidated', 'manually_removed'])
+    .order('outcome_date', { ascending: false })
+    .order('scan_date', { ascending: false });
+
+  if (historyError) {
+    console.error('Error fetching closed history from signals_history:', historyError);
+  }
+
+  // Also include any active records from `signals` that were just marked closed/stopped/invalidated/manually_removed
+  // before being archived, to ensure immediate consistency
+  const { data: activeClosed, error: activeError } = await supabase
+    .from('signals')
+    .select('*')
+    .in('status', ['stopped', 'hit_t1', 'hit_t2', 'hit_t3', 'invalidated', 'manually_removed'])
+    .order('scan_date', { ascending: false });
+
+  if (activeError) {
+    console.error('Error fetching closed signals from signals table:', activeError);
+  }
+
+  // Track unique instances by primary key / signal_id / (ticker + scan_date)
+  const seenInstances = new Set<string>();
+  const closedIdeas: Recommendation[] = [];
+
+  for (const h of (closedHistory || [])) {
+    const instanceKey = h.id ? `hist_${h.id}` : h.signal_id ? `sig_${h.signal_id}` : `${h.ticker}_${h.scan_date}`;
+    seenInstances.add(instanceKey);
+
+    const outcome = h.outcome || 'closed';
+    let reason = h.sell_signal_reason || 'Closed';
+    if (outcome === 'stopped') reason = 'Stop Loss';
+    else if (outcome === 'hit_t1') reason = 'Target 1 reached';
+    else if (outcome === 'hit_t2') reason = 'Target 2 reached';
+    else if (outcome === 'hit_t3') reason = 'Target 3 reached';
+    else if (outcome === 'invalidated') reason = h.sell_signal_reason || 'Idea invalidated';
+    else if (outcome === 'manually_removed') {
+      const parts = [h.removal_reason || 'Manually removed'];
+      if (h.removal_note) parts.push(h.removal_note);
+      reason = parts.join(': ');
+    }
+
+    closedIdeas.push({
+      ...h,
+      status: outcome,
+      outcome: outcome,
+      sell_signal: true,
+      sell_signal_reason: reason,
+      exit_date: h.outcome_date || h.exit_date,
+      sell_price: h.exit_price || h.price,
+    });
+  }
+
+  for (const s of (activeClosed || [])) {
+    const instanceKey = s.id ? `sig_${s.id}` : `${s.ticker}_${s.scan_date}`;
+    if (seenInstances.has(instanceKey)) continue;
+    seenInstances.add(instanceKey);
+
+    const outcome = s.status || 'closed';
+    let reason = s.sell_signal_reason || 'Closed';
+    if (outcome === 'stopped') reason = 'Stop Loss';
+    else if (outcome === 'invalidated') reason = s.sell_signal_reason || 'Idea invalidated';
+    else if (outcome === 'manually_removed') {
+      const parts = [s.removal_reason || 'Manually removed'];
+      if (s.removal_note) parts.push(s.removal_note);
+      reason = parts.join(': ');
+    }
+
+    closedIdeas.push({
+      ...s,
+      status: outcome,
+      outcome: outcome,
+      sell_signal: true,
+      sell_signal_reason: reason,
+      exit_date: s.exit_date || s.scan_date,
+      sell_price: s.exit_price || s.price,
+    });
+  }
+
+  return closedIdeas;
+}
+
+/**
+ * Chronological Scan History Fetcher
+ * Aggregates scan_log entries with qualified recommendations and filtered/rejected setups.
+ */
+export async function fetchScanHistory(limit = 14): Promise<ScanHistoryEntry[]> {
+  const supabase = getSupabase();
+  try {
+    const { data: logs, error: logsError } = await supabase
+      .from('scan_log')
+      .select('*')
+      .order('scan_date', { ascending: false })
+      .limit(limit);
+
+    if (logsError || !logs || logs.length === 0) {
+      return [];
+    }
+
+    const scanDates = logs.map((l: any) => l.scan_date);
+
+    // Fetch signals and history across these scan dates
+    const [signalsRes, historyRes] = await Promise.all([
+      supabase
+        .from('signals')
+        .select('scan_date, ticker, company_name, strategy, strategy_name, status, rejection_reason, sell_signal_reason, composite_score')
+        .in('scan_date', scanDates),
+      supabase
+        .from('signals_history')
+        .select('scan_date, ticker, company_name, strategy, strategy_name, outcome, rejection_reason, sell_signal_reason, composite_score')
+        .in('scan_date', scanDates),
+    ]);
+
+    const signalsData = signalsRes.data || [];
+    const historyData = historyRes.data || [];
+
+    return logs.map((log: any) => {
+      const sDate = log.scan_date;
+      const dateSignals = signalsData.filter((s: any) => s.scan_date === sDate);
+      const dateHistory = historyData.filter((h: any) => h.scan_date === sDate);
+
+      const qualifiedMap = new Map<string, { ticker: string; strategy: string; company_name?: string | null }>();
+      const filteredMap = new Map<string, { ticker: string; strategy?: string | null; reason: string }>();
+
+      for (const s of dateSignals) {
+        const ticker = s.ticker?.toUpperCase();
+        if (!ticker) continue;
+        if (s.status === 'open' || s.status === 'pending') {
+          qualifiedMap.set(ticker, {
+            ticker,
+            strategy: s.strategy_name || s.strategy || 'Momentum',
+            company_name: s.company_name,
+          });
+        } else if (s.status === 'rejected') {
+          filteredMap.set(ticker, {
+            ticker,
+            strategy: s.strategy_name || s.strategy,
+            reason: getRejectionReason(s as any),
+          });
+        }
+      }
+
+      for (const h of dateHistory) {
+        const ticker = h.ticker?.toUpperCase();
+        if (!ticker) continue;
+        if (h.outcome === 'rejected') {
+          if (!filteredMap.has(ticker)) {
+            filteredMap.set(ticker, {
+              ticker,
+              strategy: h.strategy_name || h.strategy,
+              reason: h.rejection_reason || h.sell_signal_reason || 'Filter rejected',
+            });
+          }
+        } else if (!qualifiedMap.has(ticker)) {
+          qualifiedMap.set(ticker, {
+            ticker,
+            strategy: h.strategy_name || h.strategy || 'Momentum',
+            company_name: h.company_name,
+          });
+        }
+      }
+
+      const qList = Array.from(qualifiedMap.values());
+      const fList = Array.from(filteredMap.values());
+
+      return {
+        scan_date: sDate,
+        tickers_scanned: Number(log.tickers_scanned || 0),
+        signals_generated: Number(log.signals_generated || 0),
+        signals_qualified: qList.length > 0 ? qList.length : Number(log.signals_qualified || 0),
+        regime: (log.regime || 'bull').toUpperCase(),
+        status: log.status || 'success',
+        newIdeas: qList,
+        filteredSetups: fList,
+      };
+    });
+  } catch (err) {
+    console.error('Error in fetchScanHistory:', err);
+    return [];
   }
 }
 

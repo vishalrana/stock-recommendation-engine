@@ -7,6 +7,7 @@ import { getStrategyExplanation } from '../lib/strategy-explanations';
 
 interface StockCardProps {
   recommendation: Recommendation;
+  livePrice?: number | null;
   isExpanded: boolean;
   onToggleExpand: () => void;
   onRemove: (rec: Recommendation) => void;
@@ -27,13 +28,21 @@ function getDaysActive(dateStr?: string | null): string {
 
 export default function StockCard({
   recommendation,
+  livePrice,
   isExpanded,
   onToggleExpand,
   onRemove,
 }: StockCardProps) {
   const ticker = recommendation.ticker?.toUpperCase() || 'UNKNOWN';
   const company = recommendation.company_name || '';
-  const price = recommendation.price ? Number(recommendation.price).toFixed(2) : '—';
+
+  // Prefer live quote data when available, falling back to stored recommendation.price
+  const displayedPriceVal = (livePrice !== undefined && livePrice !== null)
+    ? livePrice
+    : recommendation.price;
+  const price = (displayedPriceVal !== undefined && displayedPriceVal !== null && !isNaN(Number(displayedPriceVal)))
+    ? Number(displayedPriceVal).toFixed(2)
+    : '—';
   
   const t1 = recommendation.target_1 ? Number(recommendation.target_1).toFixed(2) : null;
   const t2 = recommendation.target_2 ? Number(recommendation.target_2).toFixed(2) : null;

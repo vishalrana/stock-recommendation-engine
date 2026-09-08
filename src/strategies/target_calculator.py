@@ -239,36 +239,9 @@ def calculate_targets(
     t1_min = cfg["t1_min"]
     t2_min = cfg["t2_min"]
 
-    # Layer 2 & 3 — Decision Tree & Honest Weighted R:R
-    # Gate 1: Check Target 1 survival
-    if rp_t1 < t1_min:
-        # REJECT signal entirely (do not emit)
-        rej_msg = (
-            "Insufficient historical data for reach probability"
-            if rp_t1 == 0.0 and raw_t1 == 0.0
-            else f"ReachProb(T1) {rp_t1:.1%} < StrategyMin.T1 ({t1_min:.1%})"
-        )
-        return TargetCalculationResult(
-            target_1=None,
-            target_2=None,
-            target_3=None,
-            target_1_atr=t1_atr,
-            target_2_atr=t2_atr,
-            target_3_atr=t3_atr,
-            target_1_pct=None,
-            target_2_pct=None,
-            target_3_pct=None,
-            reach_prob_t1=round(rp_t1, 4),
-            reach_prob_t2=round(rp_t2, 4),
-            reach_prob_t3=round(rp_t3, 4),
-            scale_out_weights="0/0/0",
-            weighted_rr_honest=0.0,
-            is_valid=False,
-            rejection_reason=rej_msg,
-            reach_prob_raw=round(raw_t1, 4),
-            reach_prob_adjusted=round(rp_t1, 4),
-        )
-
+    # Layer 2 & 3 — Indicative Target Selection & Analytical Weighted R:R
+    # Targets and Stop Loss are indicative suggestions (NOT execution levels or qualification gates).
+    # Reach probabilities and R:R are analytical outputs and do NOT reject the stock.
     t2_survives = (rp_t2 >= t2_min)
     t3_survives = (rp_t3 >= T3_REACH_PROB_SURVIVAL_THRESHOLD)
 

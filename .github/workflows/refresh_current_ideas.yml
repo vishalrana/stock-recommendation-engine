@@ -1,0 +1,91 @@
+name: Refresh Current Ideas
+
+'on':
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: 'Comma-separated current idea tickers to evaluate'
+        required: true
+        type: string
+
+jobs:
+  refresh-ideas:
+    name: Evaluate Current Ideas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Log Start Time
+        run: |
+          echo "=========================================="
+          echo "  REFRESH CURRENT IDEAS — STARTED"
+          echo "=========================================="
+          echo "Trigger:    ${{ github.event_name }}"
+          echo "Tickers:    ${{ github.event.inputs.tickers }}"
+          echo "UTC Time:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Runner:     $(uname -a)"
+          echo "=========================================="
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache Data Files
+        uses: actions/cache@v4
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-data-cache-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-data-cache-
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r jobs/requirements.txt
+          echo "✅ Dependencies installed."
+
+      - name: Run Targeted Signal Evaluation
+        id: evaluate
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_ACTIONS: 'true'
+          CACHE_MODE: incremental
+          PYTHONPATH: .
+        run: |
+          echo "Starting targeted evaluation for current ideas: ${{ github.event.inputs.tickers }}"
+          START_EPOCH=$(date +%s)
+
+          python jobs/generate_signals.py --tickers "${{ github.event.inputs.tickers }}"
+          EXIT_CODE=$?
+
+          END_EPOCH=$(date +%s)
+          DURATION=$((END_EPOCH - START_EPOCH))
+
+          echo "duration=${DURATION}" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Targeted evaluation FAILED (exit code: $EXIT_CODE)"
+            exit $EXIT_CODE
+          fi
+
+          echo "✅ Targeted evaluation completed in ${DURATION}s"
+
+      - name: Log Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "  REFRESH CURRENT IDEAS — FINISHED"
+          echo "=========================================="
+          echo "UTC Time:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Duration:   ${{ steps.evaluate.outputs.duration || 'N/A' }}s"
+          echo "Exit Code:  ${{ steps.evaluate.outputs.exit_code || 'N/A' }}"
+          echo "Status:     ${{ job.status }}"
+          echo "=========================================="

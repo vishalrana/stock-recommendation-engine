@@ -281,7 +281,7 @@ def refresh_active_signals_prices(supabase):
         logger.warning("Could not refresh active signals prices: %s", e)
 
 
-def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_successful: bool = True, scanned_count: int = 0, min_required_scanned: int = 50, disqualification_reasons: dict = None):
+def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_successful: bool = True, scanned_count: int = 0, min_required_scanned: int = 50, disqualification_reasons: dict = None, target_tickers: set = None, updated_analytics: dict = None):
     """
     Reconcile active recommendations against latest market prices and scan qualification.
     Pure recommendation engine lifecycle:
@@ -291,7 +291,7 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_su
     4. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
     5. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
        status/outcome -> 'invalidated' with specific disqualification reason.
-    6. Still Active: If still qualified and stop not hit, status remains 'open', price updated.
+    6. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
     
     Crucial:
     - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
@@ -301,8 +301,9 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_su
         logger.warning("[LIFECYCLE SAFEGUARD] Scan did not complete successfully. Skipping automatic invalidation to protect active recommendations.")
         return
 
-    if scanned_count < min_required_scanned:
-        logger.warning(f"[LIFECYCLE SAFEGUARD] Incomplete scan detected ({scanned_count} < {min_required_scanned} tickers scanned). Skipping automatic invalidation.")
+    eff_min_scanned = len(target_tickers) if target_tickers is not None else min_required_scanned
+    if scanned_count < eff_min_scanned:
+        logger.warning(f"[LIFECYCLE SAFEGUARD] Incomplete scan detected ({scanned_count} < {eff_min_scanned} tickers scanned). Skipping automatic invalidation.")
         return
 
     try:
@@ -318,6 +319,9 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_su
         logger.info("Reconciling recommendation lifecycle for %d active recommendations...", len(active_signals))
         for existing in active_signals:
             ticker = existing["ticker"].upper()
+            if target_tickers is not None and ticker not in target_tickers:
+                continue
+
             signal_id = existing.get("id")
             scan_date = existing.get("scan_date")
 
@@ -357,9 +361,27 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_su
                 update_history_outcome(ticker, "invalidated", close_price, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason=dq_reason)
                 continue
                 
-            # 4. Still Active — update price
-            update_signals_price(ticker, close_price)
-            logger.info(f"[LIFECYCLE ACTIVE] {ticker}: still qualified, price refreshed to ${close_price:.2f}")
+            # 4. Still Active — update price and refreshed analytical data
+            update_signals_price(ticker, close_price, signal_id=signal_id)
+            if updated_analytics and ticker in updated_analytics:
+                ana = updated_analytics[ticker]
+                update_fields = {"price": close_price}
+                for k in [
+                    "composite_score", "target_1", "target_2", "target_3", "stop_loss",
+                    "position_sizing", "tier_label", "reach_prob_t1", "reach_prob_t2",
+                    "reach_prob_t3", "reach_prob_raw", "reach_prob_adjusted",
+                    "weighted_rr", "weighted_rr_honest"
+                ]:
+                    if ana.get(k) is not None:
+                        update_fields[k] = ana[k]
+                try:
+                    if signal_id:
+                        supabase.table("signals").update(update_fields).eq("id", signal_id).execute()
+                    else:
+                        supabase.table("signals").update(update_fields).eq("ticker", ticker).in_("status", ["open", "pending"]).execute()
+                except Exception as ana_err:
+                    logger.warning(f"Could not update refreshed analytical data in signals for {ticker}: {ana_err}")
+            logger.info(f"[LIFECYCLE ACTIVE] {ticker}: still qualified, price and current analytics refreshed in signals.")
     except Exception as e:
         logger.warning("Could not reconcile recommendation lifecycle: %s", e)
 
@@ -395,37 +417,32 @@ def apply_vix_override(regime, strategies, size_mult):
     return regime, strategies, size_mult
 
 
-def main():
+def run_scan(
+    dry_run: bool = False,
+    cache_mode: Optional[str] = None,
+    force_refresh: bool = False,
+    target_tickers: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> dict:
     start_time = time.time()
 
-    parser = argparse.ArgumentParser(description="Generate Nightly Stock Signals")
-    parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
-    parser.add_argument(
-        "--force-refresh",
-        "--force",
-        dest="force_refresh",
-        action="store_true",
-        help="Delete all cached parquet files and re-download fresh data from yfinance for the full universe",
-    )
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    parser.add_argument(
-        "--cache-mode",
-        choices=["local", "incremental", "force"],
-        default=None,
-        help="Override automatic cache mode detection (local=no downloads, incremental=missing days only, force=full re-download)",
-    )
-    args = parser.parse_args()
-    
+    is_targeted = target_tickers is not None and len(target_tickers) > 0
+
     # If dry-run is requested, set SKIP_NLP=true to bypass model loading entirely
-    if args.dry_run:
+    if dry_run:
         os.environ["SKIP_NLP"] = "true"
 
-    cache_mode = get_cache_mode(args)
+    if cache_mode is None:
+        cache_mode = "local" if is_targeted else "incremental"
+    elif force_refresh:
+        cache_mode = "force"
 
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
-    if args.dry_run:
+    if dry_run:
         logger.info("DRY RUN ACTIVE — database writes will be skipped")
+    if is_targeted:
+        logger.info(f"TARGETED REFRESH ACTIVE — evaluating current ideas: {target_tickers}")
     logger.info("Cache mode: %s", cache_mode.upper())
     logger.info("=" * 60)
 
@@ -464,7 +481,23 @@ def main():
     logger.info("Regime detected: %s", regime_str)
     logger.info("Active strategies: %s", ", ".join(allowed_strategies))
 
-    tickers, company_names, industries = load_universe()
+    all_u_tickers, all_u_names, all_u_industries = load_universe()
+    if is_targeted:
+        clean_targets = []
+        for item in target_tickers:
+            if item:
+                for sub in str(item).replace(",", " ").split():
+                    s_clean = sub.strip().upper()
+                    if s_clean and s_clean not in clean_targets:
+                        clean_targets.append(s_clean)
+        tickers = [t for t in clean_targets if t not in BLACKLIST]
+        company_names = {t: all_u_names.get(t, t) for t in tickers}
+        industries = {t: all_u_industries.get(t, "Unknown") for t in tickers}
+        logger.info(f"[TARGETED UNIVERSE] Restricted scan to {len(tickers)} current ideas: {', '.join(tickers)}")
+    else:
+        tickers = all_u_tickers
+        company_names = all_u_names
+        industries = all_u_industries
 
     # ── Cache Mode Detection ──────────────────────────────────────────
     cache_manager = get_cache_manager()
@@ -935,19 +968,13 @@ def main():
                 sector=sig.get("sector") or sig.get("industry"),
             )
 
+            # Targets & Stop Loss are indicative suggestions (NOT execution levels or rejection gates)
             if not calc_res.is_valid:
-                logger.info(f"[REACH PROB FILTER] Dropping {ticker} ({strategy_name}): {calc_res.rejection_reason}")
-                reach_rejected_count += 1
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = calc_res.rejection_reason
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "N/A - Invalid Setup"
-                sig["reach_prob_raw"] = calc_res.reach_prob_raw
-                sig["reach_prob_adjusted"] = calc_res.reach_prob_adjusted
-                rejected_signals_to_insert.append(sig)
-                continue
+                logger.warning(f"[INDICATIVE TARGETS] Fallback targets applied for {ticker} ({strategy_name}): {calc_res.rejection_reason}")
+                calc_res.target_1 = round(entry_price * 1.05, 2)
+                calc_res.target_1_pct = 5.0
+                calc_res.scale_out_weights = "100/0/0"
+                calc_res.weighted_rr_honest = round((calc_res.target_1 - entry_price) / max(0.01, entry_price - stop_loss), 2)
 
             sig["target_1"] = calc_res.target_1
             sig["target_2"] = calc_res.target_2
@@ -1123,7 +1150,36 @@ def main():
         if t:
             disqualification_reasons[t] = r_sig.get("rejection_reason") or "Filter rejected"
 
-    if args.dry_run:
+    if is_targeted:
+        logger.info(f"[TARGETED REFRESH] Finished evaluating {len(tickers)} current ideas. Qualified: {sorted(list(qualified_tickers))}")
+        if dry_run:
+            logger.info("[DRY RUN] Targeted refresh: would reconcile active recommendations against qualified tickers.")
+        else:
+            updated_analytics = {sig["ticker"].upper(): sig for sig in (qualified_recommendations if 'qualified_recommendations' in locals() else [])}
+            try:
+                reconcile_recommendation_lifecycle(
+                    supabase=supabase,
+                    qualified_tickers=qualified_tickers,
+                    scan_successful=True,
+                    scanned_count=scanned_count,
+                    min_required_scanned=len(tickers),
+                    disqualification_reasons=disqualification_reasons,
+                    target_tickers=set(tickers),
+                    updated_analytics=updated_analytics,
+                )
+                logger.info("[TARGETED REFRESH] Reconciled active recommendations for targeted tickers.")
+            except Exception as e:
+                logger.error("Failed to reconcile targeted lifecycle: %s", e)
+                error_msg = f"Lifecycle reconciliation failed: {e}"
+
+        return {
+            "status": "completed",
+            "scanned_count": scanned_count,
+            "qualified_tickers": list(qualified_tickers),
+            "disqualification_reasons": disqualification_reasons,
+        }
+
+    if dry_run:
         logger.info(f"[DRY RUN] Qualified tickers tonight ({len(qualified_tickers)}): {sorted(list(qualified_tickers))}")
         logger.info("[DRY RUN] Would reconcile active recommendations against qualified tickers and market quotes.")
         logger.info("[DRY RUN] Skipped lifecycle reconciliation, archiving, clearing, and inserting signals.")
@@ -1297,7 +1353,7 @@ def main():
         "skipped_strategies": skipped_strategies,
     }
 
-    if not args.dry_run:
+    if not dry_run:
         try:
             logger.info("Logging scan to scan_log: %s", scan_log_row)
             supabase.table("scan_log").upsert(scan_log_row, on_conflict="scan_date").execute()
@@ -1343,6 +1399,40 @@ def main():
         duration,
     )
     logger.info("=" * 60)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate Nightly Stock Signals")
+    parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
+    parser.add_argument(
+        "--force-refresh",
+        "--force",
+        dest="force_refresh",
+        action="store_true",
+        help="Delete all cached parquet files and re-download fresh data from yfinance for the full universe",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument(
+        "--cache-mode",
+        choices=["local", "incremental", "force"],
+        default=None,
+        help="Override automatic cache mode detection (local=no downloads, incremental=missing days only, force=full re-download)",
+    )
+    parser.add_argument(
+        "--tickers",
+        nargs="+",
+        default=None,
+        help="Targeted evaluation for specified tickers only (e.g. for Refresh Current Ideas)",
+    )
+    args = parser.parse_args()
+
+    run_scan(
+        dry_run=args.dry_run,
+        cache_mode=args.cache_mode,
+        force_refresh=args.force_refresh,
+        target_tickers=args.tickers,
+        verbose=args.verbose,
+    )
 
 
 if __name__ == "__main__":

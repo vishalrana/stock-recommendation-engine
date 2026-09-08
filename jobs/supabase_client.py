@@ -104,12 +104,16 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
             raise e
 
 
-def update_signals_price(ticker, current_price):
+def update_signals_price(ticker, current_price, signal_id=None):
     if not supabase:
         return
-    supabase.table('signals').update({
+    q = supabase.table('signals').update({
         'price': current_price
-    }).eq('ticker', ticker).eq('status', 'open').execute()
+    })
+    if signal_id:
+        q.eq('id', signal_id).execute()
+    else:
+        q.eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
 
 
 def update_portfolio_realized_pnl(pnl_dollars):

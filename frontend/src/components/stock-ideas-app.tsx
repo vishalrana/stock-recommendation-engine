@@ -6,8 +6,14 @@ import StockCard from './stock-card';
 import ClosedIdeasView from './closed-ideas-view';
 import ScanHistoryView from './scan-history-view';
 import RemoveIdeaModal from './remove-idea-modal';
-import { removeRecommendationAction } from '../app/actions';
-import { Lightbulb, Archive, History, Sparkles, RefreshCw, ShieldCheck } from 'lucide-react';
+import {
+  removeRecommendationAction,
+  fetchLiveQuotesAction,
+  triggerRefreshCurrentIdeasAction,
+  checkRefreshCurrentIdeasStatusAction,
+  completeRefreshCurrentIdeasAction,
+} from '../app/actions';
+import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 interface StockIdeasAppProps {
@@ -57,7 +63,17 @@ export default function StockIdeasApp({
   // Manual Removal Modal State
   const [removingIdea, setRemovingIdea] = useState<Recommendation | null>(null);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Live quote data held strictly in frontend runtime state (ticker -> quote)
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [isRefreshingPrices, setIsRefreshingPrices] = useState(false);
+  const [priceStatus, setPriceStatus] = useState<'idle' | 'updating' | 'updated' | 'error'>('idle');
+  const [priceStatusText, setPriceStatusText] = useState<string | null>(null);
+
+  // Refresh Current Ideas state (targeted recommendation engine run)
+  const [isRefreshingIdeas, setIsRefreshingIdeas] = useState(false);
+  const [ideasStatus, setIdeasStatus] = useState<'idle' | 'updating' | 'updated' | 'error'>('idle');
+  const [ideasStatusText, setIdeasStatusText] = useState<string | null>(null);
 
   const toggleExpand = (id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
@@ -111,10 +127,121 @@ export default function StockIdeasApp({
     }
   };
 
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    router.refresh();
-    setTimeout(() => setIsRefreshing(false), 800);
+  // Manual quote refresh handler: fetches live quotes for active ideas only
+  const handleRefreshPrices = async () => {
+    if (isRefreshingPrices) return;
+
+    const tickers = Array.from(
+      new Set(activeIdeas.map((idea) => idea.ticker?.trim().toUpperCase()).filter(Boolean) as string[])
+    );
+
+    if (tickers.length === 0) {
+      setPriceStatusText('No active ideas to refresh');
+      return;
+    }
+
+    setIsRefreshingPrices(true);
+    setPriceStatus('updating');
+    setPriceStatusText('Updating prices...');
+
+    try {
+      const results = await fetchLiveQuotesAction(tickers);
+
+      let updatedCount = 0;
+      setLivePrices((prev) => {
+        const next = { ...prev };
+        for (const [ticker, res] of Object.entries(results)) {
+          if (res && typeof res.price === 'number' && !isNaN(res.price) && res.price > 0) {
+            next[ticker.toUpperCase()] = res.price;
+            updatedCount++;
+          }
+        }
+        return next;
+      });
+
+      if (updatedCount > 0) {
+        setPriceStatus('updated');
+        setPriceStatusText('Prices updated just now');
+      } else {
+        setPriceStatus('error');
+        setPriceStatusText('Quote update failed');
+      }
+    } catch (err) {
+      console.error('Failed to refresh prices:', err);
+      setPriceStatus('error');
+      setPriceStatusText('Unable to update prices');
+    } finally {
+      setIsRefreshingPrices(false);
+    }
+  };
+
+  const handleRefreshIdeas = async () => {
+    if (isRefreshingIdeas || isRefreshingPrices) return;
+
+    const tickers = Array.from(
+      new Set(activeIdeas.map((idea) => idea.ticker?.trim().toUpperCase()).filter(Boolean) as string[])
+    );
+
+    if (tickers.length === 0) {
+      setIdeasStatusText('No active ideas to refresh');
+      return;
+    }
+
+    setIsRefreshingIdeas(true);
+    setIdeasStatus('updating');
+    setIdeasStatusText('Refreshing current ideas...');
+
+    try {
+      // 1. Dispatch targeted GitHub Actions workflow from server action
+      const triggerRes = await triggerRefreshCurrentIdeasAction(tickers);
+      if (!triggerRes.success) {
+        setIdeasStatus('error');
+        setIdeasStatusText(triggerRes.error || 'Unable to refresh current ideas.');
+        setIsRefreshingIdeas(false);
+        return;
+      }
+
+      let runId = triggerRes.runId;
+      const dispatchedAt = triggerRes.dispatchedAt;
+
+      // 2. Poll workflow run status every 3.5s (max 5 minutes = 85 attempts)
+      const maxAttempts = 85;
+      let attempt = 0;
+      let completedSuccessfully = false;
+
+      while (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 3500));
+        attempt++;
+
+        const statusRes = await checkRefreshCurrentIdeasStatusAction(runId, dispatchedAt);
+        if (statusRes.runId && !runId) {
+          runId = statusRes.runId;
+        }
+
+        if (statusRes.status === 'completed') {
+          if (statusRes.conclusion === 'success') {
+            completedSuccessfully = true;
+          }
+          break;
+        }
+      }
+
+      if (completedSuccessfully) {
+        await completeRefreshCurrentIdeasAction();
+        setIdeasStatus('updated');
+        setIdeasStatusText('Current ideas updated just now');
+        router.refresh();
+      } else {
+        setIdeasStatus('error');
+        setIdeasStatusText('Unable to refresh current ideas.');
+      }
+    } catch (err) {
+      console.error('Failed to refresh current ideas:', err);
+      setIdeasStatus('error');
+      setIdeasStatusText('Unable to refresh current ideas.');
+    } finally {
+      setIsRefreshingIdeas(false);
+    }
   };
 
   const lastScanDate = formatScanDateHeader(latestScanLog?.scan_date);
@@ -200,17 +327,54 @@ export default function StockIdeasApp({
             </button>
           </nav>
 
-          {/* Refresh Action */}
+          {/* Actions: Refresh Prices and Refresh Current Ideas */}
           <div className="flex items-center gap-2">
+            {(priceStatusText || ideasStatusText) && (
+              <span
+                className={`hidden lg:inline text-[11px] font-medium transition-all ${
+                  ideasStatus === 'error' || priceStatus === 'error'
+                    ? 'text-rose-400'
+                    : ideasStatus === 'updating' || priceStatus === 'updating'
+                    ? 'text-blue-400'
+                    : 'text-slate-400'
+                }`}
+              >
+                {ideasStatus === 'updating'
+                  ? 'Refreshing current ideas...'
+                  : priceStatus === 'updating'
+                  ? 'Updating prices...'
+                  : ideasStatusText || priceStatusText}
+              </span>
+            )}
+
+            {/* Refresh Prices Action */}
             <button
               type="button"
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-slate-800/80 transition-colors cursor-pointer"
-              title="Refresh Data"
-              aria-label="Refresh Data"
+              onClick={handleRefreshPrices}
+              disabled={isRefreshingPrices || isRefreshingIdeas}
+              className="flex items-center gap-1.5 py-1.5 px-2.5 sm:px-3 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800/80 transition-all text-xs font-semibold cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+              title="Refresh Prices — updates current market prices only"
+              aria-label="Refresh Prices — updates current market prices only"
             >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingPrices ? 'animate-spin text-blue-400' : 'text-slate-400'}`} />
+              <span className="text-[11px] sm:text-xs">
+                {isRefreshingPrices ? 'Updating prices...' : 'Refresh Prices'}
+              </span>
+            </button>
+
+            {/* Refresh Current Ideas Action */}
+            <button
+              type="button"
+              onClick={handleRefreshIdeas}
+              disabled={isRefreshingPrices || isRefreshingIdeas}
+              className="flex items-center gap-1.5 py-1.5 px-2.5 sm:px-3 rounded-xl bg-blue-950/40 border border-blue-800/60 hover:border-blue-600 text-blue-300 hover:text-white hover:bg-blue-900/60 transition-all text-xs font-semibold cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+              title="Refresh Current Ideas — re-runs recommendation analysis for current ideas only"
+              aria-label="Refresh Current Ideas — re-runs recommendation analysis for current ideas only"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 ${isRefreshingIdeas ? 'animate-spin text-blue-400' : 'text-blue-400'}`} />
+              <span className="text-[11px] sm:text-xs">
+                {isRefreshingIdeas ? 'Refreshing current ideas...' : 'Refresh Current Ideas'}
+              </span>
             </button>
           </div>
         </div>
@@ -238,9 +402,37 @@ export default function StockIdeasApp({
                   Tap an idea to inspect the live technical chart and trade setup.
                 </p>
               </div>
-              <span className="text-xs font-bold text-slate-400 font-mono">
-                {activeIdeas.length} Active
-              </span>
+              <div className="text-right flex flex-col items-end">
+                <span className="text-xs font-bold text-slate-400 font-mono">
+                  {activeIdeas.length} Active
+                </span>
+                {priceStatusText && (
+                  <span
+                    className={`text-[10px] font-medium mt-0.5 ${
+                      priceStatus === 'error'
+                        ? 'text-rose-400'
+                        : priceStatus === 'updating'
+                        ? 'text-blue-400'
+                        : 'text-slate-500'
+                    }`}
+                  >
+                    {priceStatusText}
+                  </span>
+                )}
+                {ideasStatusText && (
+                  <span
+                    className={`text-[10px] font-medium mt-0.5 ${
+                      ideasStatus === 'error'
+                        ? 'text-rose-400'
+                        : ideasStatus === 'updating'
+                        ? 'text-blue-400'
+                        : 'text-emerald-400'
+                    }`}
+                  >
+                    {ideasStatusText}
+                  </span>
+                )}
+              </div>
             </div>
 
             {activeIdeas.length === 0 ? (
@@ -257,10 +449,12 @@ export default function StockIdeasApp({
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {activeIdeas.map((idea) => {
                   const cardId = idea.id || `${idea.ticker}_${idea.scan_date}`;
+                  const tickerKey = idea.ticker?.trim().toUpperCase() || '';
                   return (
                     <StockCard
                       key={cardId}
                       recommendation={idea}
+                      livePrice={livePrices[tickerKey]}
                       isExpanded={expandedId === cardId}
                       onToggleExpand={() => toggleExpand(cardId)}
                       onRemove={(rec) => setRemovingIdea(rec)}

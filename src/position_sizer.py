@@ -43,17 +43,19 @@ def calculate_half_kelly(composite_score: float, honest_rr: float) -> float:
 
 def assign_tier(composite_score: float, honest_rr: float = 2.0) -> str:
     """
-    Assign signal tier based on composite score and honest risk-to-reward ratio:
-    - Strong Buy: composite_score >= 80.0 and honest_rr >= 1.50
-    - Buy: (composite_score >= 65.0 and honest_rr >= 1.20) or (composite_score >= 45.0 and honest_rr >= 3.0)
+    Assign signal tier based on composite score.
+    R:R is preserved as an analytical output and for high-RR rescue,
+    but poor R:R never disqualifies or rejects an otherwise qualifying stock.
+    - Strong Buy: composite_score >= 80.0
+    - Buy: composite_score >= 65.0 or (composite_score >= 45.0 and honest_rr >= 3.0)
     - Rejected: all others
     """
     score = float(composite_score)
     rr = float(honest_rr or 0.0)
 
-    if score >= 80.0 and rr >= 1.50:
+    if score >= 80.0:
         return "Strong Buy"
-    elif (score >= 65.0 and rr >= 1.20) or (score >= 45.0 and rr >= 3.0):
+    elif score >= 65.0 or (score >= 45.0 and rr >= 3.0):
         return "Buy"
     else:
         return "Rejected"

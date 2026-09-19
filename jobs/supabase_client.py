@@ -71,7 +71,6 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
         'sell_price': exit_price,
         'sell_signal': True,
         'sell_signal_reason': sell_signal_reason or (sell_signal if isinstance(sell_signal, str) else None),
-        'sell_signal_date': today,
         'exit_date': today,
         'price': exit_price,
     }

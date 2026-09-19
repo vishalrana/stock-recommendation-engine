@@ -1332,7 +1332,14 @@ def run_scan(
                 
                 # Direct persistence with full schema parity and exact instance identity
                 supabase.table("signals").insert(ranked_signals).execute()
-                supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
+                try:
+                    supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
+                except Exception as hist_err:
+                    if "42P10" in str(hist_err):
+                        logger.warning("PostgREST 42P10 detected (partial index requires predicate). Inserting history records directly.")
+                        supabase.table("signals_history").insert(history_rows).execute()
+                    else:
+                        raise hist_err
                 logger.info("Signals inserted and archived successfully.")
             else:
                 logger.info("No signals to insert.")

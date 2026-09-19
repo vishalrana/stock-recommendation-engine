@@ -175,7 +175,8 @@ CREATE TABLE IF NOT EXISTS signals_history (
     allocated_dollars       NUMERIC(10,2) DEFAULT NULL,
     exact_shares            NUMERIC(10,4) DEFAULT NULL,
     max_shares              INTEGER DEFAULT NULL,
-    created_at              TIMESTAMPTZ DEFAULT now()
+    created_at              TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT signals_history_signal_id_key UNIQUE (signal_id)
 );
 
 -- Unique recommendation instance identity:

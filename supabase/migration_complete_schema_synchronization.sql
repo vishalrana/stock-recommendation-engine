@@ -38,6 +38,16 @@ ALTER TABLE signals_history
     ADD COLUMN IF NOT EXISTS weighted_rr_honest NUMERIC;
 
 -- 3. Ensure instance uniqueness constraints
+-- Unconditional unique constraint matches PostgREST ON CONFLICT (signal_id) without predicate
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'signals_history_signal_id_key'
+    ) THEN
+        ALTER TABLE signals_history ADD CONSTRAINT signals_history_signal_id_key UNIQUE (signal_id);
+    END IF;
+END $$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_history_signal_id_uniq
 ON signals_history(signal_id)
 WHERE signal_id IS NOT NULL;

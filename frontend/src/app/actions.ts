@@ -40,38 +40,17 @@ export async function removeRecommendationAction({
       removed_at: nowIso,
     };
 
-    // Strict safeguard: manual removal requires an unambiguous recommendation instance identifier
-    if (!id && !scanDate) {
+    // Strict safeguard: manual removal requires an exact recommendation instance identifier (id / signal_id)
+    if (!id) {
       return {
         success: false,
-        error: 'Exact recommendation instance identifier (id or scanDate) is required for manual removal. Ticker-only removal is prohibited.',
+        error: 'Exact recommendation instance identifier (id / signal_id) is required for manual removal. Ticker-only and scan_date-only removals are strictly prohibited.',
       };
     }
 
-    let targetScanDate = scanDate;
-
     try {
-      if (id) {
-        if (!targetScanDate) {
-          const { data: sigRow } = await supabase
-            .from('signals')
-            .select('scan_date, ticker')
-            .eq('id', id)
-            .maybeSingle();
-          if (sigRow?.scan_date) {
-            targetScanDate = sigRow.scan_date;
-          }
-        }
-        const { error: sigError } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
-        if (sigError) throw sigError;
-      } else if (targetScanDate) {
-        const { error: sigError } = await supabase
-          .from('signals')
-          .update(updateSignalsData)
-          .eq('ticker', tickerClean)
-          .eq('scan_date', targetScanDate);
-        if (sigError) throw sigError;
-      }
+      const { error: sigError } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
+      if (sigError) throw sigError;
     } catch (err: any) {
       // Graceful fallback if removal_reason/note/removed_at columns are pending DB migration
       if (
@@ -84,13 +63,8 @@ export async function removeRecommendationAction({
         delete updateSignalsData.removal_note;
         delete updateSignalsData.removed_at;
 
-        if (id) {
-          const { error: sigErr2 } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
-          if (sigErr2) throw sigErr2;
-        } else if (targetScanDate) {
-          const { error: sigErr2 } = await supabase.from('signals').update(updateSignalsData).eq('ticker', tickerClean).eq('scan_date', targetScanDate);
-          if (sigErr2) throw sigErr2;
-        }
+        const { error: sigErr2 } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
+        if (sigErr2) throw sigErr2;
       } else {
         throw err;
       }
@@ -106,24 +80,15 @@ export async function removeRecommendationAction({
       removed_at: nowIso,
     };
 
-    const isNumericId = id && /^\d+$/.test(id);
+    const isNumericId = /^\d+$/.test(id);
 
     const executeHistoryUpdate = async (data: any) => {
       // Priority 1: Exact history numeric primary key if provided
       if (isNumericId) {
         return supabase.from('signals_history').update(data).eq('id', Number(id));
       }
-      // Priority 2: Exact (ticker, scan_date) instance key
-      if (targetScanDate) {
-        return supabase.from('signals_history').update(data).eq('ticker', tickerClean).eq('scan_date', targetScanDate);
-      }
-      // Priority 3: Exact signal_id linkage if column exists
-      if (id) {
-        const res = await supabase.from('signals_history').update(data).eq('signal_id', id);
-        if (!res.error) return res;
-      }
-      // Strict safeguard: refuse unsafe ticker-only fallback
-      throw new Error('No exact recommendation instance match found in signals_history. Ticker-only fallback refused.');
+      // Priority 2: Exact signal_id linkage
+      return supabase.from('signals_history').update(data).eq('signal_id', id);
     };
 
     try {
@@ -356,7 +321,8 @@ export async function triggerRefreshCurrentIdeasAction(
       };
     }
 
-    // Authoritative protection: query GitHub Actions for any existing queued or in_progress run
+    // Authoritative protection: query GitHub Actions for any existing queued or in_progress run (FAIL CLOSED)
+    let activeRunsData: any = null;
     try {
       const activeRunsUrl = `https://api.github.com/repos/${repo}/actions/workflows/refresh_current_ideas.yml/runs?event=workflow_dispatch&per_page=5`;
       const activeRes = await fetch(activeRunsUrl, {
@@ -367,24 +333,32 @@ export async function triggerRefreshCurrentIdeasAction(
         },
         cache: 'no-store',
       });
-      if (activeRes.status === 200) {
-        const activeData = await activeRes.json();
-        const runs = (activeData?.workflow_runs || []) as any[];
-        const existingRun = runs.find((r) => {
-          const isMatchingBranch = !r.head_branch || r.head_branch === branch;
-          const isActive = r.status === 'queued' || r.status === 'in_progress';
-          return isMatchingBranch && isActive;
-        });
-        if (existingRun) {
-          return {
-            success: false,
-            runId: existingRun.id,
-            error: `A refresh workflow run (#${existingRun.id}) is already ${existingRun.status}. Please wait for it to complete.`,
-          };
-        }
+      if (activeRes.status !== 200) {
+        return {
+          success: false,
+          error: 'Unable to verify whether a refresh is already running. Please try again.',
+        };
       }
+      activeRunsData = await activeRes.json();
     } catch (checkErr) {
-      console.warn('Could not query active runs before dispatch:', checkErr);
+      return {
+        success: false,
+        error: 'Unable to verify whether a refresh is already running. Please try again.',
+      };
+    }
+
+    const runs = (activeRunsData?.workflow_runs || []) as any[];
+    const existingRun = runs.find((r) => {
+      const isMatchingBranch = !r.head_branch || r.head_branch === branch;
+      const isActive = r.status === 'queued' || r.status === 'in_progress';
+      return isMatchingBranch && isActive;
+    });
+    if (existingRun) {
+      return {
+        success: false,
+        runId: existingRun.id,
+        error: `A refresh workflow run (#${existingRun.id}) is already ${existingRun.status}. Please wait for it to complete.`,
+      };
     }
 
     lastLocalDispatchTimestamp = Date.now();

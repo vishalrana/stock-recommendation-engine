@@ -183,6 +183,10 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
                 pass
 
     if record is None and scan_date is not None and ticker:
+        if status == 'manually_removed':
+            import logging
+            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe scan_date fallback for {ticker}. Exact instance identifier (history_id or signal_id) is required.")
+            return None
         try:
             d_res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('scan_date', scan_date).execute()
             if d_res.data:
@@ -195,7 +199,7 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
     if record is None and ticker:
         if status == 'manually_removed':
             import logging
-            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only fallback for {ticker}. Exact instance identifier (history_id, signal_id, or scan_date) is required.")
+            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only fallback for {ticker}. Exact instance identifier (history_id or signal_id) is required.")
             return None
         try:
             res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('outcome', 'open').execute()
@@ -246,6 +250,8 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
             if rec_id is not None:
                 return supabase.table('signals_history').update(data).eq('id', rec_id).execute()
             elif target_filter_type == 'scan_date':
+                if status == 'manually_removed':
+                    return None
                 return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('scan_date', target_filter_val).execute()
             elif target_filter_type == 'signal_id':
                 return supabase.table('signals_history').update(data).eq('signal_id', target_filter_val).execute()

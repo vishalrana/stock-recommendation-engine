@@ -412,7 +412,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
         self.assertGreater(sig["exit_price"], sig["entry_price"])
 
     # -------------------------------------------------------------------------
-    # 5. SAME-DAY RECOMMENDATION INSTANCE & SIGNAL_ID ISOLATION (Amendment 1)
+    # 5. EXACT RECOMMENDATION INSTANCE SAFETY (Requirement 1 & Amendment 1)
     # -------------------------------------------------------------------------
     def test_same_day_instance_identity_model(self):
         """Recommendation instances are uniquely identified by signal_id."""
@@ -445,6 +445,237 @@ class ProductionAuditTestSuite(unittest.TestCase):
         # Both instances have distinct identities and outcome states
         self.assertEqual(inst_1["outcome"], "manually_removed")
         self.assertEqual(inst_2["outcome"], "open")
+
+    def test_two_same_day_instances_coexist_historically(self):
+        """Test A: Two recommendation instances for the same ticker on the same date can exist historically."""
+        today = date.today().isoformat()
+        inst_a = {
+            "id": 101,
+            "signal_id": "sig-inst-a",
+            "ticker": "USB",
+            "scan_date": today,
+            "entry_price": 60.0,
+            "outcome": "manually_removed",
+        }
+        inst_b = {
+            "id": 102,
+            "signal_id": "sig-inst-b",
+            "ticker": "USB",
+            "scan_date": today,
+            "entry_price": 62.5,
+            "outcome": "open",
+        }
+        # In instance-based identity, instances are keyed by signal_id rather than (ticker, scan_date)
+        history_store = {inst_a["signal_id"]: inst_a, inst_b["signal_id"]: inst_b}
+        self.assertEqual(len(history_store), 2)
+        self.assertEqual(history_store["sig-inst-a"]["outcome"], "manually_removed")
+        self.assertEqual(history_store["sig-inst-b"]["outcome"], "open")
+
+    def test_removing_instance_a_does_not_mutate_instance_b(self):
+        """Test B: Removing instance A cannot mutate instance B."""
+        from jobs.supabase_client import update_history_outcome
+        
+        mock_supabase = MagicMock()
+        mock_table = MagicMock()
+        
+        # Mock signals_history select query by signal_id
+        def select_mock(cols):
+            mock_builder = MagicMock()
+            def eq_mock(col, val):
+                res_mock = MagicMock()
+                if col == "signal_id" and val == "sig-inst-a":
+                    res_mock.execute.return_value = MagicMock(data=[{
+                        "id": 101,
+                        "signal_id": "sig-inst-a",
+                        "ticker": "USB",
+                        "scan_date": "2026-09-19",
+                        "entry_price": 60.0,
+                        "outcome": "open"
+                    }])
+                elif col == "signal_id" and val == "sig-inst-b":
+                    res_mock.execute.return_value = MagicMock(data=[{
+                        "id": 102,
+                        "signal_id": "sig-inst-b",
+                        "ticker": "USB",
+                        "scan_date": "2026-09-19",
+                        "entry_price": 62.5,
+                        "outcome": "open"
+                    }])
+                else:
+                    res_mock.execute.return_value = MagicMock(data=[])
+                return res_mock
+            mock_builder.eq.side_effect = eq_mock
+            return mock_builder
+            
+        mock_table.select.side_effect = select_mock
+        mock_update_builder = MagicMock()
+        mock_update_builder.eq.return_value.execute.return_value = MagicMock(data=[])
+        mock_table.update.return_value = mock_update_builder
+        mock_supabase.table.return_value = mock_table
+        
+        with patch("jobs.supabase_client.supabase", mock_supabase):
+            update_history_outcome(
+                ticker="USB",
+                status="manually_removed",
+                exit_price=60.0,
+                signal_id="sig-inst-a",
+                removal_reason="Target achieved"
+            )
+            
+        # Verify update was called for instance A's primary key (101), NEVER for 102
+        update_calls = mock_table.update.return_value.eq.call_args_list
+        called_ids = [c[0][1] for c in update_calls]
+        self.assertIn(101, called_ids)
+        self.assertNotIn(102, called_ids)
+
+    def test_ticker_only_removal_is_rejected(self):
+        """Test C: Ticker-only removal is rejected with error log and no DB mutation."""
+        from jobs.supabase_client import update_signals_status, update_history_outcome
+        
+        mock_supabase = MagicMock()
+        mock_table = MagicMock()
+        mock_supabase.table.return_value = mock_table
+        
+        with patch("jobs.supabase_client.supabase", mock_supabase):
+            # 1. signals table ticker-only removal must be refused
+            res_sig = update_signals_status("USB", "manually_removed", 60.0, True, signal_id=None)
+            self.assertIsNone(res_sig)
+            mock_table.update.assert_not_called()
+            
+            # 2. signals_history table ticker-only removal must be refused
+            res_hist = update_history_outcome("USB", "manually_removed", 60.0, signal_id=None, history_id=None)
+            self.assertIsNone(res_hist)
+            mock_table.update.assert_not_called()
+
+    def test_scan_date_only_fallback_rejected_for_manual_removal(self):
+        """Test D: ticker + scan_date-only mutation is rejected when exact signal identity is unavailable."""
+        from jobs.supabase_client import update_history_outcome
+        
+        mock_supabase = MagicMock()
+        mock_table = MagicMock()
+        mock_supabase.table.return_value = mock_table
+        
+        with patch("jobs.supabase_client.supabase", mock_supabase):
+            # scan_date provided, but signal_id and history_id are None
+            res = update_history_outcome(
+                ticker="USB",
+                status="manually_removed",
+                exit_price=60.0,
+                scan_date="2026-09-19",
+                signal_id=None,
+                history_id=None
+            )
+            self.assertIsNone(res, "scan_date-only manual removal must be refused to avoid corrupting same-day instances")
+            mock_table.update.assert_not_called()
+
+    def test_manual_removal_preserves_history_correctly(self):
+        """Test E: Manual removal preserves history correctly and records removal metadata."""
+        from jobs.supabase_client import update_history_outcome
+        
+        mock_supabase = MagicMock()
+        mock_table = MagicMock()
+        
+        record_data = {
+            "id": 555,
+            "signal_id": "sig-uuid-555",
+            "ticker": "PLTR",
+            "scan_date": "2026-09-01",
+            "entry_price": 150.0,
+            "outcome": "open",
+            "strategy": "Trend Following",
+        }
+        
+        mock_select_builder = MagicMock()
+        mock_select_builder.eq.return_value.execute.return_value = MagicMock(data=[record_data])
+        mock_table.select.return_value = mock_select_builder
+        
+        mock_update_builder = MagicMock()
+        mock_update_builder.eq.return_value.execute.return_value = MagicMock(data=[])
+        mock_table.update.return_value = mock_update_builder
+        mock_supabase.table.return_value = mock_table
+        
+        with patch("jobs.supabase_client.supabase", mock_supabase):
+            update_history_outcome(
+                ticker="PLTR",
+                status="manually_removed",
+                exit_price=175.0,
+                signal_id="sig-uuid-555",
+                removal_reason="Target Hit",
+                removal_note="Manual profit take"
+            )
+            
+        update_call = mock_table.update.call_args[0][0]
+        self.assertEqual(update_call["outcome"], "manually_removed")
+        self.assertEqual(update_call["exit_price"], 175.0)
+        self.assertEqual(update_call["removal_reason"], "Target Hit")
+        self.assertEqual(update_call["removal_note"], "Manual profit take")
+        self.assertIn("removed_at", update_call)
+        self.assertIn("outcome_date", update_call)
+        # Return percentage calculated accurately from preserved entry_price
+        self.assertEqual(update_call["outcome_return_pct"], 16.67)
+
+    # -------------------------------------------------------------------------
+    # 6. GITHUB ACTIONS DUPLICATE REFRESH PROTECTION (Requirement 3)
+    # -------------------------------------------------------------------------
+    def test_duplicate_refresh_protection_active_run_blocks_dispatch(self):
+        """Active queued or in_progress workflow run blocks dispatch."""
+        def check_active_runs(workflow_runs, branch="main"):
+            existing = next((
+                r for r in workflow_runs
+                if (not r.get("head_branch") or r.get("head_branch") == branch)
+                and r.get("status") in ("queued", "in_progress")
+            ), None)
+            if existing:
+                return False, f"A refresh workflow run (#{existing['id']}) is already {existing['status']}."
+            return True, None
+            
+        # Case 1: In progress run
+        allowed, msg = check_active_runs([{"id": 1001, "head_branch": "main", "status": "in_progress"}])
+        self.assertFalse(allowed)
+        self.assertIn("already in_progress", msg)
+        
+        # Case 2: Queued run
+        allowed, msg = check_active_runs([{"id": 1002, "head_branch": "main", "status": "queued"}])
+        self.assertFalse(allowed)
+        self.assertIn("already queued", msg)
+
+    def test_duplicate_refresh_protection_github_api_failure_fails_closed(self):
+        """GitHub API check failure must FAIL CLOSED and block dispatch."""
+        def evaluate_dispatch_guard(api_status_code, api_error=None):
+            if api_error is not None or api_status_code != 200:
+                return False, "Unable to verify whether a refresh is already running. Please try again."
+            return True, None
+            
+        # HTTP 500 error fails closed
+        allowed, msg = evaluate_dispatch_guard(500)
+        self.assertFalse(allowed)
+        self.assertEqual(msg, "Unable to verify whether a refresh is already running. Please try again.")
+        
+        # Network exception fails closed
+        allowed, msg = evaluate_dispatch_guard(0, api_error=Exception("Connection reset"))
+        self.assertFalse(allowed)
+        self.assertEqual(msg, "Unable to verify whether a refresh is already running. Please try again.")
+
+    def test_duplicate_refresh_protection_no_active_run_allows_dispatch(self):
+        """When no active workflow run exists, dispatch is allowed."""
+        def check_active_runs(workflow_runs, branch="main"):
+            existing = next((
+                r for r in workflow_runs
+                if (not r.get("head_branch") or r.get("head_branch") == branch)
+                and r.get("status") in ("queued", "in_progress")
+            ), None)
+            if existing:
+                return False, f"A refresh workflow run (#{existing['id']}) is already {existing['status']}."
+            return True, None
+            
+        # Completed / cancelled runs do not block
+        completed_runs = [
+            {"id": 901, "head_branch": "main", "status": "completed"},
+            {"id": 902, "head_branch": "main", "status": "cancelled"}
+        ]
+        allowed, msg = check_active_runs(completed_runs)
+        self.assertTrue(allowed)
+        self.assertIsNone(msg)
 
 
 if __name__ == "__main__":

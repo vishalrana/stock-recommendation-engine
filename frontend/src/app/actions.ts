@@ -3,6 +3,9 @@
 import { revalidatePath } from 'next/cache';
 import { getSupabase } from '../lib/supabase';
 
+// Module-level debounce timer for server action dispatch optimization
+let lastLocalDispatchTimestamp = 0;
+
 export interface RemoveRecommendationParams {
   ticker: string;
   id?: string;
@@ -82,12 +85,14 @@ export async function removeRecommendationAction({
         delete updateSignalsData.removed_at;
 
         if (id) {
-          await supabase.from('signals').update(updateSignalsData).eq('id', id);
+          const { error: sigErr2 } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
+          if (sigErr2) throw sigErr2;
         } else if (targetScanDate) {
-          await supabase.from('signals').update(updateSignalsData).eq('ticker', tickerClean).eq('scan_date', targetScanDate);
+          const { error: sigErr2 } = await supabase.from('signals').update(updateSignalsData).eq('ticker', tickerClean).eq('scan_date', targetScanDate);
+          if (sigErr2) throw sigErr2;
         }
       } else {
-        console.error('Error updating signals on manual removal:', err);
+        throw err;
       }
     }
 
@@ -136,9 +141,10 @@ export async function removeRecommendationAction({
         delete updateHistoryData.removal_note;
         delete updateHistoryData.removed_at;
 
-        await executeHistoryUpdate(updateHistoryData);
+        const { error: histErr2 } = await executeHistoryUpdate(updateHistoryData);
+        if (histErr2) throw histErr2;
       } else {
-        console.error('Error updating signals_history on manual removal:', err);
+        throw err;
       }
     }
 
@@ -181,18 +187,19 @@ export async function fetchLiveQuotesAction(
 
   await Promise.all(
     uniqueTickers.map(async (symbol) => {
-      // 1. Tiingo IEX quote (primary provider)
+      // 1. Tiingo IEX quote (primary provider — live real-time trades only)
       if (tiingoKey) {
         try {
           const res = await fetch(
             `https://api.tiingo.com/iex/${encodeURIComponent(symbol)}?token=${tiingoKey}`,
-            { cache: 'no-store' }
+            { cache: 'no-store', signal: AbortSignal.timeout(6000) }
           );
           if (res.status === 200) {
             const data = await res.json();
             if (Array.isArray(data) && data.length > 0) {
               const row = data[0];
-              const price = row.last ?? row.tngoLast ?? row.close ?? row.prevClose;
+              // Strictly require live traded quote: last or tngoLast (NEVER prevClose or previous close)
+              const price = row.last ?? row.tngoLast;
               if (price !== undefined && price !== null && Number(price) > 0) {
                 results[symbol] = { price: Math.round(Number(price) * 100) / 100 };
                 return;
@@ -209,7 +216,7 @@ export async function fetchLiveQuotesAction(
         try {
           const res = await fetch(
             `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${finnhubKey}`,
-            { cache: 'no-store' }
+            { cache: 'no-store', signal: AbortSignal.timeout(6000) }
           );
           if (res.status === 200) {
             const data = await res.json();
@@ -223,12 +230,13 @@ export async function fetchLiveQuotesAction(
         }
       }
 
-      // 3. Yahoo Finance v8 chart fallback
+      // 3. Yahoo Finance v8 chart fallback (strictly regularMarketPrice only)
       try {
         const res = await fetch(
           `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`,
           {
             cache: 'no-store',
+            signal: AbortSignal.timeout(6000),
             headers: {
               'User-Agent':
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -239,9 +247,10 @@ export async function fetchLiveQuotesAction(
         if (res.status === 200) {
           const data = await res.json();
           const meta = data?.chart?.result?.[0]?.meta;
-          const price = meta?.regularMarketPrice ?? meta?.chartPreviousClose ?? meta?.previousClose;
-          if (price !== undefined && price !== null && Number(price) > 0) {
-            results[symbol] = { price: Math.round(Number(price) * 100) / 100 };
+          // NEVER accept previousClose or chartPreviousClose as live quotes
+          const rawPrice = meta?.regularMarketPrice;
+          if (typeof rawPrice === 'number' && !isNaN(rawPrice) && rawPrice > 0) {
+            results[symbol] = { price: Math.round(rawPrice * 100) / 100 };
             return;
           }
         }
@@ -337,6 +346,48 @@ export async function triggerRefreshCurrentIdeasAction(
         process.env.GITHUB_REPO_NAME || 'stock-recommendation-engine'
       }`;
     const branch = process.env.GITHUB_BRANCH || 'main';
+
+    // Local 15-second debounce optimization
+    const now = Date.now();
+    if (now - lastLocalDispatchTimestamp < 15000) {
+      return {
+        success: false,
+        error: 'A refresh was dispatched moments ago. Please wait for it to complete.',
+      };
+    }
+
+    // Authoritative protection: query GitHub Actions for any existing queued or in_progress run
+    try {
+      const activeRunsUrl = `https://api.github.com/repos/${repo}/actions/workflows/refresh_current_ideas.yml/runs?event=workflow_dispatch&per_page=5`;
+      const activeRes = await fetch(activeRunsUrl, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        cache: 'no-store',
+      });
+      if (activeRes.status === 200) {
+        const activeData = await activeRes.json();
+        const runs = (activeData?.workflow_runs || []) as any[];
+        const existingRun = runs.find((r) => {
+          const isMatchingBranch = !r.head_branch || r.head_branch === branch;
+          const isActive = r.status === 'queued' || r.status === 'in_progress';
+          return isMatchingBranch && isActive;
+        });
+        if (existingRun) {
+          return {
+            success: false,
+            runId: existingRun.id,
+            error: `A refresh workflow run (#${existingRun.id}) is already ${existingRun.status}. Please wait for it to complete.`,
+          };
+        }
+      }
+    } catch (checkErr) {
+      console.warn('Could not query active runs before dispatch:', checkErr);
+    }
+
+    lastLocalDispatchTimestamp = Date.now();
 
     // Record timestamp threshold before dispatch (allowing 3s margin for runner clock skew)
     const dispatchedAt = Date.now() - 3000;

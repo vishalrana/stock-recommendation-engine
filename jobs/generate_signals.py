@@ -17,6 +17,8 @@ Usage:
     python -m jobs.generate_signals [--dry-run]
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import glob
@@ -25,6 +27,7 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 from io import StringIO
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import requests
@@ -281,17 +284,28 @@ def refresh_active_signals_prices(supabase):
         logger.warning("Could not refresh active signals prices: %s", e)
 
 
-def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_successful: bool = True, scanned_count: int = 0, min_required_scanned: int = 50, disqualification_reasons: dict = None, target_tickers: set = None, updated_analytics: dict = None):
+def reconcile_recommendation_lifecycle(
+    supabase,
+    qualified_tickers: set,
+    scan_successful: bool = True,
+    scanned_count: int = 0,
+    min_required_scanned: int = 50,
+    disqualification_reasons: dict = None,
+    target_tickers: set = None,
+    updated_analytics: dict = None,
+    successfully_evaluated_tickers: Optional[Set[str]] = None,
+):
     """
     Reconcile active recommendations against latest market prices and scan qualification.
     Pure recommendation engine lifecycle:
     1. Scan Failure Safeguard: If scan failed or scanned_count < min_required_scanned, skip invalidation.
     2. Per-Ticker Quote Safeguard: If market quote is unavailable, skip lifecycle transition.
-    3. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
-    4. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
-    5. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
+    3. Incomplete Evaluation Safeguard: Only invalidate if ticker was actually successfully evaluated.
+    4. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
+    5. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
+    6. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
        status/outcome -> 'invalidated' with specific disqualification reason.
-    6. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
+    7. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
     
     Crucial:
     - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
@@ -353,6 +367,11 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_su
                 continue
                 
             # 3. Subsequent Scan Invalidation
+            # Incomplete evaluation safeguard: do NOT invalidate if ticker was not successfully evaluated in this scan
+            if successfully_evaluated_tickers is not None and ticker not in successfully_evaluated_tickers:
+                logger.warning(f"[LIFECYCLE INCOMPLETE SAFEGUARD] {ticker}: not successfully evaluated in this scan. Skipping invalidation.")
+                continue
+
             if ticker not in qualified_tickers:
                 raw_reason = (disqualification_reasons or {}).get(ticker)
                 dq_reason = f"No longer qualifies in subsequent scan: {raw_reason}" if raw_reason else "No longer qualifies in subsequent scan"
@@ -367,10 +386,16 @@ def reconcile_recommendation_lifecycle(supabase, qualified_tickers: set, scan_su
                 ana = updated_analytics[ticker]
                 update_fields = {"price": close_price}
                 for k in [
-                    "composite_score", "target_1", "target_2", "target_3", "stop_loss",
-                    "position_sizing", "tier_label", "reach_prob_t1", "reach_prob_t2",
-                    "reach_prob_t3", "reach_prob_raw", "reach_prob_adjusted",
-                    "weighted_rr", "weighted_rr_honest"
+                    "composite_score", "score", "quality_score",
+                    "target_1", "target_2", "target_3",
+                    "target_1_pct", "target_2_pct", "target_3_pct",
+                    "target_1_atr", "target_2_atr", "target_3_atr",
+                    "stop_loss", "position_sizing", "tier_label",
+                    "reach_prob_t1", "reach_prob_t2", "reach_prob_t3",
+                    "reach_prob_raw", "reach_prob_adjusted",
+                    "weighted_rr", "weighted_rr_honest",
+                    "current_rsi", "volume_ratio", "adx_value",
+                    "macd_histogram", "ema20", "strategy", "strategy_name"
                 ]:
                     if ana.get(k) is not None:
                         update_fields[k] = ana[k]
@@ -505,8 +530,11 @@ def run_scan(
 
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     etf_tickers = list(SECTOR_ETFS.keys())
-    all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
-    all_download_tickers = [t for t in all_download_tickers if t not in BLACKLIST]
+    if is_targeted:
+        all_download_tickers = [t for t in tickers if t not in BLACKLIST]
+    else:
+        all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
+        all_download_tickers = [t for t in all_download_tickers if t not in BLACKLIST]
 
     # ── Cache Refresh (mode-aware) ────────────────────────────────────
     t_download_start = time.time()
@@ -610,6 +638,7 @@ def run_scan(
     skipped_strategies: dict[str, str] = {}
     scanned_count = 0
     signals_qualified = 0
+    successfully_evaluated_tickers: Set[str] = set()
     gate_rejections = {
         "failed_rsi_gate": 0,
         "failed_adx_gate": 0,
@@ -650,10 +679,17 @@ def run_scan(
 
         # Determine universe based on strategy type
         if strategy.name == 'Sector Rotation':
-            current_universe = load_etf_universe()
+            if is_targeted:
+                from jobs.strategies.sector_rotation import SECTOR_ETFS
+                current_universe = [t for t in tickers if t in SECTOR_ETFS]
+            else:
+                current_universe = load_etf_universe()
         elif strategy.name == 'Cross-Sectional Momentum':
-            screened_info = run_cross_sectional_screen(tickers, cache_manager)
-            current_universe = [x[0] for x in screened_info]
+            if is_targeted:
+                current_universe = tickers
+            else:
+                screened_info = run_cross_sectional_screen(tickers, cache_manager)
+                current_universe = [x[0] for x in screened_info]
         else:
             current_universe = tickers
 
@@ -679,6 +715,7 @@ def run_scan(
 
                 df = calculate_indicators(raw).sort_index()
                 scanned_count += 1
+                successfully_evaluated_tickers.add(ticker)
 
                 metrics = load_metrics(ticker, metrics_map, company_names, industries)
                 signal = strategy.scan(ticker, df, regime_str, metrics)
@@ -734,7 +771,9 @@ def run_scan(
 
     ranked_signals: list[dict] = []
     error_msg = None
-    rejected_signals_to_insert = []
+    rejected_signals_to_insert: list[dict] = []
+    qualified_recommendations: list[dict] = []
+    active_qualified_recommendations: Dict[str, dict] = {}
     qualified_tickers: set = set()
 
     if all_signals:
@@ -897,6 +936,7 @@ def run_scan(
         reach_rejected_count = 0
         rejected_signals_to_insert = []
         qualified_recommendations = []
+        active_qualified_recommendations: Dict[str, dict] = {}
         qualified_tickers = set()
 
         for sig in final_signals:
@@ -1012,6 +1052,7 @@ def run_scan(
             qualified_tickers.add(ticker.upper())
 
             if ticker.upper() in open_tickers:
+                active_qualified_recommendations[ticker.upper()] = sig
                 logger.info(f"Ticker {ticker} is already an active recommendation and continues to qualify.")
                 continue
 
@@ -1155,17 +1196,20 @@ def run_scan(
         if dry_run:
             logger.info("[DRY RUN] Targeted refresh: would reconcile active recommendations against qualified tickers.")
         else:
-            updated_analytics = {sig["ticker"].upper(): sig for sig in (qualified_recommendations if 'qualified_recommendations' in locals() else [])}
+            updated_analytics = dict(active_qualified_recommendations)
+            for sig in (qualified_recommendations if 'qualified_recommendations' in locals() else []):
+                updated_analytics[sig["ticker"].upper()] = sig
             try:
                 reconcile_recommendation_lifecycle(
                     supabase=supabase,
                     qualified_tickers=qualified_tickers,
                     scan_successful=True,
-                    scanned_count=scanned_count,
+                    scanned_count=len(successfully_evaluated_tickers),
                     min_required_scanned=len(tickers),
                     disqualification_reasons=disqualification_reasons,
                     target_tickers=set(tickers),
                     updated_analytics=updated_analytics,
+                    successfully_evaluated_tickers=successfully_evaluated_tickers,
                 )
                 logger.info("[TARGETED REFRESH] Reconciled active recommendations for targeted tickers.")
             except Exception as e:
@@ -1174,7 +1218,7 @@ def run_scan(
 
         return {
             "status": "completed",
-            "scanned_count": scanned_count,
+            "scanned_count": len(successfully_evaluated_tickers),
             "qualified_tickers": list(qualified_tickers),
             "disqualification_reasons": disqualification_reasons,
         }
@@ -1185,14 +1229,19 @@ def run_scan(
         logger.info("[DRY RUN] Skipped lifecycle reconciliation, archiving, clearing, and inserting signals.")
     else:
         min_req = min(50, len(tickers) // 4) if len(tickers) >= 50 else 1
+        updated_analytics = dict(active_qualified_recommendations)
+        for sig in (qualified_recommendations if 'qualified_recommendations' in locals() else []):
+            updated_analytics[sig["ticker"].upper()] = sig
         try:
             reconcile_recommendation_lifecycle(
                 supabase=supabase,
                 qualified_tickers=qualified_tickers,
                 scan_successful=True,
-                scanned_count=scanned_count,
+                scanned_count=len(successfully_evaluated_tickers),
                 min_required_scanned=min_req,
                 disqualification_reasons=disqualification_reasons,
+                updated_analytics=updated_analytics,
+                successfully_evaluated_tickers=successfully_evaluated_tickers,
             )
             logger.info("Clearing previous rejected audit entries from Supabase...")
             supabase.table("signals").delete().eq("status", "rejected").execute()
@@ -1300,14 +1349,18 @@ def run_scan(
                         raise sig_err
 
                 try:
-                    supabase.table("signals_history").upsert(history_rows, on_conflict="scan_date,ticker").execute()
-                except Exception as hist_err:
-                    if any(col in str(hist_err) for col in new_cols) or "42703" in str(hist_err) or "PGRST204" in str(hist_err):
-                        logger.warning("Pending DB schema migration detected for 'signals_history'. Stripping new columns for upsert.")
-                        stripped_history = [{k: (int(v) if k == "max_shares" and v is not None else v) for k, v in row.items() if k not in new_cols} for row in history_rows]
-                        supabase.table("signals_history").upsert(stripped_history, on_conflict="scan_date,ticker").execute()
-                    else:
-                        raise hist_err
+                    supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
+                except Exception as hist_err_sig:
+                    # If signal_id constraint is not yet present in DB, fall back to scan_date,ticker
+                    try:
+                        supabase.table("signals_history").upsert(history_rows, on_conflict="scan_date,ticker").execute()
+                    except Exception as hist_err:
+                        if any(col in str(hist_err) for col in new_cols) or "42703" in str(hist_err) or "PGRST204" in str(hist_err):
+                            logger.warning("Pending DB schema migration detected for 'signals_history'. Stripping new columns for upsert.")
+                            stripped_history = [{k: (int(v) if k == "max_shares" and v is not None else v) for k, v in row.items() if k not in new_cols} for row in history_rows]
+                            supabase.table("signals_history").upsert(stripped_history, on_conflict="scan_date,ticker").execute()
+                        else:
+                            raise hist_err
 
                 logger.info("Signals inserted and archived successfully.")
             else:
@@ -1427,11 +1480,11 @@ def main():
     args = parser.parse_args()
 
     run_scan(
-        dry_run=args.dry_run,
-        cache_mode=args.cache_mode,
-        force_refresh=args.force_refresh,
-        target_tickers=args.tickers,
-        verbose=args.verbose,
+        dry_run=getattr(args, "dry_run", False),
+        cache_mode=getattr(args, "cache_mode", "auto"),
+        force_refresh=getattr(args, "force_refresh", False),
+        target_tickers=getattr(args, "tickers", None),
+        verbose=getattr(args, "verbose", False),
     )
 
 

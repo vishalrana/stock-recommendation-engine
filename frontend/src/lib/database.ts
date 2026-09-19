@@ -189,24 +189,13 @@ export async function fetchClosedSignals(): Promise<Recommendation[]> {
     console.error('Error fetching closed history from signals_history:', historyError);
   }
 
-  // Also include any active records from `signals` that were just marked closed/stopped/invalidated/manually_removed
-  // before being archived, to ensure immediate consistency
-  const { data: activeClosed, error: activeError } = await supabase
-    .from('signals')
-    .select('*')
-    .in('status', ['stopped', 'hit_t1', 'hit_t2', 'hit_t3', 'invalidated', 'manually_removed'])
-    .order('scan_date', { ascending: false });
-
-  if (activeError) {
-    console.error('Error fetching closed signals from signals table:', activeError);
-  }
-
   // Track unique instances by primary key / signal_id / (ticker + scan_date)
   const seenInstances = new Set<string>();
   const closedIdeas: Recommendation[] = [];
 
   for (const h of (closedHistory || [])) {
     const instanceKey = h.id ? `hist_${h.id}` : h.signal_id ? `sig_${h.signal_id}` : `${h.ticker}_${h.scan_date}`;
+    if (seenInstances.has(instanceKey)) continue;
     seenInstances.add(instanceKey);
 
     const outcome = h.outcome || 'closed';
@@ -230,32 +219,6 @@ export async function fetchClosedSignals(): Promise<Recommendation[]> {
       sell_signal_reason: reason,
       exit_date: h.outcome_date || h.exit_date,
       sell_price: h.exit_price || h.price,
-    });
-  }
-
-  for (const s of (activeClosed || [])) {
-    const instanceKey = s.id ? `sig_${s.id}` : `${s.ticker}_${s.scan_date}`;
-    if (seenInstances.has(instanceKey)) continue;
-    seenInstances.add(instanceKey);
-
-    const outcome = s.status || 'closed';
-    let reason = s.sell_signal_reason || 'Closed';
-    if (outcome === 'stopped') reason = 'Stop Loss';
-    else if (outcome === 'invalidated') reason = s.sell_signal_reason || 'Idea invalidated';
-    else if (outcome === 'manually_removed') {
-      const parts = [s.removal_reason || 'Manually removed'];
-      if (s.removal_note) parts.push(s.removal_note);
-      reason = parts.join(': ');
-    }
-
-    closedIdeas.push({
-      ...s,
-      status: outcome,
-      outcome: outcome,
-      sell_signal: true,
-      sell_signal_reason: reason,
-      exit_date: s.exit_date || s.scan_date,
-      sell_price: s.exit_price || s.price,
     });
   }
 

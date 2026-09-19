@@ -78,16 +78,19 @@ def run_tests():
     tier_2 = assign_tier(70.0, 1.5)
     tier_3 = assign_tier(50.0, 1.0)
     tier_4 = assign_tier(46.9, 3.46)
+    tier_5 = assign_tier(65.0, 0.5)
 
     print(f"  * Score 85.0, R:R 2.0  --> {tier_1}")
     print(f"  * Score 70.0, R:R 1.5  --> {tier_2}")
     print(f"  * Score 50.0, R:R 1.0  --> {tier_3}")
     print(f"  * Score 46.9, R:R 3.46 --> {tier_4}")
+    print(f"  * Score 65.0, R:R 0.5  --> {tier_5}")
 
     assert tier_1 == "Strong Buy", f"Expected Strong Buy, got {tier_1}"
     assert tier_2 == "Buy", f"Expected Buy, got {tier_2}"
     assert tier_3 == "Rejected", f"Expected Rejected, got {tier_3}"
-    assert tier_4 == "Buy", f"Expected Buy, got {tier_4}"
+    assert tier_4 == "Rejected", f"Expected Rejected (pure score gating), got {tier_4}"
+    assert tier_5 == "Buy", f"Expected Buy (pure score >= 65), got {tier_5}"
     print("  --> PASS Scenario B: Tier logic verified.")
 
     # --------------------------------------------------------------------------

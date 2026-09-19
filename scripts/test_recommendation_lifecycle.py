@@ -375,7 +375,7 @@ class TestRecommendationLifecycle(unittest.TestCase):
                 min_required_scanned=50,
             )
 
-            mock_update_price.assert_called_once_with("NVDA", 126.50)
+            mock_update_price.assert_called_once_with("NVDA", 126.50, signal_id="sig-3")
             mock_update_sig.assert_not_called()
 
     def test_production_mode_calls_lifecycle_reconciliation(self):

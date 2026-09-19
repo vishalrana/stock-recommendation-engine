@@ -159,17 +159,20 @@ export default function StockIdeasApp({
         return next;
       });
 
-      if (updatedCount > 0) {
+      if (updatedCount === tickers.length) {
         setPriceStatus('updated');
         setPriceStatusText('Prices updated just now');
+      } else if (updatedCount > 0) {
+        setPriceStatus('updated');
+        setPriceStatusText(`Updated ${updatedCount} of ${tickers.length} prices`);
       } else {
         setPriceStatus('error');
-        setPriceStatusText('Quote update failed');
+        setPriceStatusText("Prices couldn't be updated. Showing last available prices.");
       }
     } catch (err) {
       console.error('Failed to refresh prices:', err);
       setPriceStatus('error');
-      setPriceStatusText('Unable to update prices');
+      setPriceStatusText("Prices couldn't be updated. Showing last available prices.");
     } finally {
       setIsRefreshingPrices(false);
     }

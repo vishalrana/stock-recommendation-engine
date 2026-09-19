@@ -54,6 +54,9 @@ def evaluate_signal(row: dict) -> dict | None:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = df.columns.str.title()
+        df = df.dropna(subset=['High', 'Low', 'Close'])
+        if df.empty or len(df) < 1:
+            return None
     except Exception:
         return None
 
@@ -65,51 +68,53 @@ def evaluate_signal(row: dict) -> dict | None:
         day_close = float(row_data['Close'])
         holding_days = i + 1
 
+        outcome_date_str = dt.date().isoformat() if hasattr(dt, 'date') else str(dt)[:10]
+
         # Check stop first (stop takes priority on same day)
         if day_low <= stop_loss:
             # Approximate exit at stop (could be worse due to gap, use stop as estimate)
             exit_price = stop_loss
-            return_pct = round((exit_price - entry_price) / entry_price * 100, 4)
+            return_pct = float(round((exit_price - entry_price) / entry_price * 100, 4))
             return {
                 'outcome': 'stopped',
                 'outcome_return_pct': return_pct,
-                'outcome_date': dt.date(),
+                'outcome_date': outcome_date_str,
                 'outcome_holding_days': holding_days
             }
 
         # Check targets (highest first — if T3 hit same day as T1, credit T3)
         if target_3 and day_high >= target_3:
-            return_pct = round((target_3 - entry_price) / entry_price * 100, 4)
+            return_pct = float(round((target_3 - entry_price) / entry_price * 100, 4))
             return {
                 'outcome': 'hit_t3',
                 'outcome_return_pct': return_pct,
-                'outcome_date': dt.date(),
+                'outcome_date': outcome_date_str,
                 'outcome_holding_days': holding_days
             }
         if target_2 and day_high >= target_2:
-            return_pct = round((target_2 - entry_price) / entry_price * 100, 4)
+            return_pct = float(round((target_2 - entry_price) / entry_price * 100, 4))
             return {
                 'outcome': 'hit_t2',
                 'outcome_return_pct': return_pct,
-                'outcome_date': dt.date(),
+                'outcome_date': outcome_date_str,
                 'outcome_holding_days': holding_days
             }
         if day_high >= target_1:
-            return_pct = round((target_1 - entry_price) / entry_price * 100, 4)
+            return_pct = float(round((target_1 - entry_price) / entry_price * 100, 4))
             return {
                 'outcome': 'hit_t1',
                 'outcome_return_pct': return_pct,
-                'outcome_date': dt.date(),
+                'outcome_date': outcome_date_str,
                 'outcome_holding_days': holding_days
             }
 
         # Check expiry
         if holding_days >= EXPIRY_TRADING_DAYS:
-            return_pct = round((day_close - entry_price) / entry_price * 100, 4)
+            return_pct = float(round((day_close - entry_price) / entry_price * 100, 4))
             return {
                 'outcome': 'expired',
                 'outcome_return_pct': return_pct,
-                'outcome_date': dt.date(),
+                'outcome_date': outcome_date_str,
                 'outcome_holding_days': holding_days
             }
 
@@ -138,6 +143,10 @@ def run_validation():
     for row in rows:
         result = evaluate_signal(row)
         if result:
+            if hasattr(result.get('outcome_date'), 'isoformat'):
+                result['outcome_date'] = result['outcome_date'].isoformat()
+            elif isinstance(result.get('outcome_date'), date):
+                result['outcome_date'] = str(result['outcome_date'])
             supabase.table('signals_history') \
                 .update(result) \
                 .eq('id', row['id']) \

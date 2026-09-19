@@ -117,13 +117,13 @@ def run_diagnostics():
         active_signals_res = supabase.table("signals").select("*").in_("scan_date", recent_dates).execute()
         active_signals = active_signals_res.data or []
         
-        # Merge them (avoid duplicates by scan_date, ticker)
+        # Merge them (identify by instance id / signal_id)
         all_recent = {}
         for s in hist_signals + active_signals:
-            key = (s["scan_date"], s["ticker"].upper())
+            key = s.get("id") or s.get("signal_id") or (s.get("scan_date"), s.get("ticker", "").upper())
             all_recent[key] = s
             
-        for (date, ticker), s in sorted(all_recent.items(), key=lambda x: (x[0][0], x[0][1]), reverse=True):
+        for key, s in all_recent.items():
             score = s.get("composite_score")
             if score is None:
                 score = s.get("score")

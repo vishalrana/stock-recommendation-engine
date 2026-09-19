@@ -64,7 +64,7 @@ Represents active portfolio holdings and new recommendations awaiting market ope
 * **Context Sub-scores**: `context_analyst` (numeric), `context_earnings` (numeric), `context_news` (numeric), `context_fundamental` (numeric).
 
 ### 3.2. `signals_history` Table
-A permanent, duplicate-safe ledger of all signals. Rows are matched uniquely by `on_conflict(scan_date, ticker)`.
+A permanent, duplicate-safe ledger of all signals. Rows are matched uniquely by `signal_id`.
 * It shares columns with `signals` but maps the final status to `outcome` (e.g. `open`, `stopped`, `hit_t1`, `hit_t2`, `hit_t3`, `cancelled_gap_up`, `cancelled_gap_down`).
 * `outcome_date` (date): The date the trade ended.
 * `outcome_return_pct` (numeric): Percentage gain/loss of the trade.

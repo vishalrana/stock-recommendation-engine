@@ -29,11 +29,10 @@ export async function removeRecommendationAction({
     const sellReason = note && note.trim() ? `${reason}: ${note.trim()}` : reason;
 
     // 1. Update signals table
-    const updateSignalsData: any = {
+    const updateSignalsData = {
       status: 'manually_removed',
       sell_signal: true,
       sell_signal_reason: sellReason,
-      sell_signal_date: today,
       exit_date: today,
       removal_reason: reason,
       removal_note: note?.trim() || null,
@@ -48,30 +47,11 @@ export async function removeRecommendationAction({
       };
     }
 
-    try {
-      const { error: sigError } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
-      if (sigError) throw sigError;
-    } catch (err: any) {
-      // Graceful fallback if removal_reason/note/removed_at columns are pending DB migration
-      if (
-        err.message?.includes('removal_reason') ||
-        err.message?.includes('removal_note') ||
-        err.message?.includes('removed_at') ||
-        err.code === '42703'
-      ) {
-        delete updateSignalsData.removal_reason;
-        delete updateSignalsData.removal_note;
-        delete updateSignalsData.removed_at;
-
-        const { error: sigErr2 } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
-        if (sigErr2) throw sigErr2;
-      } else {
-        throw err;
-      }
-    }
+    const { error: sigError } = await supabase.from('signals').update(updateSignalsData).eq('id', id);
+    if (sigError) throw sigError;
 
     // 2. Update signals_history table for the EXACT recommendation instance
-    const updateHistoryData: any = {
+    const updateHistoryData = {
       outcome: 'manually_removed',
       outcome_date: today,
       sell_signal_reason: sellReason,
@@ -81,37 +61,11 @@ export async function removeRecommendationAction({
     };
 
     const isNumericId = /^\d+$/.test(id);
+    const { error: histError } = isNumericId
+      ? await supabase.from('signals_history').update(updateHistoryData).eq('id', Number(id))
+      : await supabase.from('signals_history').update(updateHistoryData).eq('signal_id', id);
 
-    const executeHistoryUpdate = async (data: any) => {
-      // Priority 1: Exact history numeric primary key if provided
-      if (isNumericId) {
-        return supabase.from('signals_history').update(data).eq('id', Number(id));
-      }
-      // Priority 2: Exact signal_id linkage
-      return supabase.from('signals_history').update(data).eq('signal_id', id);
-    };
-
-    try {
-      const { error: histError } = await executeHistoryUpdate(updateHistoryData);
-      if (histError) throw histError;
-    } catch (err: any) {
-      if (
-        err.message?.includes('removal_reason') ||
-        err.message?.includes('removal_note') ||
-        err.message?.includes('removed_at') ||
-        err.message?.includes('signal_id') ||
-        err.code === '42703'
-      ) {
-        delete updateHistoryData.removal_reason;
-        delete updateHistoryData.removal_note;
-        delete updateHistoryData.removed_at;
-
-        const { error: histErr2 } = await executeHistoryUpdate(updateHistoryData);
-        if (histErr2) throw histErr2;
-      } else {
-        throw err;
-      }
-    }
+    if (histError) throw histError;
 
     // 3. Revalidate path to refresh server components
     revalidatePath('/');

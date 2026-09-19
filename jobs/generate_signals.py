@@ -270,15 +270,16 @@ def refresh_active_signals_prices(supabase):
             if bar and "close" in bar:
                 close_p = float(bar["close"])
                 low_p = float(bar.get("low", close_p))
-                stop_loss = float(existing.get("stop_loss") or 0.0)
+                signal_id = existing.get("id")
+                scan_date = existing.get("scan_date")
                 
                 if stop_loss > 0 and low_p <= stop_loss:
                     exit_p = min(close_p, stop_loss)
                     logger.info(f"[PRICE REFRESH STOP HIT] {ticker}: low ${low_p:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
-                    update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit")
-                    update_history_outcome(ticker, "stopped", exit_p, True)
+                    update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit", signal_id=signal_id)
+                    update_history_outcome(ticker, "stopped", exit_p, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Stop loss hit")
                 else:
-                    update_signals_price(ticker, close_p)
+                    update_signals_price(ticker, close_p, signal_id=signal_id)
                     logger.info(f"[PRICE REFRESH] {ticker}: updated to ${close_p:.2f}")
     except Exception as e:
         logger.warning("Could not refresh active signals prices: %s", e)
@@ -1329,39 +1330,9 @@ def run_scan(
                         "reach_prob_adjusted": sig.get("reach_prob_adjusted"),
                     })
                 
-                # Attempt insertion with full schema; fall back to base columns if DB migration is pending
-                new_cols = (
-                    "target_1_atr", "target_2_atr", "target_3_atr",
-                    "reach_prob_t1", "reach_prob_t2", "reach_prob_t3",
-                    "scale_out_weights", "weighted_rr_honest", "exact_shares",
-                    "de_ratio", "current_ratio", "earnings_surprise_pct", "finbert_sentiment",
-                    "next_earnings_date", "days_to_earnings", "earnings_rejected",
-                    "reach_prob_adjusted", "reach_prob_raw", "rejection_reason", "signal_id"
-                )
-                try:
-                    supabase.table("signals").insert(ranked_signals).execute()
-                except Exception as sig_err:
-                    if any(col in str(sig_err) for col in new_cols) or "42703" in str(sig_err) or "PGRST204" in str(sig_err):
-                        logger.warning("Pending DB schema migration detected for 'signals'. Stripping new columns for insertion.")
-                        stripped_signals = [{k: (int(v) if k == "max_shares" and v is not None else v) for k, v in row.items() if k not in new_cols} for row in ranked_signals]
-                        supabase.table("signals").insert(stripped_signals).execute()
-                    else:
-                        raise sig_err
-
-                try:
-                    supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
-                except Exception as hist_err_sig:
-                    # If signal_id constraint is not yet present in DB, fall back to scan_date,ticker
-                    try:
-                        supabase.table("signals_history").upsert(history_rows, on_conflict="scan_date,ticker").execute()
-                    except Exception as hist_err:
-                        if any(col in str(hist_err) for col in new_cols) or "42703" in str(hist_err) or "PGRST204" in str(hist_err):
-                            logger.warning("Pending DB schema migration detected for 'signals_history'. Stripping new columns for upsert.")
-                            stripped_history = [{k: (int(v) if k == "max_shares" and v is not None else v) for k, v in row.items() if k not in new_cols} for row in history_rows]
-                            supabase.table("signals_history").upsert(stripped_history, on_conflict="scan_date,ticker").execute()
-                        else:
-                            raise hist_err
-
+                # Direct persistence with full schema parity and exact instance identity
+                supabase.table("signals").insert(ranked_signals).execute()
+                supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
                 logger.info("Signals inserted and archived successfully.")
             else:
                 logger.info("No signals to insert.")

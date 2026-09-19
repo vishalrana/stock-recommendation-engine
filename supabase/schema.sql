@@ -1,47 +1,236 @@
 -- ============================================================
--- Stock Recommendation Engine — Supabase Schema
--- Strategy 1.1 Beta
+-- Stock Recommendation Engine — Authoritative Supabase Schema
+-- Architecture: Instance-Based Recommendation Lifecycle
 -- ============================================================
--- Run this entire file in the Supabase SQL Editor (single execution).
--- ============================================================
-
 
 -- =========================
 -- TABLE 1: signals
 -- =========================
--- Daily qualified recommendations. Written by the nightly job.
--- The frontend reads these to show today's picks.
+-- Currently active recommendations. One active recommendation per ticker.
+-- The Next.js frontend reads these to render active stock idea cards.
 
-CREATE TABLE signals (
-    id            UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    scan_date     DATE NOT NULL,
-    ticker        TEXT NOT NULL,
-    company_name  TEXT,
-    industry      TEXT,
-    price         NUMERIC(10,2),
-    entry_price   NUMERIC(10,2) NOT NULL,
-    stop_loss     NUMERIC(10,2) NOT NULL,
-    exit_price    NUMERIC(10,2) NOT NULL,
-    upside_pct    NUMERIC(6,2),
-    risk_reward   NUMERIC(5,2),
-    current_rsi   NUMERIC(5,2),
-    volume_ratio  NUMERIC(5,2),
-    score         NUMERIC(8,4),
-    created_at    TIMESTAMPTZ DEFAULT now(),
-
-    UNIQUE (scan_date, ticker)
+CREATE TABLE IF NOT EXISTS signals (
+    id                      UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    scan_date               DATE NOT NULL,
+    ticker                  TEXT NOT NULL,
+    company_name            TEXT,
+    industry                TEXT,
+    price                   NUMERIC(10,2),
+    entry_price             NUMERIC(10,2) NOT NULL,
+    stop_loss               NUMERIC(10,2) NOT NULL,
+    exit_price              NUMERIC(10,2),
+    upside_pct              NUMERIC(6,2),
+    risk_reward             NUMERIC(5,2),
+    current_rsi             NUMERIC(5,2),
+    volume_ratio            NUMERIC(5,2),
+    score                   NUMERIC(8,4),
+    composite_score         NUMERIC(8,4),
+    quality_score           NUMERIC(8,4),
+    tier_label              TEXT,
+    strategy                TEXT,
+    strategy_name           TEXT,
+    regime                  TEXT,
+    is_fallback             BOOLEAN DEFAULT FALSE,
+    is_momentum_exception   BOOLEAN DEFAULT FALSE,
+    distance_from_high_pct  NUMERIC(6,2),
+    rsi_min_10d             NUMERIC(5,2),
+    adx_value               NUMERIC(5,2),
+    macd_histogram          NUMERIC(8,4),
+    ema20                   NUMERIC(10,2),
+    target_1                NUMERIC(10,2),
+    target_2                NUMERIC(10,2),
+    target_3                NUMERIC(10,2),
+    target_1_pct            NUMERIC(6,2),
+    target_2_pct            NUMERIC(6,2),
+    target_3_pct            NUMERIC(6,2),
+    target_1_atr            NUMERIC,
+    target_2_atr            NUMERIC,
+    target_3_atr            NUMERIC,
+    reach_prob_t1           NUMERIC,
+    reach_prob_t2           NUMERIC,
+    reach_prob_t3           NUMERIC,
+    reach_prob_raw          NUMERIC,
+    reach_prob_adjusted     NUMERIC,
+    scale_out_weights       TEXT DEFAULT '50/30/20',
+    weighted_rr             NUMERIC(5,2),
+    weighted_rr_honest      NUMERIC,
+    position_sizing         TEXT,
+    narrative               TEXT,
+    status                  TEXT DEFAULT 'open',
+    entry_date              DATE,
+    exit_date               DATE,
+    sell_signal             BOOLEAN DEFAULT FALSE,
+    sell_signal_reason      TEXT,
+    rejection_reason        TEXT,
+    sell_price              NUMERIC(10,2),
+    removal_reason          TEXT,
+    removal_note            TEXT,
+    removed_at              TIMESTAMPTZ,
+    context_score           NUMERIC(6,2) DEFAULT 0.0,
+    context_analyst         NUMERIC(6,2) DEFAULT 0.0,
+    context_earnings        NUMERIC(6,2) DEFAULT 0.0,
+    context_fundamental     NUMERIC(6,2) DEFAULT 0.0,
+    context_news            NUMERIC(6,2) DEFAULT 0.0,
+    de_ratio                NUMERIC(8,4),
+    current_ratio           NUMERIC(8,4),
+    earnings_surprise_pct   NUMERIC(6,2),
+    finbert_sentiment       NUMERIC(6,4),
+    earnings_date           DATE,
+    next_earnings_date      DATE,
+    days_to_earnings        INTEGER,
+    earnings_rejected       BOOLEAN DEFAULT FALSE,
+    allocated_dollars       NUMERIC(10,2) DEFAULT NULL,
+    exact_shares            NUMERIC(10,4) DEFAULT NULL,
+    max_shares              INTEGER DEFAULT NULL,
+    created_at              TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX idx_signals_scan_date ON signals (scan_date DESC);
+-- At most one active recommendation per ticker:
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_active_ticker
+ON signals (ticker)
+WHERE status IN ('open', 'pending');
+
+CREATE INDEX IF NOT EXISTS idx_signals_scan_date ON signals (scan_date DESC);
 
 
 -- =========================
--- TABLE 2: ticker_metrics
+-- TABLE 2: signals_history
 -- =========================
--- Per-ticker historical backtest metrics. Seeded once from cached data.
--- Provides "Past Win Rate" and "Holding Time" columns on the frontend.
+-- Historical recommendations and outcomes. Permanently preserves every instance.
+-- The Next.js frontend reads these authoritatively to render Closed Stock Ideas.
 
-CREATE TABLE ticker_metrics (
+CREATE TABLE IF NOT EXISTS signals_history (
+    id                      BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    signal_id               UUID,
+    scan_date               DATE NOT NULL,
+    ticker                  TEXT NOT NULL,
+    company_name            TEXT,
+    industry                TEXT,
+    price                   NUMERIC(10,2),
+    entry_price             NUMERIC(10,2) NOT NULL,
+    stop_loss               NUMERIC(10,2) NOT NULL,
+    exit_price              NUMERIC(10,2),
+    upside_pct              NUMERIC(6,2),
+    risk_reward             NUMERIC(5,2),
+    current_rsi             NUMERIC(5,2),
+    volume_ratio            NUMERIC(5,2),
+    score                   NUMERIC(8,4),
+    composite_score         NUMERIC(8,4),
+    quality_score           NUMERIC(8,4),
+    tier_label              TEXT,
+    strategy                TEXT,
+    strategy_name           TEXT,
+    regime                  TEXT,
+    is_fallback             BOOLEAN DEFAULT FALSE,
+    is_momentum_exception   BOOLEAN DEFAULT FALSE,
+    distance_from_high_pct  NUMERIC(6,2),
+    rsi_min_10d             NUMERIC(5,2),
+    adx_value               NUMERIC(5,2),
+    macd_histogram          NUMERIC(8,4),
+    ema20                   NUMERIC(10,2),
+    target_1                NUMERIC(10,2),
+    target_2                NUMERIC(10,2),
+    target_3                NUMERIC(10,2),
+    target_1_pct            NUMERIC(6,2),
+    target_2_pct            NUMERIC(6,2),
+    target_3_pct            NUMERIC(6,2),
+    target_1_atr            NUMERIC,
+    target_2_atr            NUMERIC,
+    target_3_atr            NUMERIC,
+    reach_prob_t1           NUMERIC,
+    reach_prob_t2           NUMERIC,
+    reach_prob_t3           NUMERIC,
+    reach_prob_raw          NUMERIC,
+    reach_prob_adjusted     NUMERIC,
+    scale_out_weights       TEXT DEFAULT '50/30/20',
+    weighted_rr             NUMERIC(5,2),
+    weighted_rr_honest      NUMERIC,
+    position_sizing         TEXT,
+    narrative               TEXT,
+    outcome                 TEXT DEFAULT 'open',
+    outcome_date            DATE,
+    outcome_return_pct      NUMERIC(6,2),
+    outcome_holding_days    INTEGER,
+    sell_signal_reason      TEXT,
+    rejection_reason        TEXT,
+    removal_reason          TEXT,
+    removal_note            TEXT,
+    removed_at              TIMESTAMPTZ,
+    context_score           NUMERIC(6,2) DEFAULT 0.0,
+    context_analyst         NUMERIC(6,2) DEFAULT 0.0,
+    context_earnings        NUMERIC(6,2) DEFAULT 0.0,
+    context_fundamental     NUMERIC(6,2) DEFAULT 0.0,
+    context_news            NUMERIC(6,2) DEFAULT 0.0,
+    de_ratio                NUMERIC(8,4),
+    current_ratio           NUMERIC(8,4),
+    earnings_surprise_pct   NUMERIC(6,2),
+    finbert_sentiment       NUMERIC(6,4),
+    earnings_date           DATE,
+    next_earnings_date      DATE,
+    days_to_earnings        INTEGER,
+    earnings_rejected       BOOLEAN DEFAULT FALSE,
+    past_win_rate           NUMERIC(6,2) DEFAULT 0,
+    expectancy_pct          NUMERIC(8,4) DEFAULT 0,
+    total_trades            INTEGER DEFAULT 0,
+    allocated_dollars       NUMERIC(10,2) DEFAULT NULL,
+    exact_shares            NUMERIC(10,4) DEFAULT NULL,
+    max_shares              INTEGER DEFAULT NULL,
+    created_at              TIMESTAMPTZ DEFAULT now()
+);
+
+-- Unique recommendation instance identity:
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_history_signal_id_uniq
+ON signals_history (signal_id)
+WHERE signal_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_signals_history_scan_date ON signals_history (scan_date DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_history_ticker ON signals_history (ticker);
+
+
+-- =========================
+-- TABLE 3: scan_log
+-- =========================
+-- Audit trail for nightly runs and scans. One row per scan date.
+
+CREATE TABLE IF NOT EXISTS scan_log (
+    id                      UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    scan_date               DATE NOT NULL UNIQUE,
+    tickers_scanned         INTEGER NOT NULL,
+    signals_generated       INTEGER NOT NULL,
+    signals_qualified       INTEGER DEFAULT 0,
+    signals_recommended     INTEGER DEFAULT 0,
+    signals_strong_buy      INTEGER DEFAULT 0,
+    signals_buy             INTEGER DEFAULT 0,
+    signals_blocked         INTEGER DEFAULT 0,
+    scan_duration_secs      NUMERIC(8,2),
+    status                  TEXT DEFAULT 'success',
+    error_message           TEXT,
+    regime                  TEXT,
+    rsi_breadth_pct         NUMERIC(6,2) DEFAULT 0.0,
+    active_strategies       INTEGER DEFAULT 0,
+    strategy_breakdown      JSONB DEFAULT '{}',
+    skipped_strategies      JSONB DEFAULT '{}',
+    failed_rsi_gate         INTEGER DEFAULT 0,
+    failed_adx_gate         INTEGER DEFAULT 0,
+    failed_trend_gate       INTEGER DEFAULT 0,
+    failed_volume_gate      INTEGER DEFAULT 0,
+    failed_maxrisk_gate     INTEGER DEFAULT 0,
+    failed_minrisk_gate     INTEGER DEFAULT 0,
+    failed_maxgap_gate      INTEGER DEFAULT 0,
+    failed_earnings_gate    INTEGER DEFAULT 0,
+    failed_trades_gate      INTEGER DEFAULT 0,
+    failed_rr_gate          INTEGER DEFAULT 0,
+    failed_macd_gate        INTEGER DEFAULT 0,
+    failed_extended_high_gate INTEGER DEFAULT 0,
+    momentum_exceptions     INTEGER DEFAULT 0,
+    created_at              TIMESTAMPTZ DEFAULT now()
+);
+
+
+-- =========================
+-- TABLE 4: ticker_metrics
+-- =========================
+CREATE TABLE IF NOT EXISTS ticker_metrics (
     id                  UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     ticker              TEXT NOT NULL UNIQUE,
     industry            TEXT,
@@ -51,80 +240,40 @@ CREATE TABLE ticker_metrics (
     win_rate            NUMERIC(6,2) DEFAULT 0,
     expectancy_pct      NUMERIC(8,4) DEFAULT 0,
     median_holding_days NUMERIC(6,1) DEFAULT 0,
+    median_win_return   NUMERIC(6,2) DEFAULT 0,
+    total_trades        INTEGER DEFAULT 0,
     updated_at          TIMESTAMPTZ DEFAULT now()
 );
 
 
 -- =========================
--- TABLE 3: scan_log
+-- TABLE 5: context_cache
 -- =========================
--- Audit trail for nightly runs. One row per scan date.
-
-CREATE TABLE scan_log (
-    id                  UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    scan_date           DATE NOT NULL UNIQUE,
-    tickers_scanned     INTEGER NOT NULL,
-    signals_generated   INTEGER NOT NULL,
-    scan_duration_secs  NUMERIC(8,2),
-    status              TEXT DEFAULT 'success',
-    error_message       TEXT,
-    active_strategies   INTEGER DEFAULT 0,
-    skipped_strategies  JSONB DEFAULT '{}',
-    created_at          TIMESTAMPTZ DEFAULT now()
+CREATE TABLE IF NOT EXISTS context_cache (
+    ticker              TEXT PRIMARY KEY,
+    date                DATE NOT NULL,
+    context_score       NUMERIC(6,2),
+    analyst_target      NUMERIC(10,2),
+    news_sentiment      NUMERIC(6,4),
+    earnings_surprise   NUMERIC(6,2),
+    updated_at          TIMESTAMPTZ DEFAULT now()
 );
-
-
--- =========================
--- VIEW: recommendations
--- =========================
--- Joins today's signals with historical metrics.
--- This is the single query the frontend uses.
-
-CREATE VIEW recommendations AS
-SELECT
-    s.scan_date,
-    s.ticker,
-    s.company_name,
-    s.industry,
-    s.price,
-    s.entry_price,
-    s.stop_loss,
-    s.exit_price,
-    s.upside_pct,
-    s.risk_reward,
-    s.current_rsi,
-    s.volume_ratio,
-    s.score,
-    COALESCE(m.win_rate, 0)            AS past_win_rate,
-    COALESCE(m.expectancy_pct, 0)      AS expectancy_pct,
-    COALESCE(m.total_signals, 0)       AS historical_signals,
-    COALESCE(m.wins, 0)                AS historical_wins,
-    COALESCE(m.losses, 0)              AS historical_losses,
-    COALESCE(m.median_holding_days, 0) AS median_holding_days
-FROM signals s
-LEFT JOIN ticker_metrics m ON s.ticker = m.ticker;
 
 
 -- =========================
 -- ROW-LEVEL SECURITY
 -- =========================
--- Public anonymous reads. Writes only via service_role key.
-
 ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_read_signals" ON signals
-    FOR SELECT TO anon USING (true);
+CREATE POLICY "anon_read_signals" ON signals FOR SELECT TO anon USING (true);
+
+ALTER TABLE signals_history ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_read_signals_history" ON signals_history FOR SELECT TO anon USING (true);
 
 ALTER TABLE ticker_metrics ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_read_metrics" ON ticker_metrics
-    FOR SELECT TO anon USING (true);
+CREATE POLICY "anon_read_metrics" ON ticker_metrics FOR SELECT TO anon USING (true);
 
 ALTER TABLE scan_log ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_read_scan_log" ON scan_log
-    FOR SELECT TO anon USING (true);
+CREATE POLICY "anon_read_scan_log" ON scan_log FOR SELECT TO anon USING (true);
 
-
--- ============================================================
--- DONE. Verify in Table Editor:
---   - signals, ticker_metrics, scan_log tables exist
---   - recommendations view exists (under Database > Views)
--- ============================================================
+ALTER TABLE context_cache ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_read_context_cache" ON context_cache FOR SELECT TO anon USING (true);

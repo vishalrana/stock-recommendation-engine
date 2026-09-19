@@ -1,11 +1,24 @@
+import logging
 import requests
 from src.providers.base import NewsContext
+
+logger = logging.getLogger(__name__)
+
+try:
+    import transformers
+    _TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    _TRANSFORMERS_AVAILABLE = False
+    logger.info("transformers package is not installed; FinBERT news sentiment will default to neutral.")
+
 
 class FinBERTNewsProvider:
     def __init__(self):
         self.sentiment_pipeline = None  # Lazy load to avoid slow imports
     
     def _load_model(self):
+        if not _TRANSFORMERS_AVAILABLE:
+            return
         if self.sentiment_pipeline is None:
             from transformers import pipeline
             # Load open-source FinBERT (ProsusAI/finbert)
@@ -16,6 +29,9 @@ class FinBERTNewsProvider:
             )
     
     def fetch_and_score(self, ticker: str) -> NewsContext:
+        if not _TRANSFORMERS_AVAILABLE:
+            return NewsContext(headline_sentiment=0.0, article_count=0, source_reliability=0.0)
+
         try:
             titles = []
             # 1. Primary source: yfinance native news
@@ -45,16 +61,17 @@ class FinBERTNewsProvider:
             # Limit to first 10 articles to save compute
             if titles:
                 self._load_model()
-                for title in titles[:10]:
-                    result = self.sentiment_pipeline(title)[0]
-                    label = result['label'].lower()
-                    if label == 'positive':
-                        score = result['score']
-                    elif label == 'negative':
-                        score = -result['score']
-                    else:
-                        score = 0.0
-                    sentiments.append(score)
+                if self.sentiment_pipeline:
+                    for title in titles[:10]:
+                        result = self.sentiment_pipeline(title)[0]
+                        label = result['label'].lower()
+                        if label == 'positive':
+                            score = result['score']
+                        elif label == 'negative':
+                            score = -result['score']
+                        else:
+                            score = 0.0
+                        sentiments.append(score)
             
             non_neutral = [s for s in sentiments if s != 0.0]
             if non_neutral:
@@ -68,6 +85,7 @@ class FinBERTNewsProvider:
                 source_reliability=0.8  # Google News sources are credible
             )
         except Exception as e:
-            print(f"News fetch failed for {ticker}: {e}")
+            logger.debug(f"News fetch failed for {ticker}: {e}")
             # Return neutral on failure
             return NewsContext(headline_sentiment=0.0, article_count=0)
+

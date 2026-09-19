@@ -62,7 +62,7 @@ except Exception:
 def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_reason=None, removal_reason=None, removal_note=None, signal_id=None):
     from datetime import datetime
     if not supabase:
-        return
+        return None
     today = datetime.now().date().isoformat()
     now_ts = datetime.now().isoformat()
     update_data = {
@@ -70,7 +70,7 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
         'exit_price': exit_price,
         'sell_price': exit_price,
         'sell_signal': True,
-        'sell_signal_reason': sell_signal_reason or sell_signal,
+        'sell_signal_reason': sell_signal_reason or (sell_signal if isinstance(sell_signal, str) else None),
         'sell_signal_date': today,
         'exit_date': today,
         'price': exit_price,
@@ -82,26 +82,14 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
     if status == 'manually_removed':
         update_data['removed_at'] = now_ts
 
-    def _execute_update(data):
-        if signal_id:
-            return supabase.table('signals').update(data).eq('id', signal_id).execute()
-        elif status == 'manually_removed':
-            import logging
-            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only update for {ticker}. Exact signal_id is required.")
-            return None
-        else:
-            return supabase.table('signals').update(data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
-
-    try:
-        _execute_update(update_data)
-    except Exception as e:
-        new_cols = ['removal_reason', 'removal_note', 'removed_at']
-        if any(col in str(e) for col in new_cols):
-            for col in new_cols:
-                update_data.pop(col, None)
-            _execute_update(update_data)
-        else:
-            raise e
+    if signal_id:
+        return supabase.table('signals').update(update_data).eq('id', signal_id).execute()
+    elif status == 'manually_removed':
+        import logging
+        logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only update for {ticker}. Exact signal_id is required.")
+        return None
+    else:
+        return supabase.table('signals').update(update_data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
 
 
 def update_signals_price(ticker, current_price, signal_id=None):
@@ -132,8 +120,11 @@ def execute_position_exit(signal_id, exit_price, outcome, reason, split_fraction
 
 def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocated_dollars=None, max_shares=None, removal_reason=None, removal_note=None, history_id=None, signal_id=None, scan_date=None, sell_signal_reason=None):
     if not supabase:
-        return
+        return None
     from datetime import datetime
+    import logging
+    logger = logging.getLogger(__name__)
+
     outcome_map = {
         'stop_loss': 'stopped',
         'take_profit_1': 'hit_t1',
@@ -144,134 +135,67 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
     }
     outcome = outcome_map.get(status, status)
     
-    # Exact record lookup priority:
+    # Exact record lookup:
     # 1. history_id (exact primary key in signals_history)
-    # 2. signal_id (exact foreign key if present)
-    # 3. (ticker, scan_date) (unique constraint in signals_history)
-    # 4. fallback: ticker + outcome='open' (only if no instance identifier available)
+    # 2. signal_id (exact recommendation instance identifier)
     record = None
-    target_filter_type = 'fallback'
-    target_filter_val = None
 
     if history_id is not None:
         try:
             h_res = supabase.table('signals_history').select('*').eq('id', history_id).execute()
             if h_res.data:
                 record = h_res.data[0]
-                target_filter_type = 'history_id'
-                target_filter_val = history_id
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error querying signals_history by history_id={history_id}: {e}")
 
     if record is None and signal_id is not None:
         try:
             s_res = supabase.table('signals_history').select('*').eq('signal_id', signal_id).execute()
             if s_res.data:
                 record = s_res.data[0]
-                target_filter_type = 'signal_id'
-                target_filter_val = signal_id
-        except Exception:
-            pass
-        if record is None and scan_date is None:
-            try:
-                sig_lookup = supabase.table('signals').select('scan_date, ticker').eq('id', signal_id).execute()
-                if sig_lookup.data:
-                    scan_date = sig_lookup.data[0].get('scan_date')
-                    if not ticker:
-                        ticker = sig_lookup.data[0].get('ticker')
-            except Exception:
-                pass
-
-    if record is None and scan_date is not None and ticker:
-        if status == 'manually_removed':
-            import logging
-            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe scan_date fallback for {ticker}. Exact instance identifier (history_id or signal_id) is required.")
-            return None
-        try:
-            d_res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('scan_date', scan_date).execute()
-            if d_res.data:
-                record = d_res.data[0]
-                target_filter_type = 'scan_date'
-                target_filter_val = scan_date
-        except Exception:
-            pass
-
-    if record is None and ticker:
-        if status == 'manually_removed':
-            import logging
-            logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only fallback for {ticker}. Exact instance identifier (history_id or signal_id) is required.")
-            return None
-        try:
-            res = supabase.table('signals_history').select('*').eq('ticker', ticker).eq('outcome', 'open').execute()
-            if res.data:
-                record = res.data[0]
-                target_filter_type = 'fallback'
-        except Exception:
-            pass
-
-    if record:
-        entry_price = float(record.get('entry_price') or 0)
-        scan_date_str = record.get('scan_date')
-        
-        return_pct = None
-        if entry_price > 0 and exit_price is not None:
-            return_pct = round(((exit_price - entry_price) / entry_price) * 100, 2)
-            
-        holding_days = None
-        if scan_date_str:
-            try:
-                scan_dt = datetime.strptime(str(scan_date_str)[:10], '%Y-%m-%d').date()
-                holding_days = (datetime.now().date() - scan_dt).days
-            except Exception:
-                pass
-                
-        update_data = {
-            'outcome': outcome,
-            'exit_price': exit_price,
-            'outcome_date': datetime.now().date().isoformat(),
-            'outcome_return_pct': return_pct,
-            'outcome_holding_days': holding_days
-        }
-        if sell_signal_reason:
-            update_data['sell_signal_reason'] = sell_signal_reason
-        if allocated_dollars is not None:
-            update_data['allocated_dollars'] = allocated_dollars
-        if max_shares is not None:
-            update_data['max_shares'] = max_shares
-        if removal_reason:
-            update_data['removal_reason'] = removal_reason
-        if removal_note:
-            update_data['removal_note'] = removal_note
-        if status == 'manually_removed':
-            update_data['removed_at'] = datetime.now().isoformat()
-
-        def _execute_history_update(data):
-            rec_id = record.get('id')
-            if rec_id is not None:
-                return supabase.table('signals_history').update(data).eq('id', rec_id).execute()
-            elif target_filter_type == 'scan_date':
-                if status == 'manually_removed':
-                    return None
-                return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('scan_date', target_filter_val).execute()
-            elif target_filter_type == 'signal_id':
-                return supabase.table('signals_history').update(data).eq('signal_id', target_filter_val).execute()
-            elif target_filter_type == 'fallback':
-                if status == 'manually_removed':
-                    return None
-                return supabase.table('signals_history').update(data).eq('ticker', ticker).eq('outcome', 'open').execute()
-            else:
-                return None
-
-        try:
-            _execute_history_update(update_data)
         except Exception as e:
-            new_cols = ['removal_reason', 'removal_note', 'removed_at', 'signal_id']
-            if any(col in str(e) for col in new_cols):
-                for col in new_cols:
-                    update_data.pop(col, None)
-                _execute_history_update(update_data)
-            else:
-                raise e
+            logger.warning(f"Error querying signals_history by signal_id={signal_id}: {e}")
+
+    if record is None:
+        logger.error(
+            f"[HISTORY OUTCOME] Refusing unsafe update for {ticker}: exact instance identifier "
+            f"(history_id={history_id} or signal_id={signal_id}) is required."
+        )
+        return None
+
+    entry_price = float(record.get('entry_price') or 0)
+    scan_date_str = record.get('scan_date')
+    
+    return_pct = None
+    if entry_price > 0 and exit_price is not None:
+        return_pct = round(((exit_price - entry_price) / entry_price) * 100, 2)
+        
+    holding_days = None
+    if scan_date_str:
+        try:
+            scan_dt = datetime.strptime(str(scan_date_str)[:10], '%Y-%m-%d').date()
+            holding_days = (datetime.now().date() - scan_dt).days
+        except Exception:
+            pass
+            
+    update_data = {
+        'outcome': outcome,
+        'exit_price': exit_price,
+        'outcome_date': datetime.now().date().isoformat(),
+        'outcome_return_pct': return_pct,
+        'outcome_holding_days': holding_days
+    }
+    if sell_signal_reason:
+        update_data['sell_signal_reason'] = sell_signal_reason
+    if removal_reason:
+        update_data['removal_reason'] = removal_reason
+    if removal_note:
+        update_data['removal_note'] = removal_note
+    if status == 'manually_removed':
+        update_data['removed_at'] = datetime.now().isoformat()
+
+    rec_id = record.get('id')
+    return supabase.table('signals_history').update(update_data).eq('id', rec_id).execute()
 
 
 def get_latest_price(ticker):

@@ -440,7 +440,8 @@ def run_scan(
 
     regime_info = get_regime()
     sma_regime = regime_info["regime"]
-    
+    regime_str = sma_regime
+
     use_hmm = os.environ.get("USE_HMM", "false").lower() == "true"
     if use_hmm:
         try:
@@ -452,14 +453,19 @@ def run_scan(
         except Exception as e:
             logger.warning(f"Failed to calculate HMM regime: {e}. Falling back to SMA.")
             regime_str = sma_regime
+    if regime_str in ("unknown", "unavailable"):
+        logger.warning(
+            "Market regime is %s due to market data unavailability. Fail-safe active: no regime-dependent strategies activated.",
+            regime_str.upper(),
+        )
+        allowed_strategies = []
     else:
-        regime_str = sma_regime
-
-    allowed_strategies = REGIME_STRATEGY_MAP.get(regime_str, ["Pullback Recovery"])
+        allowed_strategies = REGIME_STRATEGY_MAP.get(regime_str, [])
 
     # TASK 2: VIX Emergency Override
     size_mult = 1.0
-    regime_str, allowed_strategies, size_mult = apply_vix_override(regime_str, allowed_strategies, size_mult)
+    if allowed_strategies:
+        regime_str, allowed_strategies, size_mult = apply_vix_override(regime_str, allowed_strategies, size_mult)
 
     logger.info(
         "REGIME: %s | SPY: $%.2f | 200 DMA: $%.2f",
@@ -741,9 +747,9 @@ def run_scan(
     qualified_tickers: set = set()
 
     if all_signals:
-        # P0-1 & P0-2: Central SignalRanker is single source of truth
-        candidates = deduplicate_by_ticker(all_signals)
-        logger.info(f"[CENTRAL RANKER] Processing {len(candidates)} candidates from all strategies...")
+        # P0-5: All strategy candidates reach central SignalRanker before ticker deduplication
+        candidates = list(all_signals)
+        logger.info(f"[CENTRAL RANKER] Processing {len(candidates)} strategy candidates across all strategies...")
 
         from src.ranker import (
             SignalRanker,
@@ -769,17 +775,27 @@ def run_scan(
                 logger.warning(f"Could not compute momentum score for {sig.get('ticker')}: {m_err}")
                 sig["momentum_score"] = None
 
-            # 2. Historical Win Rate Score (from ticker metrics)
+            # 2. Historical Win Rate Score & Provenance (P0-6)
             t_upper = sig["ticker"].upper()
-            w_val = sig.get("past_win_rate")
-            if w_val is None and t_upper in metrics_map:
+            w_val = sig.get("strategy_win_rate") or sig.get("past_win_rate")
+            if sig.get("strategy_win_rate") is not None:
+                provenance = "strategy_specific"
+            elif sig.get("past_win_rate") is not None:
+                provenance = "candidate_provided"
+            elif t_upper in metrics_map:
                 w_val = metrics_map[t_upper].get("win_rate")
+                provenance = "generic_ticker_prior"
+            else:
+                provenance = "unavailable"
+
             if w_val is not None:
                 sig["winrate_score"] = float(w_val)
                 sig["win_rate"] = float(w_val)
                 sig["past_win_rate"] = float(w_val)
+                sig["win_rate_provenance"] = provenance
             else:
                 sig["winrate_score"] = None
+                sig["win_rate_provenance"] = "unavailable"
 
             # 3. Strategy Expectancy Score
             strat_name = sig.get("strategy", "Trend Following")
@@ -808,14 +824,26 @@ def run_scan(
                         if ctx.cached_score is None:
                             from src.providers.context.aggregator import save_context_to_cache
                             save_context_to_cache(t, c_score, ctx)
-                        return (t, c_score, c_analyst, c_earnings, c_fundamental, c_news, getattr(ctx, "de_ratio", None), getattr(ctx, "current_ratio", None), getattr(ctx, "earnings_surprise_pct", None), getattr(ctx, "finbert_sentiment", None), getattr(ctx, "target_consensus", None))
+                        de_val = ctx.fundamental.debt_to_equity if ctx.fundamental else None
+                        cr_val = ctx.fundamental.current_ratio if ctx.fundamental else None
+                        earn_surp = ctx.earnings.surprise_percent if ctx.earnings else None
+                        finbert = ctx.news.headline_sentiment if ctx.news else None
+                        target_c = ctx.analyst.target_mean_price if ctx.analyst else None
+                        return (t, c_score, c_analyst, c_earnings, c_fundamental, c_news, de_val, cr_val, earn_surp, finbert, target_c)
                 except Exception as ctx_err:
                     logger.warning(f"Context scoring failed for {t}: {ctx_err}")
                 return (t, 0.0, 0.0, 0.0, 0.0, 0.0, None, None, None, None, None)
 
             from concurrent.futures import ThreadPoolExecutor, as_completed
+            # Deduplicate by ticker for parallel context fetching
+            unique_cands_by_ticker = {}
+            for c in candidates:
+                t = c["ticker"]
+                if t not in unique_cands_by_ticker:
+                    unique_cands_by_ticker[t] = c
+
             with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = {executor.submit(_score_ctx, c): c for c in candidates}
+                futures = {executor.submit(_score_ctx, c): c["ticker"] for c in unique_cands_by_ticker.values()}
                 ctx_map = {}
                 try:
                     for future in as_completed(futures, timeout=60.0):
@@ -834,6 +862,11 @@ def run_scan(
                     c["context_earnings"] = 0.0
                     c["context_fundamental"] = 0.0
                     c["context_news"] = 0.0
+                    c["de_ratio"] = None
+                    c["current_ratio"] = None
+                    c["earnings_surprise_pct"] = None
+                    c["finbert_sentiment"] = None
+                    c["target_consensus"] = None
         else:
             for c in candidates:
                 c["context_score"] = 0.0
@@ -841,6 +874,11 @@ def run_scan(
                 c["context_earnings"] = 0.0
                 c["context_fundamental"] = 0.0
                 c["context_news"] = 0.0
+                c["de_ratio"] = None
+                c["current_ratio"] = None
+                c["earnings_surprise_pct"] = None
+                c["finbert_sentiment"] = None
+                c["target_consensus"] = None
 
         # P0-2: Central Composite Scoring with strict validation
         scored_candidates = []
@@ -902,6 +940,7 @@ def run_scan(
         qualified_recommendations = []
         active_qualified_recommendations: Dict[str, dict] = {}
         qualified_tickers = set()
+        seen_qualified_strategy_tickers: Dict[str, dict] = {}
 
         for sig in final_signals:
             ticker = sig["ticker"]
@@ -1013,10 +1052,21 @@ def run_scan(
                 continue
 
             # Candidate passes all filters and qualifies!
-            qualified_tickers.add(ticker.upper())
+            t_upper = ticker.upper()
+            if t_upper in seen_qualified_strategy_tickers:
+                winner_sig = seen_qualified_strategy_tickers[t_upper]
+                logger.info(
+                    f"[STRATEGY DEDUPLICATION] Ticker {ticker} qualified for multiple strategies: "
+                    f"'{winner_sig['strategy']}' (canonical score {winner_sig['composite_score']:.2f}) vs "
+                    f"'{strategy_name}' (canonical score {score:.2f}). Discarding lower-ranked '{strategy_name}' candidate."
+                )
+                continue
+            seen_qualified_strategy_tickers[t_upper] = sig
 
-            if ticker.upper() in open_tickers:
-                active_qualified_recommendations[ticker.upper()] = sig
+            qualified_tickers.add(t_upper)
+
+            if t_upper in open_tickers:
+                active_qualified_recommendations[t_upper] = sig
                 logger.info(f"Ticker {ticker} is already an active recommendation and continues to qualify.")
                 continue
 

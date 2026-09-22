@@ -46,8 +46,8 @@ def get_regime() -> dict:
             spy_200dma - SPY 200-day simple moving average
             date     - date string of latest data point (YYYY-MM-DD)
 
-    On failure (e.g. SPY data unavailable), returns a safe default
-    of "bull" regime with zeroed prices and a warning log.
+    On failure (e.g. SPY data unavailable), returns a safe fallback
+    of "unknown" regime with zeroed prices and a warning log.
     """
     try:
         end_date = datetime.now().date()
@@ -57,9 +57,9 @@ def get_regime() -> dict:
         spy_data = fetch_ohlcv_data("SPY", start_date=start_date, end_date=end_date)
 
         if spy_data is None or spy_data.empty:
-            logger.warning("SPY data fetch returned empty. Defaulting to BULL regime.")
+            logger.warning("SPY data fetch returned empty. Setting regime to UNKNOWN.")
             return {
-                "regime": "bull",
+                "regime": "unknown",
                 "spy_price": 0.0,
                 "spy_200dma": 0.0,
                 "date": end_date.isoformat(),
@@ -70,11 +70,11 @@ def get_regime() -> dict:
 
         if len(df) < 200:
             logger.warning(
-                "SPY data has only %d rows (need 200+). Defaulting to BULL regime.",
+                "SPY data has only %d rows (need 200+). Setting regime to UNKNOWN.",
                 len(df),
             )
             return {
-                "regime": "bull",
+                "regime": "unknown",
                 "spy_price": 0.0,
                 "spy_200dma": 0.0,
                 "date": end_date.isoformat(),
@@ -91,9 +91,9 @@ def get_regime() -> dict:
             date_str = str(latest_date)[:10]
 
         if np.isnan(spy_price) or np.isnan(spy_200dma):
-            logger.warning("SPY indicators contain NaN. Defaulting to BULL regime.")
+            logger.warning("SPY indicators contain NaN. Setting regime to UNKNOWN.")
             return {
-                "regime": "bull",
+                "regime": "unknown",
                 "spy_price": 0.0,
                 "spy_200dma": 0.0,
                 "date": date_str,
@@ -123,9 +123,9 @@ def get_regime() -> dict:
         }
 
     except Exception as e:
-        logger.warning("Regime detection failed: %s. Defaulting to BULL regime.", e)
+        logger.warning("Regime detection failed: %s. Setting regime to UNKNOWN.", e)
         return {
-            "regime": "bull",
+            "regime": "unknown",
             "spy_price": 0.0,
             "spy_200dma": 0.0,
             "date": datetime.now().date().isoformat(),
@@ -137,18 +137,20 @@ def should_trade(regime: str, strategy_type: str = "swing_momentum") -> bool:
     Determine whether trading is appropriate given the current regime.
 
     Args:
-        regime: "bull" or "bear"
+        regime: "bull", "sideways", "bear", or "unknown"
         strategy_type: Strategy identifier. Currently only "swing_momentum" is supported.
 
     Returns:
         True if the regime favors the given strategy type.
     """
+    if not regime or regime in ("unknown", "unavailable"):
+        return False
     if strategy_type == "swing_momentum":
         return regime == "bull"
 
-    # Unknown strategy types default to True (permissive)
-    logger.warning("Unknown strategy_type '%s'. Defaulting to allow trade.", strategy_type)
-    return True
+    # Unknown strategy types default to False for safety
+    logger.warning("Unknown strategy_type '%s'. Defaulting to disallow trade.", strategy_type)
+    return False
 
 
 if __name__ == "__main__":

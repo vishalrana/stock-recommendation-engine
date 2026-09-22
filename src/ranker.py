@@ -202,8 +202,8 @@ def calculate_half_kelly(composite_score: float, honest_rr: float) -> float:
 
 def compute_momentum_score(row: dict) -> float:
     """
-    P0-2: Explicit continuous technical momentum score (0-100).
-    Uses RSI, DMA 50 proximity, Volume Ratio, and MACD Histogram.
+    P0-2 & P1-1 & P1-2: Explicit continuous technical momentum score (0-100).
+    Uses RSI, DMA 50 proximity, Volume Ratio, and MACD Histogram (normalized by ATR).
     """
     rsi = row.get("current_rsi")
     price = row.get("price") if row.get("price") is not None else row.get("entry_price")
@@ -222,7 +222,8 @@ def compute_momentum_score(row: dict) -> float:
     v_val = float(volume_ratio)
     m_val = float(macd_hist or 0.0)
 
-    # RSI score (peaks at 50, decreases as it moves away)
+    # RSI score (P1-2: Canonical design intentionally penalizes overbought / overextended
+    # deviation from the 50 median line to protect against chasing exhausted swings):
     rsi_score = max(0.0, min(100.0, 100.0 - abs(rsi_val - 50.0) * 4.0))
 
     # Proximity score to DMA 50
@@ -232,8 +233,13 @@ def compute_momentum_score(row: dict) -> float:
     # Volume score
     volume_score = max(0.0, min(100.0, v_val * 50.0))
 
-    # MACD score
-    macd_score = max(0.0, min(100.0, 50.0 + m_val * 200.0))
+    # MACD score normalized by ATR (P1-1):
+    # Normalized by ATR (or price proxy) to eliminate dollar-price scale bias between $20 and $500 stocks.
+    atr = float(row.get("atr_14") or row.get("atr") or (p_val * 0.02 if p_val > 0 else 1.0))
+    if atr <= 0.0:
+        atr = p_val * 0.02 if p_val > 0 else 1.0
+    macd_norm = m_val / atr if atr > 0 else 0.0
+    macd_score = max(0.0, min(100.0, 50.0 + macd_norm * 200.0))
 
     raw_momentum = (rsi_score + proximity_score + volume_score + macd_score) / 4.0
 
@@ -389,23 +395,40 @@ class SignalRanker:
         c_fundamental = float(row.get("context_fundamental", 0.0) or 0.0)
         c_news = float(row.get("context_news", 0.0) or 0.0)
 
-        context_score = compute_context_score(
-            analyst_pts=c_analyst,
-            earnings_pts=c_earnings,
-            fundamental_pts=c_fundamental,
-            news_pts=c_news,
-            de_ratio=row.get("de_ratio"),
-            current_ratio=row.get("current_ratio"),
-            earnings_surprise_pct=row.get("earnings_surprise_pct"),
-            finbert_sentiment=row.get("finbert_sentiment"),
-            target_consensus=row.get("target_consensus"),
-            price=row.get("price") or row.get("entry_price"),
-        )
-        if "context_score" in row and row["context_score"] is not None and float(row["context_score"]) > 0:
-            if c_analyst == 0.0 and c_earnings == 0.0 and c_fundamental == 0.0 and c_news == 0.0:
-                context_score = float(row["context_score"])
-            else:
-                context_score = max(context_score, float(row["context_score"]))
+        has_breakdown = any([
+            row.get("context_analyst") is not None,
+            row.get("context_earnings") is not None,
+            row.get("context_fundamental") is not None,
+            row.get("context_news") is not None,
+        ])
+
+        if not has_breakdown and "context_score" in row and row["context_score"] is not None:
+            # If only raw context_score was passed, apply veto gates directly to that base score
+            context_score = compute_context_score(
+                analyst_pts=0.0,
+                earnings_pts=0.0,
+                fundamental_pts=float(row["context_score"]),
+                news_pts=0.0,
+                de_ratio=row.get("de_ratio"),
+                current_ratio=row.get("current_ratio"),
+                earnings_surprise_pct=row.get("earnings_surprise_pct"),
+                finbert_sentiment=row.get("finbert_sentiment"),
+                target_consensus=row.get("target_consensus"),
+                price=row.get("price") or row.get("entry_price"),
+            )
+        else:
+            context_score = compute_context_score(
+                analyst_pts=c_analyst,
+                earnings_pts=c_earnings,
+                fundamental_pts=c_fundamental,
+                news_pts=c_news,
+                de_ratio=row.get("de_ratio"),
+                current_ratio=row.get("current_ratio"),
+                earnings_surprise_pct=row.get("earnings_surprise_pct"),
+                finbert_sentiment=row.get("finbert_sentiment"),
+                target_consensus=row.get("target_consensus"),
+                price=row.get("price") or row.get("entry_price"),
+            )
 
         # Strategy-Specific Weight Vector (Fix 4)
         w = STRATEGY_WEIGHT_VECTORS.get(strat_key, STRATEGY_WEIGHT_VECTORS["trend_following"])
@@ -442,41 +465,41 @@ class SignalRanker:
     def composite_rank(self, df: pd.DataFrame, regime: str, top_n: int = 5) -> pd.DataFrame:
         """
         Full composite ranking pipeline with tiered fallback.
+        DEPRECATED: SignalRanker.compute_composite_score() is the canonical composite scoring engine.
+        This legacy method delegates row scoring to compute_momentum_score() and compute_composite_score().
         """
         if df.empty:
             return df.copy()
 
         df_filtered = df.copy()
 
-        # 1. Compute Technical Momentum (30% weight)
-        # RSI score (peaks at 50, decreases as it moves away)
-        rsi_vals = df_filtered["current_rsi"]
-        rsi_score = 100.0 - (rsi_vals - 50.0).abs() * 4.0
-        rsi_score = rsi_score.clip(lower=0.0, upper=100.0)
+        # 1. Compute Technical Momentum (30% weight) via compute_momentum_score
+        momentum_scores = []
+        for _, row in df_filtered.iterrows():
+            try:
+                m_score = compute_momentum_score(row.to_dict())
+            except Exception:
+                # Fallback calculation if partial dictionary
+                rsi_val = float(row.get("current_rsi", 50.0))
+                p_val = float(row.get("price", 100.0))
+                d_val = float(row.get("dma_50", 100.0))
+                v_val = float(row.get("volume_ratio", 1.0))
+                m_val = float(row.get("macd_histogram", 0.0))
+                atr_val = float(row.get("atr_14") or row.get("atr") or (p_val * 0.02 if p_val > 0 else 1.0))
+                if atr_val <= 0:
+                    atr_val = p_val * 0.02 if p_val > 0 else 1.0
 
-        # 50 DMA Proximity score
-        price_vals = df_filtered["price"]
-        dma_50_vals = df_filtered["dma_50"]
-        proximity = (price_vals / dma_50_vals - 1.0).abs()
-        proximity_score = 100.0 - proximity * 500.0
-        proximity_score = proximity_score.clip(lower=0.0, upper=100.0)
+                r_s = max(0.0, min(100.0, 100.0 - abs(rsi_val - 50.0) * 4.0))
+                prox = abs(p_val / d_val - 1.0) if d_val > 0 else 0.0
+                p_s = max(0.0, min(100.0, 100.0 - prox * 500.0))
+                v_s = max(0.0, min(100.0, v_val * 50.0))
+                m_s = max(0.0, min(100.0, 50.0 + (m_val / atr_val) * 200.0))
+                raw_m = (r_s + p_s + v_s + m_s) / 4.0
+                sw = 1.0 / (1.0 + math.exp(-(raw_m - 55.0) / 5.0))
+                m_score = raw_m * (0.5 + 0.5 * sw)
+            momentum_scores.append(round(m_score, 4))
 
-        # Volume score
-        vol_ratio_vals = df_filtered["volume_ratio"]
-        volume_score = vol_ratio_vals * 50.0
-        volume_score = volume_score.clip(lower=0.0, upper=100.0)
-
-        # MACD score
-        macd_hist_vals = df_filtered.get("macd_histogram", pd.Series(0.0, index=df_filtered.index))
-        macd_score = 50.0 + macd_hist_vals * 200.0
-        macd_score = macd_score.clip(lower=0.0, upper=100.0)
-
-        raw_momentum = (rsi_score + proximity_score + volume_score + macd_score) / 4.0
-        
-        # Sigmoid transition instead of hard floor (Task 6.4)
-        pct_normalized = self.normalize_percentile(raw_momentum)
-        sigmoid_weights = 1.0 / (1.0 + np.exp(-(raw_momentum - 55.0) / 5.0))
-        df_filtered["momentum_score"] = pct_normalized * sigmoid_weights
+        df_filtered["momentum_score"] = momentum_scores
 
         # 2. Risk-Adjusted Expectancy (40% weight)
         mean_exp = df_filtered["expectancy_pct"].mean()

@@ -224,8 +224,8 @@ class RollingHMM:
         vix_df = vix_ticker.history(start=start_date.isoformat(), end=end_date.isoformat(), interval="1d")
         
         if spy_df.empty or vix_df.empty:
-            print("[HMM WARNING] Failed to download data for regime estimation. Defaulting to bull.")
-            return "bull"
+            print("[HMM WARNING] Failed to download data for regime estimation. Setting regime to unknown.")
+            return "unknown"
             
         features_df, raw_df = self.prepare_features(spy_df, vix_df)
         X = features_df.values

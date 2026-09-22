@@ -1,8 +1,15 @@
 """
 Seed Ticker Metrics — Strategy 1.3 Rev B
 ========================================
-Calculates Strategy 1.1 Beta backtest metrics for all S&P 500 + Nasdaq-100 tickers
+Calculates baseline swing metrics for all S&P 500 + Nasdaq-100 tickers
 and seeds/updates them in the Supabase ticker_metrics table.
+
+PROVENANCE NOTE (P0-6):
+The metrics computed here represent a generic ticker swing baseline prior
+(Strategy 1.1 Pullback Recovery 3R fixed backtest over historical price history).
+They serve as a ticker-level historical prior across the universe, and MUST NOT
+be represented as strategy-specific performance for other active strategies (such as
+Trend Following, 52-Week High Breakout, PEAD, Cross-Sectional Momentum, or Sector Rotation).
 
 Usage:
     python -m jobs.seed_metrics [--force-refresh] [--tickers AAPL,MSFT,TSLA]

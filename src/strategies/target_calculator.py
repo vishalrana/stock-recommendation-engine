@@ -221,6 +221,12 @@ def calculate_targets(
         cand_t2 = round(max(entry * (1.0 + cfg["fixed_t2"]), t2_atr), 2)
         cand_t3 = round(max(entry * (1.0 + cfg["fixed_t3"]), t3_atr), 2)
 
+    # Ensure strict target ordering: entry < cand_t1 < cand_t2 < cand_t3
+    if not (entry < cand_t1 < cand_t2 < cand_t3):
+        cand_t1 = max(cand_t1, round(entry * 1.01, 2))
+        cand_t2 = max(cand_t2, round(cand_t1 * 1.01, 2))
+        cand_t3 = max(cand_t3, round(cand_t2 * 1.01, 2))
+
     t1_pct = (cand_t1 - entry) / entry if entry > 0 else 0.0
     t2_pct = (cand_t2 - entry) / entry if entry > 0 else 0.0
     t3_pct = (cand_t3 - entry) / entry if entry > 0 else 0.0
@@ -236,37 +242,53 @@ def calculate_targets(
         rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_pct, hold, price_df, sector=sector)
         rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_pct, hold, price_df, sector=sector)
 
+    # Monotonic reach probability enforcement: farther targets cannot have higher reach prob over same holding period
+    rp_t2 = min(rp_t2, rp_t1)
+    rp_t3 = min(rp_t3, rp_t2)
+
     t1_min = cfg["t1_min"]
     t2_min = cfg["t2_min"]
+    t3_min = cfg.get("t3_min", T3_REACH_PROB_SURVIVAL_THRESHOLD)
 
-    # Layer 2 & 3 — Indicative Target Selection & Analytical Weighted R:R
-    # Targets and Stop Loss are indicative suggestions (NOT execution levels or qualification gates).
-    # Reach probabilities and R:R are analytical outputs and do NOT reject the stock.
-    t2_survives = (rp_t2 >= t2_min)
-    t3_survives = (rp_t3 >= T3_REACH_PROB_SURVIVAL_THRESHOLD)
+    # Layer 2 & 3 — Target Hierarchy & Scale-Out Weights (P0-4)
+    # T1 must meet t1_min for higher targets to be considered.
+    # No T2 without T1; no T3 without T1 and T2.
+    t1_survives = (rp_t1 >= t1_min)
+    t2_survives = t1_survives and (rp_t2 >= t2_min)
+    t3_survives = t2_survives and (rp_t3 >= t3_min)
 
-    # Determine surviving targets and scale-out weights per Master Spec v2.3+
-    if t2_survives and t3_survives:
+    rejection_reason = None
+    if t1_survives and t2_survives and t3_survives:
         # All three survive: 50% at T1, 30% at T2, 20% at T3
         t1, t2, t3 = cand_t1, cand_t2, cand_t3
         weights_label = "50/30/20"
         weighted_reward = 0.50 * (t1 - entry) + 0.30 * (t2 - entry) + 0.20 * (t3 - entry)
         t2_pct = round((t2 / entry - 1.0) * 100.0, 1)
         t3_pct = round((t3 / entry - 1.0) * 100.0, 1)
-    elif t2_survives and not t3_survives:
+    elif t1_survives and t2_survives and not t3_survives:
         # T1 and T2 survive, T3 pruned: 60% at T1, 40% at T2, 0% at T3
         t1, t2, t3 = cand_t1, cand_t2, None
         weights_label = "60/40/0"
         weighted_reward = 0.60 * (t1 - entry) + 0.40 * (t2 - entry)
         t2_pct = round((t2 / entry - 1.0) * 100.0, 1)
         t3_pct = None
-    else:
-        # Only T1 survives (T2 failed): 70% at T1, 30% runner to breakeven
+        rejection_reason = f"T3 pruned (reach prob {rp_t3:.1%} < threshold {t3_min:.1%})"
+    elif t1_survives and not t2_survives:
+        # Only T1 survives: 70% at T1, 30% runner to breakeven
         t1, t2, t3 = cand_t1, None, None
         weights_label = "70/30/0"
         weighted_reward = 0.70 * (t1 - entry)
         t2_pct = None
         t3_pct = None
+        rejection_reason = f"T2/T3 pruned (T2 reach prob {rp_t2:.1%} < min {t2_min:.1%})"
+    else:
+        # T1 did not survive its minimum: T1 kept as sole indicative target; T2 & T3 pruned
+        t1, t2, t3 = cand_t1, None, None
+        weights_label = "70/30/0"
+        weighted_reward = 0.70 * (t1 - entry)
+        t2_pct = None
+        t3_pct = None
+        rejection_reason = f"T1 reach prob {rp_t1:.1%} below minimum {t1_min:.1%}"
 
     weighted_rr = round(weighted_reward / risk, 2)
 
@@ -286,6 +308,7 @@ def calculate_targets(
         scale_out_weights=weights_label,
         weighted_rr_honest=weighted_rr,
         is_valid=True,
+        rejection_reason=rejection_reason,
         reach_prob_raw=round(raw_t1, 4),
         reach_prob_adjusted=round(rp_t1, 4),
     )

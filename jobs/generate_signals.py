@@ -1060,6 +1060,13 @@ def run_scan(
                     f"'{winner_sig['strategy']}' (canonical score {winner_sig['composite_score']:.2f}) vs "
                     f"'{strategy_name}' (canonical score {score:.2f}). Discarding lower-ranked '{strategy_name}' candidate."
                 )
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Strategy deduplication: preferred '{winner_sig['strategy']}' (Score {winner_sig['composite_score']:.1f} vs {score:.1f})"
+                sig["allocated_dollars"] = 0.0
+                sig["exact_shares"] = 0.0
+                sig["max_shares"] = 0
+                sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
+                rejected_signals_to_insert.append(sig)
                 continue
             seen_qualified_strategy_tickers[t_upper] = sig
 

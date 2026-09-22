@@ -221,11 +221,11 @@ def calculate_targets(
         cand_t2 = round(max(entry * (1.0 + cfg["fixed_t2"]), t2_atr), 2)
         cand_t3 = round(max(entry * (1.0 + cfg["fixed_t3"]), t3_atr), 2)
 
-    # Ensure strict target ordering: entry < cand_t1 < cand_t2 < cand_t3
-    if not (entry < cand_t1 < cand_t2 < cand_t3):
-        cand_t1 = max(cand_t1, round(entry * 1.01, 2))
-        cand_t2 = max(cand_t2, round(cand_t1 * 1.01, 2))
-        cand_t3 = max(cand_t3, round(cand_t2 * 1.01, 2))
+        # Ensure strict target ordering: entry < cand_t1 < cand_t2 < cand_t3
+        if not (entry < cand_t1 < cand_t2 < cand_t3):
+            cand_t1 = max(cand_t1, round(entry * 1.01, 2))
+            cand_t2 = max(cand_t2, round(cand_t1 * 1.01, 2))
+            cand_t3 = max(cand_t3, round(cand_t2 * 1.01, 2))
 
     t1_pct = (cand_t1 - entry) / entry if entry > 0 else 0.0
     t2_pct = (cand_t2 - entry) / entry if entry > 0 else 0.0

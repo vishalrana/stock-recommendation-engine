@@ -35,8 +35,9 @@ class TestRecommendationSimplification(unittest.TestCase):
         """Test that tier assignment evaluates composite score and honest R:R without cash."""
         self.assertEqual(assign_tier(82.0, 2.5), "Strong Buy")
         self.assertEqual(assign_tier(72.0, 2.1), "Buy")
-        self.assertEqual(assign_tier(45.0, 3.5), "Buy")  # High R:R rescue rule
-        self.assertEqual(assign_tier(55.0, 1.2), "Rejected")  # Below both score and R:R thresholds
+        self.assertEqual(assign_tier(65.0, 0.5), "Buy")  # Low R:R does NOT disqualify valid score
+        self.assertEqual(assign_tier(45.0, 3.5), "Rejected")  # R:R is analytical only, does not rescue low score
+        self.assertEqual(assign_tier(55.0, 1.2), "Rejected")  # Below score threshold
 
     def test_no_cash_rejection_in_sizing(self):
         """Test that candidate recommendations cannot be blocked by cash balance."""

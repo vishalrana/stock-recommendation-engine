@@ -134,7 +134,9 @@ def run_acceptance_tests():
     print(f"  Is Valid: {res_d.is_valid}")
     print(f"  Rejection Reason: {res_d.rejection_reason}")
 
-    assert res_d.is_valid is False, "Scenario D should be rejected"
+    # Analytical decoupling: target reach probability is analytical only and does not disqualify recommendation
+    assert res_d.is_valid is True, "Target calculation is analytical only and does not disqualify"
+    assert "below minimum" in res_d.rejection_reason, f"Expected reason 'below minimum', got: {res_d.rejection_reason}"
     print("  --> PASS Scenario D")
 
     print("\n" + "=" * 80)

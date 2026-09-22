@@ -78,7 +78,7 @@ class TestDecommissioningAndIsolation(unittest.TestCase):
         # Should not call archive_current_signals (legacy exit runner)
         self.assertNotIn("def archive_current_signals", content)
         self.assertNotIn("archive_current_signals(", content)
-        self.assertIn("refresh_active_signals_prices", content)
+        self.assertNotIn("def refresh_active_signals_prices", content)
 
     def test_deprecated_db_functions_are_safe_noop(self):
         """Verify legacy exit and pnl functions in supabase_client are safe no-ops."""

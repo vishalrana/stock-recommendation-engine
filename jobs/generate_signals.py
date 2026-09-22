@@ -248,43 +248,6 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
     return list(best.values())
 
 
-def refresh_active_signals_prices(supabase):
-    """
-    Refresh current market prices on active recommendations.
-    Evaluates stop losses without modifying portfolio P&L or trading.
-    """
-    try:
-        from jobs.supabase_client import get_latest_bar, update_signals_price, update_signals_status, update_history_outcome
-        
-        res = supabase.table("signals").select("id, ticker, status, stop_loss, price").in_("status", ["open", "pending"]).execute()
-        current_signals = res.data or []
-        
-        if not current_signals:
-            logger.info("No active recommendations in database to refresh.")
-            return
-            
-        logger.info("Refreshing market prices for %d active recommendations...", len(current_signals))
-        for existing in current_signals:
-            ticker = existing["ticker"].upper()
-            bar = get_latest_bar(ticker)
-            if bar and "close" in bar:
-                close_p = float(bar["close"])
-                low_p = float(bar.get("low", close_p))
-                signal_id = existing.get("id")
-                scan_date = existing.get("scan_date")
-                
-                if stop_loss > 0 and low_p <= stop_loss:
-                    exit_p = min(close_p, stop_loss)
-                    logger.info(f"[PRICE REFRESH STOP HIT] {ticker}: low ${low_p:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
-                    update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit", signal_id=signal_id)
-                    update_history_outcome(ticker, "stopped", exit_p, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Stop loss hit")
-                else:
-                    update_signals_price(ticker, close_p, signal_id=signal_id)
-                    logger.info(f"[PRICE REFRESH] {ticker}: updated to ${close_p:.2f}")
-    except Exception as e:
-        logger.warning("Could not refresh active signals prices: %s", e)
-
-
 def reconcile_recommendation_lifecycle(
     supabase,
     qualified_tickers: set,

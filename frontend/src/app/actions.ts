@@ -106,13 +106,22 @@ export async function fetchLiveQuotesAction(
 
   await Promise.all(
     uniqueTickers.map(async (symbol) => {
+      const diag: {
+        symbol: string;
+        tiingo?: { attempted: boolean; status?: number; price?: number; failure?: string };
+        finnhub?: { attempted: boolean; status?: number; price?: number; failure?: string };
+        yahoo?: { attempted: boolean; status?: number; price?: number; failure?: string };
+      } = { symbol };
+
       // 1. Tiingo IEX quote (primary provider — live real-time trades only)
-      if (tiingoKey) {
+      if (tiingoKey && tiingoKey.trim().length > 0) {
+        diag.tiingo = { attempted: true };
         try {
           const res = await fetch(
-            `https://api.tiingo.com/iex/${encodeURIComponent(symbol)}?token=${tiingoKey}`,
+            `https://api.tiingo.com/iex/${encodeURIComponent(symbol)}?token=${tiingoKey.trim()}`,
             { cache: 'no-store', signal: AbortSignal.timeout(6000) }
           );
+          diag.tiingo.status = res.status;
           if (res.status === 200) {
             const data = await res.json();
             if (Array.isArray(data) && data.length > 0) {
@@ -120,36 +129,61 @@ export async function fetchLiveQuotesAction(
               // Strictly require live traded quote: last or tngoLast (NEVER prevClose or previous close)
               const price = row.last ?? row.tngoLast;
               if (price !== undefined && price !== null && Number(price) > 0) {
-                results[symbol] = { price: Math.round(Number(price) * 100) / 100 };
+                const finalPrice = Math.round(Number(price) * 100) / 100;
+                diag.tiingo.price = finalPrice;
+                console.info(`[Live Quote] ${symbol} retrieved via Tiingo: $${finalPrice}`);
+                results[symbol] = { price: finalPrice };
                 return;
+              } else {
+                diag.tiingo.failure = 'no_last_or_tngoLast_price';
               }
+            } else {
+              diag.tiingo.failure = 'empty_response_array';
             }
+          } else {
+            diag.tiingo.failure = `http_${res.status}`;
           }
-        } catch (err) {
-          console.warn(`[Live Quote] Tiingo error for ${symbol}:`, err);
+        } catch (err: any) {
+          diag.tiingo.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+          console.warn(`[Live Quote] Tiingo error for ${symbol}: ${diag.tiingo.failure}`);
         }
+      } else {
+        diag.tiingo = { attempted: false, failure: 'missing_tiingo_api_key' };
       }
 
       // 2. Finnhub quote (secondary provider)
-      if (finnhubKey) {
+      if (finnhubKey && finnhubKey.trim().length > 0) {
+        diag.finnhub = { attempted: true };
         try {
           const res = await fetch(
-            `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${finnhubKey}`,
+            `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${finnhubKey.trim()}`,
             { cache: 'no-store', signal: AbortSignal.timeout(6000) }
           );
+          diag.finnhub.status = res.status;
           if (res.status === 200) {
             const data = await res.json();
             if (data && typeof data.c === 'number' && data.c > 0) {
-              results[symbol] = { price: Math.round(Number(data.c) * 100) / 100 };
+              const finalPrice = Math.round(Number(data.c) * 100) / 100;
+              diag.finnhub.price = finalPrice;
+              console.info(`[Live Quote] ${symbol} retrieved via Finnhub: $${finalPrice}`);
+              results[symbol] = { price: finalPrice };
               return;
+            } else {
+              diag.finnhub.failure = 'c_price_missing_or_zero';
             }
+          } else {
+            diag.finnhub.failure = `http_${res.status}`;
           }
-        } catch (err) {
-          console.warn(`[Live Quote] Finnhub error for ${symbol}:`, err);
+        } catch (err: any) {
+          diag.finnhub.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+          console.warn(`[Live Quote] Finnhub error for ${symbol}: ${diag.finnhub.failure}`);
         }
+      } else {
+        diag.finnhub = { attempted: false, failure: 'missing_finnhub_api_key' };
       }
 
       // 3. Yahoo Finance v8 chart fallback (strictly regularMarketPrice only)
+      diag.yahoo = { attempted: true };
       try {
         const res = await fetch(
           `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`,
@@ -163,26 +197,211 @@ export async function fetchLiveQuotesAction(
             },
           }
         );
+        diag.yahoo.status = res.status;
         if (res.status === 200) {
           const data = await res.json();
           const meta = data?.chart?.result?.[0]?.meta;
           // NEVER accept previousClose or chartPreviousClose as live quotes
           const rawPrice = meta?.regularMarketPrice;
           if (typeof rawPrice === 'number' && !isNaN(rawPrice) && rawPrice > 0) {
-            results[symbol] = { price: Math.round(rawPrice * 100) / 100 };
+            const finalPrice = Math.round(rawPrice * 100) / 100;
+            diag.yahoo.price = finalPrice;
+            console.info(`[Live Quote] ${symbol} retrieved via Yahoo: $${finalPrice}`);
+            results[symbol] = { price: finalPrice };
             return;
+          } else {
+            diag.yahoo.failure = 'regularMarketPrice_missing_or_invalid';
           }
+        } else if (res.status === 403) {
+          diag.yahoo.failure = 'forbidden_403_ip_blocked';
+        } else if (res.status === 429) {
+          diag.yahoo.failure = 'rate_limit_429';
+        } else {
+          diag.yahoo.failure = `http_${res.status}`;
         }
-      } catch (err) {
-        console.warn(`[Live Quote] Yahoo fallback error for ${symbol}:`, err);
+      } catch (err: any) {
+        diag.yahoo.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+        console.warn(`[Live Quote] Yahoo fallback error for ${symbol}: ${diag.yahoo.failure}`);
       }
 
-      // Fallback: quote unavailable
+      // All providers failed: log complete diagnostic breakdown safely
+      console.warn(`[Live Quote All Providers Failed] ${symbol}:`, JSON.stringify(diag));
       results[symbol] = { error: 'Quote unavailable' };
     })
   );
 
   return results;
+}
+
+export async function runQuoteDiagnostics(
+  tickers: string[] = ['GDDY', 'ADM', 'PFG']
+) {
+  const tiingoKey = process.env.TIINGO_API_KEY;
+  const finnhubKey = process.env.FINNHUB_API_KEY;
+
+  const results: Record<string, any> = {};
+
+  for (const rawTicker of tickers) {
+    const symbol = rawTicker.trim().toUpperCase();
+    results[symbol] = {
+      tiingo: {
+        configured: Boolean(tiingoKey && tiingoKey.trim().length > 0),
+        keyLength: tiingoKey ? tiingoKey.trim().length : 0,
+        httpStatus: null as number | null,
+        extractedPrice: null as number | null,
+        failureReason: null as string | null,
+        rawFields: null as any,
+        error: null as string | null,
+      },
+      finnhub: {
+        configured: Boolean(finnhubKey && finnhubKey.trim().length > 0),
+        keyLength: finnhubKey ? finnhubKey.trim().length : 0,
+        httpStatus: null as number | null,
+        extractedPrice: null as number | null,
+        failureReason: null as string | null,
+        rawFields: null as any,
+        error: null as string | null,
+      },
+      yahoo: {
+        httpStatus: null as number | null,
+        extractedPrice: null as number | null,
+        failureReason: null as string | null,
+        rawFields: null as any,
+        error: null as string | null,
+      },
+    };
+
+    // 1. Tiingo
+    if (!tiingoKey || tiingoKey.trim().length === 0) {
+      results[symbol].tiingo.failureReason = 'missing_key';
+    } else {
+      try {
+        const res = await fetch(
+          `https://api.tiingo.com/iex/${encodeURIComponent(symbol)}?token=${tiingoKey.trim()}`,
+          { cache: 'no-store', signal: AbortSignal.timeout(6000) }
+        );
+        results[symbol].tiingo.httpStatus = res.status;
+        if (res.status === 200) {
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            const row = data[0];
+            results[symbol].tiingo.rawFields = {
+              hasLast: row.last !== undefined && row.last !== null,
+              last: row.last,
+              hasTngoLast: row.tngoLast !== undefined && row.tngoLast !== null,
+              tngoLast: row.tngoLast,
+              prevClose: row.prevClose,
+            };
+            const price = row.last ?? row.tngoLast;
+            if (price !== undefined && price !== null && Number(price) > 0) {
+              results[symbol].tiingo.extractedPrice = Math.round(Number(price) * 100) / 100;
+            } else {
+              results[symbol].tiingo.failureReason = 'no_live_price_field';
+            }
+          } else {
+            results[symbol].tiingo.failureReason = 'empty_response_array';
+          }
+        } else if (res.status === 401) {
+          results[symbol].tiingo.failureReason = 'unauthorized_401';
+        } else if (res.status === 403) {
+          results[symbol].tiingo.failureReason = 'forbidden_403';
+        } else if (res.status === 429) {
+          results[symbol].tiingo.failureReason = 'rate_limit_429';
+        } else {
+          results[symbol].tiingo.failureReason = `http_${res.status}`;
+        }
+      } catch (err: any) {
+        results[symbol].tiingo.error = err.message || String(err);
+        results[symbol].tiingo.failureReason = 'network_or_timeout';
+      }
+    }
+
+    // 2. Finnhub
+    if (!finnhubKey || finnhubKey.trim().length === 0) {
+      results[symbol].finnhub.failureReason = 'missing_key';
+    } else {
+      try {
+        const res = await fetch(
+          `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${finnhubKey.trim()}`,
+          { cache: 'no-store', signal: AbortSignal.timeout(6000) }
+        );
+        results[symbol].finnhub.httpStatus = res.status;
+        if (res.status === 200) {
+          const data = await res.json();
+          results[symbol].finnhub.rawFields = {
+            hasC: typeof data?.c === 'number',
+            c: data?.c,
+            d: data?.d,
+            dp: data?.dp,
+          };
+          if (data && typeof data.c === 'number' && data.c > 0) {
+            results[symbol].finnhub.extractedPrice = Math.round(Number(data.c) * 100) / 100;
+          } else {
+            results[symbol].finnhub.failureReason = 'c_is_zero_or_missing';
+          }
+        } else if (res.status === 401) {
+          results[symbol].finnhub.failureReason = 'unauthorized_401';
+        } else if (res.status === 403) {
+          results[symbol].finnhub.failureReason = 'forbidden_403';
+        } else if (res.status === 429) {
+          results[symbol].finnhub.failureReason = 'rate_limit_429';
+        } else {
+          results[symbol].finnhub.failureReason = `http_${res.status}`;
+        }
+      } catch (err: any) {
+        results[symbol].finnhub.error = err.message || String(err);
+        results[symbol].finnhub.failureReason = 'network_or_timeout';
+      }
+    }
+
+    // 3. Yahoo Finance
+    try {
+      const res = await fetch(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`,
+        {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(6000),
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'application/json',
+          },
+        }
+      );
+      results[symbol].yahoo.httpStatus = res.status;
+      if (res.status === 200) {
+        const data = await res.json();
+        const meta = data?.chart?.result?.[0]?.meta;
+        results[symbol].yahoo.rawFields = {
+          hasRegularMarketPrice: typeof meta?.regularMarketPrice === 'number',
+          regularMarketPrice: meta?.regularMarketPrice,
+          chartPreviousClose: meta?.chartPreviousClose,
+          previousClose: meta?.previousClose,
+        };
+        const rawPrice = meta?.regularMarketPrice;
+        if (typeof rawPrice === 'number' && !isNaN(rawPrice) && rawPrice > 0) {
+          results[symbol].yahoo.extractedPrice = Math.round(rawPrice * 100) / 100;
+        } else {
+          results[symbol].yahoo.failureReason = 'regularMarketPrice_missing_or_invalid';
+        }
+      } else if (res.status === 403) {
+        results[symbol].yahoo.failureReason = 'forbidden_403_ip_blocked';
+      } else if (res.status === 429) {
+        results[symbol].yahoo.failureReason = 'rate_limit_429';
+      } else {
+        results[symbol].yahoo.failureReason = `http_${res.status}`;
+      }
+    } catch (err: any) {
+      results[symbol].yahoo.error = err.message || String(err);
+      results[symbol].yahoo.failureReason = 'network_or_timeout';
+    }
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    testedTickers: tickers,
+    results,
+  };
 }
 
 export interface TriggerRefreshIdeasResult {

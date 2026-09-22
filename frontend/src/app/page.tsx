@@ -1,30 +1,12 @@
 import { fetchPortfolioSignals, fetchClosedSignals, fetchScanHistory, getLatestScanLog } from '../lib/database';
 import { Recommendation, ScanHistoryEntry, ScanLog } from '../types/database';
 import StockIdeasApp from '../components/stock-ideas-app';
-import { runQuoteDiagnostics } from './actions';
 
 // Force dynamic rendering — never prerender at build time
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export default async function Page({
-  searchParams,
-}: {
-  searchParams?: Promise<{ diagnostics?: string; tickers?: string }>;
-}) {
-  const params = searchParams ? await searchParams : undefined;
-  if (params?.diagnostics === 'quotes') {
-    const rawTickers = params?.tickers ? params.tickers.split(',') : ['GDDY', 'ADM', 'PFG'];
-    const diag = await runQuoteDiagnostics(rawTickers);
-    return (
-      <main className="min-h-screen bg-[#0b0f19] text-emerald-400 p-8 font-mono text-xs overflow-auto">
-        <h1 className="text-sm font-bold text-slate-100 mb-4">Production Quote Diagnostics</h1>
-        <pre className="p-4 bg-slate-900 border border-slate-800 rounded-lg">
-          {JSON.stringify(diag, null, 2)}
-        </pre>
-      </main>
-    );
-  }
+export default async function Page() {
 
   let activeIdeas: Recommendation[] = [];
   let closedIdeas: Recommendation[] = [];

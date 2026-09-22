@@ -147,17 +147,19 @@ export default function StockIdeasApp({
     try {
       const results = await fetchLiveQuotesAction(tickers);
 
+      const validQuotes: Record<string, number> = {};
       let updatedCount = 0;
-      setLivePrices((prev) => {
-        const next = { ...prev };
-        for (const [ticker, res] of Object.entries(results)) {
-          if (res && typeof res.price === 'number' && !isNaN(res.price) && res.price > 0) {
-            next[ticker.toUpperCase()] = res.price;
-            updatedCount++;
-          }
+
+      for (const [ticker, res] of Object.entries(results || {})) {
+        if (res && typeof res.price === 'number' && !isNaN(res.price) && res.price > 0) {
+          validQuotes[ticker.toUpperCase()] = res.price;
+          updatedCount++;
         }
-        return next;
-      });
+      }
+
+      if (updatedCount > 0) {
+        setLivePrices((prev) => ({ ...prev, ...validQuotes }));
+      }
 
       if (updatedCount === tickers.length) {
         setPriceStatus('updated');

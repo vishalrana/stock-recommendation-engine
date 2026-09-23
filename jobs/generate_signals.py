@@ -531,25 +531,26 @@ def run_scan(
         else:
             start_date_dt = end_date_dt - timedelta(days=500)
             logger.info(f"INCREMENTAL: No cache found. Full download from {start_date_dt} to {end_date_dt}")
-        if start_date_dt <= end_date_dt:
+        if not dry_run and start_date_dt <= end_date_dt:
             cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+            logger.info(f"Incremental refresh completed in {time.time() - t_download_start:.1f}s")
         else:
-            logger.info("INCREMENTAL: Cache already covers today. No download needed.")
-        logger.info(f"Incremental refresh completed in {time.time() - t_download_start:.1f}s")
+            logger.info("INCREMENTAL: Skipping network download (dry_run=%s, start_date=%s, end_date=%s).", dry_run, start_date_dt, end_date_dt)
 
     else:  # local
-        if cache_manager.is_stale(max_age_trading_days=2):
-            last_cached = cache_manager.get_last_cached_date()
-            if last_cached:
-                start_date_dt = last_cached + timedelta(days=1)
-                logger.info(f"LOCAL: Cache stale (last: {last_cached}). Downloading {start_date_dt} to {end_date_dt}...")
-            else:
-                start_date_dt = end_date_dt - timedelta(days=500)
-                logger.info(f"LOCAL: No cache found. Full download from {start_date_dt}...")
+        last_cached = cache_manager.get_last_cached_date()
+        if last_cached is None:
+            start_date_dt = end_date_dt - timedelta(days=500)
+            logger.info(f"LOCAL: No cache found. Full download from {start_date_dt}...")
+            cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+            logger.info(f"Local refresh completed in {time.time() - t_download_start:.1f}s")
+        elif not dry_run and cache_manager.is_stale(max_age_trading_days=2):
+            start_date_dt = last_cached + timedelta(days=1)
+            logger.info(f"LOCAL: Cache stale (last: {last_cached}). Downloading {start_date_dt} to {end_date_dt}...")
             cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
             logger.info(f"Local refresh completed in {time.time() - t_download_start:.1f}s")
         else:
-            logger.info("LOCAL: Cache is fresh (last: %s). Skipping downloads.", cache_manager.get_last_cached_date())
+            logger.info("LOCAL: Using existing cache (last: %s). Skipping downloads.", last_cached)
 
     daily_files = glob.glob(os.path.join(by_date_dir, "*.parquet"))
     total_files = len(daily_files)

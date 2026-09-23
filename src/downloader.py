@@ -109,6 +109,12 @@ def fetch_ohlcv_data(
         if not all(col in data.columns for col in required_cols):
             logger.warning(f"{ticker}: Missing required columns. Have: {list(data.columns)}")
             return None
+
+        # Drop incomplete rows where CLOSE price is missing/NaN (e.g. unformed intraday session bars)
+        data = data.dropna(subset=["CLOSE"])
+        if data.empty:
+            logger.warning(f"{ticker}: All rows have NaN CLOSE prices")
+            return None
         
         logger.debug(f"{ticker}: Downloaded {len(data)} rows")
         return data

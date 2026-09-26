@@ -243,3 +243,65 @@ SCALE_OUT_WEIGHTS = {
 
 # Minimum valid historical sliding windows required for empirical reach probability
 MIN_REACH_PROB_WINDOWS: int = 20
+
+# ==============================================================================
+# 8. STRATEGY STOP LOSS CONFIGURATION
+# Canonical Strategy-Specific ATR Multipliers & Minimum Percentage Stop Floors
+# Noise Floor: Prevents stops from being placed tighter than the strategy floor.
+# Hard Risk Ceiling: 7.0% maximum risk ceiling enforced downstream in pipeline.
+# ==============================================================================
+STRATEGY_STOP_CONFIG: Dict[str, Dict[str, float]] = {
+    "trend_following": {
+        "atr_multiplier": 2.5,
+        "stop_floor": 0.06,   # 6.0% minimum distance floor
+    },
+    "52w_high_breakout": {
+        "atr_multiplier": 2.0,
+        "stop_floor": 0.05,   # 5.0% minimum distance floor
+    },
+    "pullback_recovery": {
+        "atr_multiplier": 1.5,
+        "stop_floor": 0.04,   # 4.0% minimum distance floor
+    },
+    "pead": {
+        "atr_multiplier": 2.0,
+        "stop_floor": 0.05,   # 5.0% minimum distance floor
+    },
+    "cross_sectional_momentum": {
+        "atr_multiplier": 2.0,
+        "stop_floor": 0.05,   # 5.0% minimum distance floor
+    },
+    "sector_rotation": {
+        "atr_multiplier": 1.8,
+        "stop_floor": 0.045,  # 4.5% minimum distance floor
+    },
+    "mean_reversion": {
+        "atr_multiplier": 1.0,
+        "stop_floor": 0.03,   # 3.0% minimum distance floor
+    },
+}
+
+MAX_STOP_LOSS_PCT: float = 0.07  # 7.0% maximum risk ceiling across all strategies
+
+
+def normalize_strategy_key(strategy: str) -> str:
+    """Normalize any strategy string variant to its canonical configuration key."""
+    if not strategy:
+        return "trend_following"
+    s = str(strategy).strip().lower().replace("-", "_").replace(" ", "_")
+    if "52" in s or "breakout" in s or "high" in s:
+        return "52w_high_breakout"
+    if "trend" in s:
+        return "trend_following"
+    if "pullback" in s:
+        return "pullback_recovery"
+    if "cross" in s or "momentum" in s:
+        return "cross_sectional_momentum"
+    if "pead" in s or "drift" in s or "earnings" in s:
+        return "pead"
+    if "sector" in s or "rotation" in s:
+        return "sector_rotation"
+    if "mean" in s or "reversion" in s:
+        return "mean_reversion"
+    return s
+

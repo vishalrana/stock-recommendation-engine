@@ -46,6 +46,7 @@ from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
 from src.strategies.target_calculator import calculate_targets
 from src.filters.earnings_filter import fetch_earnings_calendar, earnings_risk_filter
 from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
+from src.quant_config import STRATEGY_STOP_CONFIG, normalize_strategy_key
 
 
 def get_cache_mode(args) -> str:
@@ -987,10 +988,15 @@ def run_scan(
                 stop_loss = min_stop
                 sig["stop_loss"] = stop_loss
 
-            # Minimum stop distance floor: ensure at least 4.0% buffer
-            max_tight_stop = round(entry_price * 0.96, 2)
+            # Minimum stop distance floor: ensure at least strategy-specific canonical buffer
+            strat_key = normalize_strategy_key(strategy_name)
+            stop_cfg = STRATEGY_STOP_CONFIG.get(strat_key, {})
+            stop_floor_pct = float(stop_cfg.get("stop_floor", 0.04))
+            max_tight_stop = round(entry_price * (1.0 - stop_floor_pct), 2)
             if stop_loss > max_tight_stop:
-                logger.info(f"[STOP FLOOR] {sig['ticker']}: widening tight stop from ${stop_loss} to ${max_tight_stop} (4.0% minimum)")
+                logger.info(
+                    f"[STOP FLOOR] {sig['ticker']} ({strategy_name}): widening tight stop from ${stop_loss} to ${max_tight_stop} ({stop_floor_pct*100:.1f}% minimum)"
+                )
                 stop_loss = max_tight_stop
                 sig['stop_loss'] = stop_loss
 

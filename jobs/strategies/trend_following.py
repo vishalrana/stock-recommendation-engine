@@ -3,6 +3,7 @@ from typing import Optional, List
 import pandas as pd
 from jobs.strategies.base import StrategyInterface
 from src.utils.candidate_builder import build_candidate_from_row
+from src.quant_config import STRATEGY_STOP_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,9 @@ class TrendFollowingStrategy(StrategyInterface):
         
         # ATR-Based Stop Loss (Task 6.3)
         atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else 0.0
+        atr_mult = STRATEGY_STOP_CONFIG.get("trend_following", {}).get("atr_multiplier", 2.5)
         if atr > 0:
-            stop_loss = min(low_10, entry_price - 2.5 * atr)
+            stop_loss = min(low_10, entry_price - atr_mult * atr)
         else:
             stop_loss = min(low_10, sma200 * 0.98)
             

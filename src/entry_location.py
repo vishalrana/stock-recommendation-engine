@@ -240,48 +240,65 @@ def analyze_market_structure(
     extension_ema20_atr = round((price - ema20_val) / atr, 2) if atr > 0 else 0.0
     extension_dma50_pct = round(((price - dma50_val) / dma50_val) * 100.0, 2) if dma50_val > 0 else 0.0
 
-    # Proximities
-    is_near_support = price <= support_zone_high or atr_dist_support <= 1.0 or distance_to_support_pct <= 2.5
-    is_near_resistance = price >= resistance_zone_low or atr_dist_resistance <= 1.0 or distance_to_resistance_pct <= 2.5
+    # Proximities (physically bounded zones)
+    # is_near_support: price is at or just above support within support zone or within 2.5% / 1.0 ATR above support
+    is_near_support = (
+        (support_zone_low <= price <= support_zone_high)
+        or (0.0 <= distance_to_support_pct <= 2.5)
+        or (0.0 <= atr_dist_support <= 1.0)
+    )
+
+    # is_near_resistance: price is trading directly below resistance in the overhead friction zone
+    is_near_resistance = (
+        (resistance_zone_low <= price <= resistance_level)
+        or (0.0 <= distance_to_resistance_pct <= 2.5)
+        or (0.0 <= atr_dist_resistance <= 1.0)
+    )
 
     # Candle metrics
     candle_span = max(0.01, high_today - low_today)
     close_in_candle = (price - low_today) / candle_span  # 1.0 = closed at high, 0.0 = closed at low
+    lower_wick = min(open_today, price) - low_today
+    lower_wick_ratio = lower_wick / candle_span if candle_span > 0 else 0.0
     volume_avg = float(df["VOLUME"].rolling(20).mean().iloc[-1]) if "VOLUME" in df.columns and len(df) >= 20 else volume_today
     volume_ratio = volume_today / volume_avg if volume_avg > 0 else 1.0
 
     # --- Breakout Confirmation ---
     # True confirmed breakout:
     # 1. Closed strictly above resistance
-    # 2. Bullish close (closed in upper 50% of day's candle range)
-    # 3. Not an extreme extension above the breakout point
+    # 2. Bullish candle structure: either green candle or closed in upper 40% of range
+    # 3. Not an extreme extension (> 3.0 ATR) above the breakout point
     is_breakout_candle = price > resistance_level
     is_confirmed_breakout = (
         is_breakout_candle
-        and price >= resistance_level + 0.05 * atr
-        and close_in_candle >= 0.45
-        and (price - resistance_level) <= 2.5 * atr
+        and (price >= open_today or close_in_candle >= 0.40)
+        and (price - resistance_level) <= 3.0 * atr
     )
 
     # Failed breakout: high exceeded resistance but close collapsed back below resistance
     is_failed_breakout = (high_today >= resistance_level) and (price < resistance_level)
 
     # --- Support Stabilization vs Falling Knife ---
-    # Falling knife: breaking through support or closing at the dead low on elevated down volume
+    # Falling knife: breaking through support zone or heavy down volume closing at the dead low
     is_down_day = price < open_today
-    is_closing_at_low = close_in_candle < 0.25
+    is_closing_at_low = close_in_candle < 0.20
     is_breaking_support = price < support_zone_low
-    is_falling_knife = is_breaking_support or (is_down_day and is_closing_at_low and volume_ratio >= 1.1)
+    is_falling_knife = is_breaking_support or (is_down_day and is_closing_at_low and volume_ratio >= 1.25)
 
-    # Stabilized support: price held in or above support zone, closed in upper 40% of bar or green, not falling knife
+    # Stabilized support:
+    # Price held at or above support zone, not a falling knife, and exhibits one of:
+    # 1. Lower rejection wick / hammer structure (lower shadow >= 30% of day's candle)
+    # 2. Bullish close (green candle or closed in upper 35% of day's range)
+    has_rejection_wick = lower_wick_ratio >= 0.30
+    has_bullish_close = (price >= open_today) or (close_in_candle >= 0.35)
     is_stabilized_support = (
         (price >= support_zone_low)
-        and (close_in_candle >= 0.35 or price >= open_today)
+        and (has_rejection_wick or has_bullish_close)
         and not is_falling_knife
     )
 
-    # Extension flag (e.g. > 3.5 ATR above 20 EMA or > 25% above 50 DMA)
-    is_extended = extension_ema20_atr > 3.5 or extension_dma50_pct > 25.0
+    # Extension flag (e.g. > 3.5 ATR above 20 EMA or > 28% above 50 DMA)
+    is_extended = extension_ema20_atr > 3.5 or extension_dma50_pct > 28.0
 
     return MarketStructure(
         support_level=round(support_level, 2),
@@ -337,8 +354,8 @@ def evaluate_entry_location(
     strat = strategy_name.lower().replace("-", "_").replace(" ", "_")
 
     # 1. Universal Over-extension Gate
-    # A stock that is wildly extended (> 3.5 ATR above EMA20 or > 25% above DMA50) suffers asymmetric downside
-    if structure.extension_ema20_atr > 3.5 or structure.extension_dma50_pct > 25.0:
+    # A stock that is wildly extended (> 3.5 ATR above EMA20 or > 28% above DMA50) suffers asymmetric downside
+    if structure.extension_ema20_atr > 3.5 or structure.extension_dma50_pct > 28.0:
         return EntryLocationResult(
             state="WAIT",
             reason=f"Extended momentum: price is {structure.extension_ema20_atr:.1f} ATR above 20 EMA ({structure.extension_dma50_pct:.1f}% above 50 DMA). Await consolidation/pullback.",
@@ -371,7 +388,7 @@ def evaluate_entry_location(
                 reason=f"Approaching 52-week high resistance at ${structure.resistance_level:.2f} ({structure.distance_to_resistance_pct:.1f}% away). Await confirmed breakout.",
                 structure=structure,
             )
-        elif structure.price > structure.resistance_level + 2.5 * structure.atr:
+        elif structure.price > structure.resistance_level + 3.0 * structure.atr:
             return EntryLocationResult(
                 state="WAIT",
                 reason=f"Extended breakout: price has already run {structure.atr_dist_resistance:.1f} ATR past the breakout level. Await base.",
@@ -441,7 +458,7 @@ def evaluate_entry_location(
                     reason=f"Pullback approaching support at ${structure.support_level:.2f}, but stabilization not yet confirmed. Await bounce.",
                     structure=structure,
                 )
-        if structure.range_position_pct > 65.0:
+        if structure.range_position_pct > 70.0:
             return EntryLocationResult(
                 state="WAIT",
                 reason=f"Poor pullback location: price is near range high ({structure.range_position_pct:.0f}% of range). Await dip toward support.",
@@ -502,7 +519,7 @@ def evaluate_entry_location(
 
     # --- F. Cross-Sectional Momentum ---
     elif "cross" in strat or "momentum" in strat:
-        if structure.extension_dma50_pct > 20.0 or structure.extension_ema20_atr > 3.0:
+        if structure.extension_dma50_pct > 28.0 or structure.extension_ema20_atr > 3.5:
             return EntryLocationResult(
                 state="WAIT",
                 reason=f"Momentum leader overextended ({structure.extension_dma50_pct:.1f}% above 50 DMA, {structure.extension_ema20_atr:.1f} ATR above 20 EMA). Await base.",
@@ -511,7 +528,7 @@ def evaluate_entry_location(
         if structure.is_near_resistance and not structure.is_confirmed_breakout:
             return EntryLocationResult(
                 state="WAIT",
-                reason=f"Approaching resistance at ${structure.resistance_level:.2f}. Await breakout confirmation.",
+                reason=f"Approaching resistance at ${structure.resistance_level:.2f} ({structure.distance_to_resistance_pct:.1f}% away). Await breakout confirmation.",
                 structure=structure,
             )
         return EntryLocationResult(
@@ -525,7 +542,7 @@ def evaluate_entry_location(
         if structure.is_near_resistance and not structure.is_confirmed_breakout:
             return EntryLocationResult(
                 state="WAIT",
-                reason=f"Sector ETF approaching resistance at ${structure.resistance_level:.2f}. Await breakout confirmation.",
+                reason=f"Sector ETF approaching resistance at ${structure.resistance_level:.2f} ({structure.distance_to_resistance_pct:.1f}% away). Await breakout confirmation.",
                 structure=structure,
             )
         if structure.is_confirmed_breakout:

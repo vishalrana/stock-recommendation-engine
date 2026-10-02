@@ -28,11 +28,12 @@ def _save_cache(cache: dict) -> None:
     except Exception as e:
         logger.error(f"Failed to save earnings cache file: {e}")
 
-def get_ticker_earnings(ticker: str) -> Tuple[Optional[str], Optional[str]]:
+def get_ticker_earnings(ticker: str, as_of_date: Optional[datetime.date] = None) -> Tuple[Optional[str], Optional[str]]:
     """
     Get (last_earnings_date, next_earnings_date) for a ticker.
     Reads from local cache if valid; otherwise fetches from yfinance.
     Dates are returned as ISO string formats (YYYY-MM-DD) or None.
+    If as_of_date is provided, returns the most recent earnings date on or before as_of_date.
     """
     ticker = ticker.upper()
     cache = _load_cache()
@@ -40,7 +41,18 @@ def get_ticker_earnings(ticker: str) -> Tuple[Optional[str], Optional[str]]:
     
     if ticker in cache:
         entry = cache[ticker]
-        if now - entry.get("updated_at", 0) < TTL_SECONDS:
+        if as_of_date is not None:
+            as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)
+            all_dates = entry.get("all_earnings", [])
+            if all_dates:
+                past = [d for d in all_dates if d <= as_of_str]
+                if past:
+                    return max(past), entry.get("next_earnings")
+            last_e = entry.get("last_earnings")
+            if last_e and last_e <= as_of_str:
+                return last_e, entry.get("next_earnings")
+            return None, entry.get("next_earnings")
+        elif now - entry.get("updated_at", 0) < TTL_SECONDS:
             logger.debug(f"Earnings cache HIT for {ticker}")
             return entry.get("last_earnings"), entry.get("next_earnings")
             
@@ -48,6 +60,7 @@ def get_ticker_earnings(ticker: str) -> Tuple[Optional[str], Optional[str]]:
     logger.info(f"Earnings cache MISS for {ticker}, fetching from yfinance...")
     last_earnings = None
     next_earnings = None
+    all_earnings = []
     
     try:
         t = yf.Ticker(ticker)
@@ -55,7 +68,8 @@ def get_ticker_earnings(ticker: str) -> Tuple[Optional[str], Optional[str]]:
         # 1. Fetch last earnings date from earnings_dates index
         dates = t.earnings_dates
         if dates is not None and not dates.empty:
-            current_date = datetime.date.today()
+            current_date = as_of_date or datetime.date.today()
+            all_earnings = sorted(list({d.date().strftime("%Y-%m-%d") for d in dates.index}))
             past_dates = [d for d in dates.index if d.date() <= current_date]
             if past_dates:
                 last_earnings = max(past_dates).strftime("%Y-%m-%d")
@@ -78,6 +92,7 @@ def get_ticker_earnings(ticker: str) -> Tuple[Optional[str], Optional[str]]:
     cache[ticker] = {
         "last_earnings": last_earnings,
         "next_earnings": next_earnings,
+        "all_earnings": all_earnings,
         "updated_at": now
     }
     _save_cache(cache)

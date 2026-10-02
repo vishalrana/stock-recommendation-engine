@@ -9,10 +9,10 @@ from src.utils.candidate_builder import build_candidate_from_row
 logger = logging.getLogger(__name__)
 
 
-def get_last_earnings_date(ticker: str) -> Optional[datetime.date]:
+def get_last_earnings_date(ticker: str, as_of_date: Optional[datetime.date] = None) -> Optional[datetime.date]:
     """Fetch last earnings date from local cache or yfinance. Returns datetime.date or None."""
     from src.utils.earnings_cache import get_ticker_earnings
-    last_e_str, _ = get_ticker_earnings(ticker)
+    last_e_str, _ = get_ticker_earnings(ticker, as_of_date=as_of_date)
     if last_e_str:
         try:
             return datetime.strptime(last_e_str, "%Y-%m-%d").date()
@@ -54,13 +54,24 @@ class PEADStrategy(StrategyInterface):
         if not has_recent_gap:
             return None
 
+        # Determine reference evaluation date for point-in-time backtesting vs live scan
+        if hasattr(df.index[-1], 'date'):
+            bar_date = df.index[-1].date()
+        elif isinstance(df.index[-1], (datetime, datetime.date)):
+            bar_date = df.index[-1]
+        else:
+            bar_date = datetime.now().date()
+
+        now_date = datetime.now().date()
+        ref_date = now_date if abs((now_date - bar_date).days) <= 4 else bar_date
+
         # === EARNINGS GATE ===
-        earnings_date = get_last_earnings_date(ticker)
+        earnings_date = get_last_earnings_date(ticker, as_of_date=ref_date)
         if earnings_date is None:
             return None
 
         # Earnings must be within 1-5 days (recent enough to matter, not too old)
-        days_since_earnings = (datetime.now().date() - earnings_date).days
+        days_since_earnings = (ref_date - earnings_date).days
         if days_since_earnings < 1 or days_since_earnings > 5:
             return None
 

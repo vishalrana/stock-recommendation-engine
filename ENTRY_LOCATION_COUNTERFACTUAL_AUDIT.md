@@ -15,23 +15,24 @@
 
 ### Classification: **VALIDATED WITH TUNING REQUIRED (TUNING COMPLETE & VERIFIED)**
 
-The Entry Location Engine is **conceptually sound, empirically validated, and now quantitatively calibrated**. 
+The Entry Location Engine is **conceptually sound, supported by historical replay data for adequately sampled momentum strategies, and quantitatively calibrated against the 129-session benchmark dataset**. 
 
-- **The Problem Solved:** The pre-existing engine frequently recommended stocks in poor market locations—specifically trading directly underneath overhead resistance, into multi-week exhaustion wicks, or immediately upon breaking down through critical support. The counterfactual replay demonstrates that Old recommendations trading within $\le 1.0\%$ of resistance suffered a **34.6% stop-loss hit rate**, sub-50% win rates (48.0%), and negative early returns (-0.07% 5D).
+- **The Problem Addressed:** The pre-existing engine frequently recommended stocks in compromised market locations—specifically trading directly underneath overhead resistance, into multi-week exhaustion wicks, or immediately upon breaking down through critical support. The counterfactual replay suggests that Old recommendations trading within $\le 1.0\%$ of resistance suffered an elevated **34.6% stop-loss hit rate**, sub-50% win rates (48.0%), and negative early returns (-0.07% 5D).
+- **Scope of Evidence:** Empirical findings directly support strategies with adequate sample size ($N \ge 30$: 52-Week High Breakout, Cross-Sectional Momentum). For low-sample strategies ($N < 30$: Trend Following, Sector Rotation, Pullback Recovery, PEAD, Mean Reversion), outcomes are consistent with expected structural filtering but remain statistically inconclusive across diverse regimes.
 - **The Diagnosis & Resolution of the 71.8% Volume Drop:**
   In the initial audit run, recommendation volume dropped severely from 213 down to 60 (71.8% reduction), caused by:
   1. A mathematical sign flaw where `distance_to_resistance_pct` produced negative numbers when price was above resistance, triggering `is_near_resistance` on *every breakout and trend continuation* above resistance and shunting them into `WAIT`.
-  2. Overly restrictive support stabilization requiring an immediate green close in the upper 35% of the day's candle, thereby penalizing the highest win rate setups (58.3% win rate pullbacks exhibiting lower shadow rejection wicks/hammer patterns).
+  2. Overly restrictive support stabilization requiring an immediate green close in the upper 35% of the day's candle, thereby penalizing setups (e.g. 58.3% win rate pullbacks exhibiting lower shadow rejection wicks/hammer patterns).
   3. Overly tight extension thresholds on Cross-Sectional Momentum leaders in bull regimes.
   4. Point-in-time PEAD evaluation bug checking `datetime.now()` instead of historical scan dates.
 - **The Calibrated Outcome:**
   With the calibrated boundaries committed in `df61d4b`:
-  - Active recommendations increased from 60 (28.2%) to **81 (37.9% of Old volume)**.
-  - Retained recommendations jumped from 58 to **79**.
-  - Trend Following retention reached **100.0%** (6/6 retained, with a **66.7% win rate** and **+2.90% 20-day return**).
+  - Active recommendations increased from 60 (28.2%) to **81 (37.9% of Old volume)** under the calibrated Entry Location rules.
+  - Retained recommendations reached **79**.
+  - Trend Following retention reached **100.0%** (6/6 retained, with a **66.7% win rate** and **+2.90% 20-day return**; sample size $N=6$ remains small).
   - Cross-Sectional Momentum retention doubled from 19 to **37**.
-  - Sector Rotation retention restored to **33.3%** (2 qualified ETF ideas).
-  - Stop-out resistance trap protection remained **100% intact**.
+  - Sector Rotation retention restored to **33.3%** (2 qualified ETF ideas; sample size $N=6$ remains small).
+  - Overhead resistance trap protection remained intact.
   - Full repo regression suite passed **15/15 test suites**.
 
 ---
@@ -68,7 +69,7 @@ Evaluation conducted across 129 daily sessions:
 | **Sector Rotation** | 6 | 2 | 10 | 0 | **33.3%** | +0.55% | +1.10% | +1.45% | **50.0%** | -2.10% | +3.80% | 25.0% | +1.80% | +1.50% | +0.65 | *[Small N]* |
 | **Mean Reversion** | 0 | 0 | 0 | 0 | **0.0%** | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | *[Zero N - Regime]* |
 
-*\* Strategies flagged with `[Small N]` or `[Zero N]` have sample sizes $< 30$ in the replay period due to market regime filtering (SPY remained exclusively in `bull` regime above its 200 DMA from Feb-Aug 2026, which deactivates Mean Reversion per `REGIME_STRATEGY_MAP`).*
+*\* Scope & Sample Size Constraints: Empirical evidence directly supports strategies with adequate sample sizes ($N \ge 30$: 52-Week High Breakout with $N=92$ Old / $36$ New, and Cross-Sectional Momentum with $N=109$ Old / $37$ New). In contrast, conclusions for Trend Following ($N=6$), Sector Rotation ($N=6$), Pullback Recovery ($N=1$), PEAD ($N=0$), and Mean Reversion ($N=0$) remain statistically inconclusive due to insufficient historical observations in the evaluated bull window ($N < 30$). (Note: SPY remained exclusively in `bull` regime above its 200 DMA from Feb-Aug 2026, which naturally deactivates Mean Reversion per `REGIME_STRATEGY_MAP` and compresses pullbacks).*
 
 ---
 
@@ -84,8 +85,8 @@ Old recommendation behavior stratified by proximity to overhead resistance:
 | **$\le$ 5.0% to Resistance** | 209 | 36.4% | -0.09% | +0.66% | +0.64% | 49.8% | -3.78% | +4.38% | **71 (34.0%)** | +0.08% |
 
 ### Key Quant Insights:
-1. Recommending stocks trading $\le 1.0\%$ below resistance resulted in negative early returns (-0.07% at 5D) and elevated stop-out rates (34.6%).
-2. The Entry Location Engine successfully removed the friction-trapped candidates, while retaining setups that demonstrated confirmed breakout momentum.
+1. Recommending stocks trading $\le 1.0\%$ below resistance was associated with negative early returns (-0.07% at 5D) and elevated stop-out rates (34.6%).
+2. The Entry Location Engine removed friction-trapped candidates, while retaining setups consistent with confirmed breakout momentum.
 
 ---
 
@@ -120,8 +121,11 @@ Tracking candidates that were placed into `WAIT` across consecutive trading days
   - **WAIT $\to$ BUY Converted:** 5-Day Return = **+0.97%**, 10-Day = **+0.01%**, 20-Day = **-0.42%**
   - **Immediate BUY:** 5-Day Return = **+0.02%**, 10-Day = **+0.60%**, 20-Day = **+0.01%**
 
+### Empirical Price Drift in Converted Episodes
+No material historical price drift was observed in converted WAIT→BUY episodes: across 35 converted WAIT→BUY setups replayed, the median price drift from initial detection to final BUY was **+0.00% (+0.00 ATR)** over a median wait duration of **2.0 trading sessions** (mean drift +0.05%, IQR -0.69% to +1.02%, min -1.87%, max +1.87%).
+
 > [!TIP]
-> Waiting for setup confirmation significantly improved the early 5-day return (+0.97% vs +0.02%) by filtering out premature entries that immediately retraced into the range.
+> Waiting for setup confirmation was associated with improved early 5-day return (+0.97% vs +0.02%), consistent with filtering out premature entries that immediately retraced into the range.
 
 ---
 
@@ -170,7 +174,7 @@ Tracking candidates that were placed into `WAIT` across consecutive trading days
 | **WAIT-Filtered Setups** | 135 | -0.05% | +0.75% | +1.02% | **50.4%** | -3.31% | +4.26% |
 | **Newly Promoted Recommendations** | 2 | +2.76% | +1.82% | +6.88% | **100.0%** | -0.61% | +7.69% |
 
-The WAIT-filtered setups performed identically to retained setups over 5 days (-0.05%), confirming that WAIT successfully filters out premature trades without systemic adverse selection.
+The WAIT-filtered setups performed similarly to retained setups over 5 days (-0.05%), suggesting that WAIT filters out premature trades without empirical indication of adverse selection.
 
 ---
 
@@ -230,15 +234,19 @@ Modified files:
 
 ## 16. Final Quant Assessment
 
-The engine now strikes the optimal balance between **trade volume** (81 high-conviction ideas) and **location quality** (protecting the user against buying into overhead resistance traps and falling knives).
+The engine balances **trade volume** (81 recommendations under the calibrated Entry Location rules) and **location quality** (protecting the user against buying into overhead resistance traps and falling knives).
 
 ---
 
 ## 17. Git and Deployment Status
 
 - **Current Branch:** `main`
-- **Current HEAD Commit:** `df61d4b` (`fix(quant): calibrate entry location engine and support point-in-time pead replay`)
-- **Remote Status:** Local is ahead of `origin/main` by 3 commits (`b8a497a`, `9dd9a86`, `df61d4b`).
+- **Baseline Commits:**
+  - `b8a497a`: `feat(quant): implement canonical entry location engine and wait state`
+  - `9dd9a86`: `test(quant): add edge case, no-lookahead, and replay validation suites`
+  - `df61d4b`: `fix(quant): calibrate entry location engine and support point-in-time pead replay`
+  - `92af794`: `docs(quant): add comprehensive counterfactual validation audit and calibration report`
+- **Remote Status:** Local is ahead of `origin/main` by 4 commits.
 - **Push / Deploy Status:** **STRICTLY LOCAL. NO COMMITS PUSHED TO ORIGIN/MAIN. NO DEPLOYMENT EXECUTED.**
 
 ---

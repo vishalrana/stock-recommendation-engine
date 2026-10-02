@@ -23,14 +23,6 @@ import datetime
 from src.providers.context.aggregator import ContextAggregator
 from src.scorers.context_scorer import ContextScorer
 from src.data.cache_manager import get_cache_manager
-from src.position_sizer import (
-    assign_tier,
-    allocate_capital,
-    calculate_p_win,
-    calculate_half_kelly,
-    calculate_normalized_sizing,
-    validate_candidate_for_allocation,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -169,35 +161,22 @@ def compute_context_score(
     return max(0.0, min(100.0, float(raw)))
 
 
-def calculate_p_win(composite_score: float) -> float:
+def assign_tier(composite_score: float, honest_rr: float = 2.0) -> str:
     """
-    Fix 1: Replace coarse win-probability buckets with smooth sigmoid mapping:
-    p_win = 0.35 + 0.40 / (1 + e^(-0.15 * (S_composite - 65)))
-    Clamped to [0.35, 0.75], rounded to 4 decimal places.
+    Assign recommendation tier based strictly on composite score.
+    R:R is preserved as an analytical output and for signature compatibility only,
+    and NEVER qualifies or disqualifies a recommendation.
+    - Strong Buy: composite_score >= 80.0
+    - Buy: composite_score >= 65.0
+    - Rejected: all others
     """
-    s = float(composite_score)
-    z = -0.15 * (s - 65.0)
-    if z > 50.0:
-        sigmoid_val = 0.0
-    elif z < -50.0:
-        sigmoid_val = 1.0
+    score = float(composite_score)
+    if score >= 80.0:
+        return "Strong Buy"
+    elif score >= 65.0:
+        return "Buy"
     else:
-        sigmoid_val = 1.0 / (1.0 + math.exp(z))
-
-    p = 0.35 + 0.40 * sigmoid_val
-    return max(0.35, min(0.75, round(p, 4)))
-
-
-def calculate_half_kelly(composite_score: float, honest_rr: float) -> float:
-    """
-    Calculate Half-Kelly fraction using sigmoid p_win and honest R:R.
-    R_honest is used ONLY here, not in composite score.
-    """
-    p_win = calculate_p_win(composite_score)
-    r = float(honest_rr) if float(honest_rr) > 0 else 1.0
-    full_kelly = p_win - (1.0 - p_win) / r
-    half_kelly = max(0.0, full_kelly / 2.0)
-    return round(half_kelly, 4)
+        return "Rejected"
 
 
 def compute_momentum_score(row: dict) -> float:
@@ -806,14 +785,6 @@ class SignalRanker:
         if "macd_histogram" not in df.columns:
             df["macd_histogram"] = 0.0
         return self.composite_rank(df, "bull", top_n)
-
-
-def calculate_normalized_sizing(signals: list, portfolio_value: float, available_cash: float) -> list:
-    """
-    Backwards-compatible wrapper calling allocate_capital sequential funding.
-    """
-    from src.position_sizer import calculate_normalized_sizing as _cns
-    return _cns(signals, portfolio_value, available_cash)
 
 
 

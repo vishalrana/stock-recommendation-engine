@@ -21,11 +21,18 @@ if PROJECT_ROOT not in sys.path:
 class TestDecommissioningAndIsolation(unittest.TestCase):
 
     def test_decommissioned_files_do_not_exist(self):
-        """Verify all legacy portfolio automation and unauthenticated routes are deleted."""
+        """Verify all legacy portfolio automation, sizing machinery, and unauthenticated routes are deleted."""
         forbidden_paths = [
             os.path.join(PROJECT_ROOT, ".github", "workflows", "monitor.yml"),
             os.path.join(PROJECT_ROOT, "src", "monitor", "monitor_positions.py"),
             os.path.join(PROJECT_ROOT, "src", "monitor"),
+            os.path.join(PROJECT_ROOT, "src", "position_sizer.py"),
+            os.path.join(PROJECT_ROOT, "src", "risk_controls.py"),
+            os.path.join(PROJECT_ROOT, "backend"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "components", "portfolio-summary.tsx"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "components", "SignalExitPlan.tsx"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "components", "recommendations-table.tsx"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "lib", "position-utils.ts"),
             os.path.join(PROJECT_ROOT, "frontend", "src", "lib", "market-evaluator.ts"),
             os.path.join(PROJECT_ROOT, "frontend", "src", "app", "api", "sync-market"),
             os.path.join(PROJECT_ROOT, "frontend", "src", "app", "api", "positions"),
@@ -39,11 +46,11 @@ class TestDecommissioningAndIsolation(unittest.TestCase):
             )
 
     def test_frontend_decoupled_from_portfolio_state(self):
-        """Verify frontend code does not query or depend on portfolio_state."""
+        """Verify frontend code does not query or depend on portfolio_state or Kelly sizing."""
         page_path = os.path.join(PROJECT_ROOT, "frontend", "src", "app", "page.tsx")
         db_path = os.path.join(PROJECT_ROOT, "frontend", "src", "lib", "database.ts")
-        table_path = os.path.join(PROJECT_ROOT, "frontend", "src", "components", "recommendations-table.tsx")
-        summary_path = os.path.join(PROJECT_ROOT, "frontend", "src", "components", "portfolio-summary.tsx")
+        app_path = os.path.join(PROJECT_ROOT, "frontend", "src", "components", "stock-ideas-app.tsx")
+        card_path = os.path.join(PROJECT_ROOT, "frontend", "src", "components", "stock-card.tsx")
 
         with open(page_path, "r", encoding="utf-8") as f:
             page_content = f.read()
@@ -56,18 +63,22 @@ class TestDecommissioningAndIsolation(unittest.TestCase):
         self.assertNotIn("getLatestPortfolioValue", db_content)
         self.assertNotIn("portfolio_state", db_content)
 
-        with open(table_path, "r", encoding="utf-8") as f:
-            table_content = f.read()
-        self.assertNotIn("handleRecalculateAll", table_content)
-        self.assertNotIn("handleSyncMarket", table_content)
-        self.assertNotIn("/api/sync-market", table_content)
-        self.assertNotIn("/api/signals/recalculate", table_content)
-        self.assertNotIn("/api/positions/close", table_content)
-        self.assertNotIn("latestPortfolioValue", table_content)
+        with open(app_path, "r", encoding="utf-8") as f:
+            app_content = f.read()
+        self.assertNotIn("handleRecalculateAll", app_content)
+        self.assertNotIn("handleSyncMarket", app_content)
+        self.assertNotIn("/api/sync-market", app_content)
+        self.assertNotIn("/api/signals/recalculate", app_content)
+        self.assertNotIn("/api/positions/close", app_content)
+        self.assertNotIn("latestPortfolioValue", app_content)
+        self.assertNotIn("allocated_dollars", app_content)
+        self.assertNotIn("exact_shares", app_content)
 
-        with open(summary_path, "r", encoding="utf-8") as f:
-            summary_content = f.read()
-        self.assertNotIn("latestPortfolioValue", summary_content)
+        with open(card_path, "r", encoding="utf-8") as f:
+            card_content = f.read()
+        self.assertNotIn("allocated_dollars", card_content)
+        self.assertNotIn("exact_shares", card_content)
+        self.assertNotIn("position_sizing", card_content)
 
     def test_pipeline_no_simulated_trade_execution(self):
         """Verify jobs/generate_signals.py has no simulated exits or portfolio sizing."""

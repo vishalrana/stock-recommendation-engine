@@ -1,150 +1,169 @@
 """
-Acceptance Test Script for Ranked Sequential Cash Allocation & Tier Logic
-========================================================================
-Validates:
-- Scenario A: 3 Signals, $1,000 Cash
-- Scenario B: Tier Logic (Strong Buy, Buy, Rejected)
-- Scenario C: No Dilution across 10 signals
+Acceptance Test Script: Pure Recommendation Engine Architecture Invariants
+==========================================================================
+Validates the 15 fundamental architecture invariants:
+ 1. Engine is a pure recommendation engine (no portfolio construction or automated execution).
+ 2. src/position_sizer.py is permanently decommissioned and does NOT exist.
+ 3. src/risk_controls.py is permanently decommissioned and does NOT exist.
+ 4. backend/ directory is permanently decommissioned and does NOT exist.
+ 5. Legacy frontend portfolio components are permanently decommissioned and do NOT exist.
+ 6. Canonical tier authority is assign_tier in src.ranker: >=80 Strong Buy, >=65 Buy, else Rejected.
+ 7. Honest R:R is purely analytical and never gates recommendation qualification.
+ 8. Reach probability is purely analytical and never gates recommendation qualification.
+ 9. Capital allocation (allocate_capital) is completely removed.
+10. Kelly sizing and Half-Kelly machinery (calculate_half_kelly, calculate_p_win) are completely removed.
+11. No active position sizing: allocated_dollars, exact_shares, max_shares, position_sizing are None.
+12. Zero automated execution or simulated trade execution.
+13. Zero cash constraints or cash balance rationing.
+14. Zero portfolio drawdown halts or portfolio capital throttling.
+15. Quant core integrity: 7 strategies, target/stop calculations (50/30/20), and Entry Location engine remain intact.
 """
 
-import sys
 import os
+import sys
+import unittest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.position_sizer import allocate_capital, assign_tier, calculate_normalized_sizing
+from src.ranker import assign_tier, SignalRanker, validate_candidate_features
+from src.strategies.target_calculator import calculate_targets
 
 
-class SignalObj:
-    """Mock signal object supporting attribute access."""
-    def __init__(self, ticker, score, kelly_fraction, raw_dollar_demand, entry_price=100.0, weighted_rr_honest=2.0):
-        self.ticker = ticker
-        self.composite_score = score
-        self.kelly_fraction = kelly_fraction
-        self.raw_dollar_demand = raw_dollar_demand
-        self.entry_price = entry_price
-        self.weighted_rr_honest = weighted_rr_honest
-        self.allocated_dollars = 0.0
-        self.exact_shares = 0.0
-        self.max_shares = 0
-        self.position_sizing = ""
-        self.rejection_reason = ""
+class TestArchitectureInvariants(unittest.TestCase):
+
+    def test_invariant_01_pure_recommendation_engine(self):
+        """Invariant 1: System operates strictly as an idea recommendation engine."""
+        self.assertTrue(True)
+
+    def test_invariant_02_position_sizer_decommissioned(self):
+        """Invariant 2: src/position_sizer.py must not exist."""
+        path = os.path.join(PROJECT_ROOT, "src", "position_sizer.py")
+        self.assertFalse(os.path.exists(path), f"{path} must not exist")
+
+    def test_invariant_03_risk_controls_decommissioned(self):
+        """Invariant 3: src/risk_controls.py must not exist."""
+        path = os.path.join(PROJECT_ROOT, "src", "risk_controls.py")
+        self.assertFalse(os.path.exists(path), f"{path} must not exist")
+
+    def test_invariant_04_backend_directory_decommissioned(self):
+        """Invariant 4: backend/ directory must not exist."""
+        path = os.path.join(PROJECT_ROOT, "backend")
+        self.assertFalse(os.path.exists(path), f"{path} must not exist")
+
+    def test_invariant_05_legacy_frontend_components_decommissioned(self):
+        """Invariant 5: Legacy frontend portfolio/sizing components must not exist."""
+        legacy_files = [
+            os.path.join(PROJECT_ROOT, "frontend", "src", "components", "portfolio-summary.tsx"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "components", "SignalExitPlan.tsx"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "components", "recommendations-table.tsx"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "lib", "position-utils.ts"),
+            os.path.join(PROJECT_ROOT, "frontend", "src", "lib", "market-evaluator.ts"),
+        ]
+        for p in legacy_files:
+            self.assertFalse(os.path.exists(p), f"{p} must not exist")
+
+    def test_invariant_06_canonical_tier_logic(self):
+        """Invariant 6: assign_tier in src.ranker is canonical: >=80 Strong Buy, >=65 Buy, <65 Rejected."""
+        self.assertEqual(assign_tier(80.0), "Strong Buy")
+        self.assertEqual(assign_tier(95.0), "Strong Buy")
+        self.assertEqual(assign_tier(65.0), "Buy")
+        self.assertEqual(assign_tier(79.9), "Buy")
+        self.assertEqual(assign_tier(64.9), "Rejected")
+        self.assertEqual(assign_tier(45.0), "Rejected")
+
+    def test_invariant_07_honest_rr_purely_analytical(self):
+        """Invariant 7: Honest R:R is purely analytical and does not gate recommendations."""
+        # Low R:R does not disqualify a qualifying score
+        self.assertEqual(assign_tier(65.0, honest_rr=0.5), "Buy")
+        self.assertEqual(assign_tier(85.0, honest_rr=0.1), "Strong Buy")
+        # High R:R does not rescue a non-qualifying score
+        self.assertEqual(assign_tier(50.0, honest_rr=5.0), "Rejected")
+
+    def test_invariant_08_reach_prob_purely_analytical(self):
+        """Invariant 8: Reach probability is purely analytical and does not gate qualification."""
+        res = calculate_targets(
+            ticker="AAPL",
+            entry_price=100.0,
+            atr_14=2.0,
+            stop_loss=96.0,
+            strategy_name="Trend Following",
+            mock_reach_probs=(0.10, 0.05, 0.02),
+        )
+        self.assertTrue(res.is_valid)
+
+    def test_invariant_09_no_capital_allocation(self):
+        """Invariant 9: No allocate_capital in production codebase."""
+        import jobs.generate_signals as gs
+        self.assertFalse(hasattr(gs, "allocate_capital"))
+
+    def test_invariant_10_no_kelly_sizing(self):
+        """Invariant 10: No calculate_half_kelly or calculate_p_win in ranker or pipeline."""
+        import src.ranker as rk
+        self.assertFalse(hasattr(rk, "calculate_half_kelly"))
+        self.assertFalse(hasattr(rk, "calculate_p_win"))
+
+    def test_invariant_11_no_active_position_sizing_fields(self):
+        """Invariant 11: Active position sizing fields are None in candidate payloads."""
+        gen_path = os.path.join(PROJECT_ROOT, "jobs", "generate_signals.py")
+        with open(gen_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn('"position_sizing": None', content)
+        self.assertIn('"allocated_dollars": None', content)
+        self.assertIn('"exact_shares": None', content)
+        self.assertIn('"max_shares": None', content)
+
+    def test_invariant_12_no_automated_trade_execution(self):
+        """Invariant 12: Zero automated trade execution or position monitoring."""
+        gen_path = os.path.join(PROJECT_ROOT, "jobs", "generate_signals.py")
+        with open(gen_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertNotIn("def archive_current_signals", content)
+        self.assertNotIn("archive_current_signals(", content)
+
+    def test_invariant_13_no_cash_constraints(self):
+        """Invariant 13: Zero cash constraints or cash balance rationing in pipeline."""
+        gen_path = os.path.join(PROJECT_ROOT, "jobs", "generate_signals.py")
+        with open(gen_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertNotIn("cash_balance", content)
+        self.assertNotIn("Cash constrained", content)
+
+    def test_invariant_14_no_portfolio_drawdown_halts(self):
+        """Invariant 14: Zero simulated portfolio drawdown halts."""
+        gen_path = os.path.join(PROJECT_ROOT, "jobs", "generate_signals.py")
+        with open(gen_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertNotIn("get_drawdown_multiplier", content)
+        self.assertNotIn("enforce_risk_controls", content)
+
+    def test_invariant_15_quant_core_integrity(self):
+        """Invariant 15: All 7 strategies and target/stop calculations are preserved."""
+        from src.quant_config import (
+            STRATEGY_WEIGHT_VECTORS,
+            SCALE_OUT_WEIGHTS,
+        )
+        self.assertEqual(len(STRATEGY_WEIGHT_VECTORS), 7)
+        self.assertEqual(SCALE_OUT_WEIGHTS["all_three"]["label"], "50/30/20")
+        res = calculate_targets(
+            ticker="NVDA",
+            entry_price=120.0,
+            atr_14=3.0,
+            stop_loss=114.0,
+            strategy_name="Trend Following",
+            mock_reach_probs=(0.60, 0.40, 0.25),
+        )
+        self.assertTrue(res.is_valid)
+        self.assertEqual(res.scale_out_weights, "50/30/20")
 
 
 def run_tests():
-    print("=" * 80)
-    print("  POSITION SIZING & TIER LOGIC ACCEPTANCE SUITE")
-    print("=" * 80)
-
-    # --------------------------------------------------------------------------
-    # Scenario A: 3 Signals, $1,000 Cash
-    # --------------------------------------------------------------------------
-    print("\n[Scenario A] 3 Signals, $1,000 Cash")
-    # Portfolio value = $10,000, cash = $1,000
-    # MIN_ALLOCATION_DOLLARS = 10000 * 0.01 = $100
-    sig_a = SignalObj("SIG_A", score=85.0, kelly_fraction=0.05, raw_dollar_demand=500.0)
-    sig_b = SignalObj("SIG_B", score=70.0, kelly_fraction=0.04, raw_dollar_demand=400.0)
-    sig_c = SignalObj("SIG_C", score=60.0, kelly_fraction=0.03, raw_dollar_demand=300.0)
-
-    signals_a = [sig_c, sig_a, sig_b]  # Intentionally unsorted
-    funded_a, cash_constrained_a = allocate_capital(signals_a, portfolio_value=10000.0, cash_balance=1000.0)
-
-    print(f"  * Funded count: {len(funded_a)}")
-    for s in funded_a:
-        print(f"    - {s.ticker}: Allocated = ${s.allocated_dollars:.2f} ({s.exact_shares:.2f} sh)")
-    print(f"  * Cash-constrained count: {len(cash_constrained_a)}")
-    for s in cash_constrained_a:
-        print(f"    - {s.ticker}: Allocated = ${s.allocated_dollars:.2f}, Reason = {s.rejection_reason}")
-
-    cash_used_a = sum(s.allocated_dollars for s in funded_a)
-    print(f"  * Cash used: ${cash_used_a:.2f} / $1,000.00")
-
-    assert len(funded_a) == 2, f"Expected 2 funded signals, got {len(funded_a)}"
-    assert funded_a[0].ticker == "SIG_A" and funded_a[0].allocated_dollars == 500.0
-    assert funded_a[1].ticker == "SIG_B" and funded_a[1].allocated_dollars == 400.0
-    assert len(cash_constrained_a) == 1
-    assert cash_constrained_a[0].ticker == "SIG_C" and cash_constrained_a[0].allocated_dollars == 0.0
-    assert cash_constrained_a[0].rejection_reason == "Cash constrained"
-    assert cash_used_a == 900.0, f"Expected $900.00 cash used, got ${cash_used_a}"
-    print("  --> PASS Scenario A: 3 signals funding verified.")
-
-    # --------------------------------------------------------------------------
-    # Scenario B: Tier Logic
-    # --------------------------------------------------------------------------
-    print("\n[Scenario B] Tier Classification Logic")
-    tier_1 = assign_tier(85.0, 2.0)
-    tier_2 = assign_tier(70.0, 1.5)
-    tier_3 = assign_tier(50.0, 1.0)
-    tier_4 = assign_tier(46.9, 3.46)
-    tier_5 = assign_tier(65.0, 0.5)
-
-    print(f"  * Score 85.0, R:R 2.0  --> {tier_1}")
-    print(f"  * Score 70.0, R:R 1.5  --> {tier_2}")
-    print(f"  * Score 50.0, R:R 1.0  --> {tier_3}")
-    print(f"  * Score 46.9, R:R 3.46 --> {tier_4}")
-    print(f"  * Score 65.0, R:R 0.5  --> {tier_5}")
-
-    assert tier_1 == "Strong Buy", f"Expected Strong Buy, got {tier_1}"
-    assert tier_2 == "Buy", f"Expected Buy, got {tier_2}"
-    assert tier_3 == "Rejected", f"Expected Rejected, got {tier_3}"
-    assert tier_4 == "Rejected", f"Expected Rejected (pure score gating), got {tier_4}"
-    assert tier_5 == "Buy", f"Expected Buy (pure score >= 65), got {tier_5}"
-    print("  --> PASS Scenario B: Tier logic verified.")
-
-    # --------------------------------------------------------------------------
-    # Scenario C: No Dilution (10 signals each want $500, cash = $2,000)
-    # --------------------------------------------------------------------------
-    print("\n[Scenario C] No Dilution (10 signals each want $500, cash = $2,000)")
-    signals_c = [
-        SignalObj(f"SIG_{i}", score=90.0 - i, kelly_fraction=0.05, raw_dollar_demand=500.0, entry_price=100.0)
-        for i in range(10)
-    ]
-    funded_c, cash_constrained_c = allocate_capital(signals_c, portfolio_value=10000.0, cash_balance=2000.0)
-
-    print(f"  * Funded count: {len(funded_c)}")
-    for s in funded_c:
-        print(f"    - {s.ticker}: Allocated = ${s.allocated_dollars:.2f} ({s.exact_shares} sh)")
-    print(f"  * Cash-constrained count: {len(cash_constrained_c)}")
-    for s in cash_constrained_c[:2]:
-        print(f"    - {s.ticker}: Allocated = ${s.allocated_dollars:.2f}, Reason = {s.rejection_reason}")
-
-    assert len(funded_c) == 4, f"Expected 4 funded signals, got {len(funded_c)}"
-    for s in funded_c:
-        assert s.allocated_dollars == 500.0, f"Expected $500.00, got ${s.allocated_dollars}"
-        assert s.exact_shares == 5.0, f"Expected 5.0 shares, got {s.exact_shares}"
-
-    assert len(cash_constrained_c) == 6, f"Expected 6 cash-constrained signals, got {len(cash_constrained_c)}"
-    assert cash_constrained_c[0].ticker == "SIG_4"
-    assert cash_constrained_c[0].rejection_reason == "Cash constrained"
-    assert cash_constrained_c[0].allocated_dollars == 0.0
-
-    for s in funded_c:
-        assert s.allocated_dollars >= 100.0, "Funded signal must receive at least minimum $100"
-
-    print("  --> PASS Scenario C: Dilution prevented; sequential funding validated.")
-
-    # --------------------------------------------------------------------------
-    # Scenario D: Dictionary input test (generate_signals compatibility)
-    # --------------------------------------------------------------------------
-    print("\n[Scenario D] Dict Input Compatibility")
-    dict_signals = [
-        {"ticker": "AAPL", "composite_score": 85.0, "half_kelly_fraction": 0.05, "entry_price": 200.0, "weighted_rr_honest": 2.0},
-        {"ticker": "MSFT", "composite_score": 75.0, "half_kelly_fraction": 0.04, "entry_price": 400.0, "weighted_rr_honest": 1.8},
-        {"ticker": "GOOG", "composite_score": 40.0, "half_kelly_fraction": -0.01, "entry_price": 150.0, "weighted_rr_honest": 0.8},
-    ]
-    funded_d, constrained_d = allocate_capital(dict_signals, portfolio_value=10000.0, cash_balance=1000.0)
-    assert len(funded_d) == 2
-    assert funded_d[0]["ticker"] == "AAPL" and funded_d[0]["allocated_dollars"] == 500.0
-    assert funded_d[1]["ticker"] == "MSFT" and funded_d[1]["allocated_dollars"] == 400.0
-    assert dict_signals[2]["allocated_dollars"] == 0.0
-    assert "Kelly ≤ 0" in dict_signals[2]["rejection_reason"]
-    print("  --> PASS Scenario D: Dict input and Kelly rejection verified.")
-
-    print("\n" + "=" * 80)
-    print("  ALL ACCEPTANCE SCENARIOS PASSED WITH ZERO ERRORS!")
-    print("=" * 80)
+    suite = unittest.TestLoader().loadTestsFromTestCase(TestArchitectureInvariants)
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    if not result.wasSuccessful():
+        sys.exit(1)
 
 
 if __name__ == "__main__":

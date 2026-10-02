@@ -9,10 +9,9 @@ This guide explains how to configure the **Nightly Recommendation Scan** workflo
 Every weekday after US market close, GitHub Actions will:
 
 1. Download fresh stock data via `yfinance`
-2. Run Strategy 1.1 Beta signal evaluation
-3. Clear old signals from Supabase
-4. Insert new qualified signals
-5. Log the scan result to `scan_log`
+2. Run multi-strategy scan with Entry Location evaluation
+3. Reconcile active recommendations and record new qualified ideas
+4. Log the scan result to `scan_log`
 
 The Vercel-hosted frontend automatically shows the latest data — no redeployment needed.
 
@@ -104,7 +103,7 @@ The workflow will start within a few seconds.
 ### On the Website
 
 - Visit your Vercel URL
-- The recommendations table should show updated data
+- The stock ideas view should show updated data
 - The "Latest Scan Date" should match today
 
 ---

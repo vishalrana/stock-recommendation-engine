@@ -27,7 +27,7 @@ import numpy as np
 from datetime import datetime, date, timedelta
 from unittest.mock import MagicMock, patch
 
-from src.position_sizer import assign_tier
+from src.ranker import assign_tier
 from src.strategies.target_calculator import calculate_targets, TargetCalculationResult
 from jobs.generate_signals import reconcile_recommendation_lifecycle
 

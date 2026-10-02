@@ -17,7 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.position_sizer import assign_tier, calculate_half_kelly, allocate_capital, calculate_p_win
+from src.ranker import assign_tier
 from src.quant_config import (
     STRATEGY_WEIGHT_VECTORS,
     REGIME_SCORE_MATRIX,
@@ -45,28 +45,12 @@ class TestRecommendationSimplification(unittest.TestCase):
         tier = assign_tier(75.0, 2.2)
         self.assertIn(tier, ["Strong Buy", "Buy"])
 
-    def test_legacy_position_sizer_deprecated_compatibility(self):
-        """Test that legacy position_sizer functions remain callable for backward compatibility."""
-        # calculate_half_kelly
-        hk = calculate_half_kelly(composite_score=75.0, honest_rr=2.0)
-        self.assertGreater(hk, 0.0)
-
-        # allocate_capital
-        class DummySignal:
-            def __init__(self, ticker, score):
-                self.ticker = ticker
-                self.composite_score = score
-                self.raw_dollar_demand = 500.0
-                self.half_kelly_fraction = 0.05
-                self.allocated_dollars = 0.0
-                self.exact_shares = 0.0
-                self.rejection_reason = ""
-
-        sigs = [DummySignal("AAPL", 80.0), DummySignal("MSFT", 70.0)]
-        funded, rejected = allocate_capital(sigs, portfolio_value=10000.0, cash_balance=600.0)
-        self.assertEqual(len(funded), 1)
-        self.assertEqual(funded[0].ticker, "AAPL")
-        self.assertEqual(len(rejected), 1)
+    def test_legacy_position_sizer_removed(self):
+        """Test that legacy position_sizer is removed and assign_tier lives in src.ranker."""
+        pos_sizer_path = os.path.join(PROJECT_ROOT, "src", "position_sizer.py")
+        self.assertFalse(os.path.exists(pos_sizer_path), "src/position_sizer.py must not exist")
+        from src.ranker import assign_tier as ranker_assign_tier
+        self.assertEqual(ranker_assign_tier(85.0), "Strong Buy")
 
     def test_trade_setup_targets_pure_math(self):
         """Test dynamic targets calculation does not require capital allocation."""

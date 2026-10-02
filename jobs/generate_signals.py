@@ -49,6 +49,8 @@ from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
 from src.quant_config import STRATEGY_STOP_CONFIG, normalize_strategy_key
 from src.entry_location import evaluate_entry_location
 
+VIX_EMERGENCY_THRESHOLD: float = 40.0
+
 
 def get_cache_mode(args) -> str:
     """Determine cache refresh mode based on CLI flags, env vars, and environment.
@@ -356,7 +358,7 @@ def reconcile_recommendation_lifecycle(
                     "target_1", "target_2", "target_3",
                     "target_1_pct", "target_2_pct", "target_3_pct",
                     "target_1_atr", "target_2_atr", "target_3_atr",
-                    "stop_loss", "position_sizing", "tier_label",
+                    "stop_loss", "tier_label",
                     "reach_prob_t1", "reach_prob_t2", "reach_prob_t3",
                     "reach_prob_raw", "reach_prob_adjusted",
                     "weighted_rr", "weighted_rr_honest",
@@ -385,9 +387,7 @@ def get_next_trading_day(date_obj):
     return next_day
 
 
-VIX_EMERGENCY_THRESHOLD = 40
-
-def apply_vix_override(regime, strategies, size_mult):
+def apply_vix_override(regime, strategies):
     import yfinance as yf
     try:
         vix_ticker = yf.Ticker("^VIX")
@@ -397,15 +397,14 @@ def apply_vix_override(regime, strategies, size_mult):
             if vix > VIX_EMERGENCY_THRESHOLD:
                 regime = "bear"
                 strategies = ["Mean Reversion", "Post-Earnings Drift"]
-                size_mult = 0.5
-                logger.info(f"[VIX OVERRIDE] VIX={vix:.1f} > 40 — forced bear, half sizing")
+                logger.info(f"[VIX OVERRIDE] VIX={vix:.1f} > 40 — forced bear regime")
             else:
                 logger.info(f"[VIX] VIX level: {vix:.1f} (Normal)")
         else:
             logger.warning("VIX history empty, skipping VIX override check.")
     except Exception as e:
         logger.warning(f"Failed to fetch VIX info: {e}")
-    return regime, strategies, size_mult
+    return regime, strategies
 
 
 def run_scan(
@@ -465,9 +464,8 @@ def run_scan(
         allowed_strategies = REGIME_STRATEGY_MAP.get(regime_str, [])
 
     # TASK 2: VIX Emergency Override
-    size_mult = 1.0
     if allowed_strategies:
-        regime_str, allowed_strategies, size_mult = apply_vix_override(regime_str, allowed_strategies, size_mult)
+        regime_str, allowed_strategies = apply_vix_override(regime_str, allowed_strategies)
 
     logger.info(
         "REGIME: %s | SPY: $%.2f | 200 DMA: $%.2f",
@@ -891,10 +889,6 @@ def run_scan(
                 logger.warning(f"[FEATURE VALIDATION FAIL] Dropping {sig.get('ticker')}: {feat_msg}")
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Validation failed: {feat_msg}"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
                 rejected_signals_to_insert.append(sig)
                 continue
 
@@ -908,10 +902,6 @@ def run_scan(
                 logger.warning(f"Scoring error for {sig.get('ticker')}: {score_err}")
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Scoring error: {score_err}"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "K: 0.0%"
                 rejected_signals_to_insert.append(sig)
 
         # Sort ALL valid candidates by composite score DESC
@@ -970,10 +960,6 @@ def run_scan(
                 sig["status"] = "rejected"
                 sig["earnings_rejected"] = True
                 sig["rejection_reason"] = er_res.get("reason", "Earnings blackout")
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = "N/A - Earnings Risk"
                 earnings_rejected_count += 1
                 logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']}")
                 rejected_signals_to_insert.append(sig)
@@ -1046,16 +1032,12 @@ def run_scan(
             sig["weighted_rr_honest"] = calc_res.weighted_rr_honest
 
             # Assign tier based on composite score & honest R:R
-            from src.position_sizer import assign_tier
+            from src.ranker import assign_tier
             sig["tier_label"] = assign_tier(score, calc_res.weighted_rr_honest)
             if sig["tier_label"] not in ("Strong Buy", "Buy"):
                 logger.info(f"[TIER FILTER] Candidate {ticker} ({strategy_name}) not in buy tier: {sig['tier_label']} (Score={score:.2f}, Honest R:R={calc_res.weighted_rr_honest:.2f})")
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Tier {sig['tier_label']} (Score {score:.1f}, R:R {calc_res.weighted_rr_honest:.2f})"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
                 rejected_signals_to_insert.append(sig)
                 continue
 
@@ -1075,20 +1057,12 @@ def run_scan(
                     logger.info(f"[ENTRY LOCATION WAIT] Candidate {ticker} ({strategy_name}): {loc_res.reason}")
                     sig["status"] = "rejected"
                     sig["rejection_reason"] = f"WAIT: {loc_res.reason}"
-                    sig["allocated_dollars"] = 0.0
-                    sig["exact_shares"] = 0.0
-                    sig["max_shares"] = 0
-                    sig["position_sizing"] = f"WAIT ({sig['scale_out_weights']})"
                     rejected_signals_to_insert.append(sig)
                     continue
                 elif loc_res.state == "REJECT":
                     logger.info(f"[ENTRY LOCATION REJECT] Candidate {ticker} ({strategy_name}): {loc_res.reason}")
                     sig["status"] = "rejected"
                     sig["rejection_reason"] = f"Rejected location: {loc_res.reason}"
-                    sig["allocated_dollars"] = 0.0
-                    sig["exact_shares"] = 0.0
-                    sig["max_shares"] = 0
-                    sig["position_sizing"] = f"REJECT ({sig['scale_out_weights']})"
                     rejected_signals_to_insert.append(sig)
                     continue
                 else:
@@ -1106,10 +1080,6 @@ def run_scan(
                 )
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Strategy deduplication: preferred '{winner_sig['strategy']}' (Score {winner_sig['composite_score']:.1f} vs {score:.1f})"
-                sig["allocated_dollars"] = 0.0
-                sig["exact_shares"] = 0.0
-                sig["max_shares"] = 0
-                sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
                 rejected_signals_to_insert.append(sig)
                 continue
             seen_qualified_strategy_tickers[t_upper] = sig
@@ -1121,23 +1091,9 @@ def run_scan(
                 logger.info(f"Ticker {ticker} is already an active recommendation and continues to qualify.")
                 continue
 
-            # Diagnostic win probability and Kelly fraction (informational opportunity analytics only, NEVER gates recommendation)
-            from src.position_sizer import calculate_p_win
-            win_p = calculate_p_win(score)
-            rr_val = calc_res.weighted_rr_honest if calc_res.weighted_rr_honest > 0 else 2.0
-            diagnostic_raw_kelly = win_p - (1.0 - win_p) / rr_val
-            sig["diagnostic_raw_kelly"] = round(diagnostic_raw_kelly, 4)
-            sig["kelly_fraction"] = round(diagnostic_raw_kelly, 4)
-            sig["final_adjusted_half_kelly"] = round(max(0.0, diagnostic_raw_kelly / 2.0), 4)
-            sig["half_kelly_fraction"] = sig["final_adjusted_half_kelly"]
-
             # Qualified Recommendation Setup!
             sig["status"] = "pending"
             sig["rejection_reason"] = None
-            sig["allocated_dollars"] = 0.0
-            sig["exact_shares"] = 0.0
-            sig["max_shares"] = 0
-            sig["position_sizing"] = f"R:R {calc_res.weighted_rr_honest:.2f} ({sig['scale_out_weights']})"
 
             qualified_recommendations.append(sig)
 
@@ -1154,7 +1110,6 @@ def run_scan(
         import uuid
         for sig in all_signals_to_save:
             is_rejected = sig.get("status") == "rejected"
-            position_sizing_str = sig.get("position_sizing") or "N/A"
             sig_id = sig.get("id") or str(uuid.uuid4())
             sig["id"] = sig_id
 
@@ -1199,7 +1154,7 @@ def run_scan(
                     "scale_out_weights": sig.get("scale_out_weights", "50/30/20"),
                     "weighted_rr": sig.get("weighted_rr"),
                     "weighted_rr_honest": sig.get("weighted_rr_honest"),
-                    "position_sizing": position_sizing_str,
+                    "position_sizing": None,
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig["strategy"],
                     "context_score": sig.get("context_score", 0.0),
@@ -1220,10 +1175,10 @@ def run_scan(
                     "current_ratio": sig.get("current_ratio"),
                     "earnings_surprise_pct": sig.get("earnings_surprise_pct"),
                     "finbert_sentiment": sig.get("finbert_sentiment"),
-                    # New position sizing columns
-                    "allocated_dollars": sig.get("allocated_dollars", 0.0),
-                    "exact_shares": sig.get("exact_shares", 0.0),
-                    "max_shares": sig.get("max_shares", 0),
+                    # Legacy schema compatibility columns (pure recommendation engine does not size)
+                    "allocated_dollars": None,
+                    "exact_shares": None,
+                    "max_shares": None,
                     # Earnings and Survivorship Risk columns
                     "next_earnings_date": sig.get("next_earnings_date"),
                     "days_to_earnings": sig.get("days_to_earnings"),
@@ -1369,7 +1324,7 @@ def run_scan(
                         "scale_out_weights": sig.get("scale_out_weights", "50/30/20"),
                         "weighted_rr": sig.get("weighted_rr"),
                         "weighted_rr_honest": sig.get("weighted_rr_honest"),
-                        "position_sizing": sig.get("position_sizing", "50/30/20"),
+                        "position_sizing": None,
                         "narrative": sig.get("narrative"),
                         "strategy_name": sig.get("strategy_name"),
                         "outcome": "rejected" if sig.get("status") == "rejected" else "open",
@@ -1384,9 +1339,9 @@ def run_scan(
                         "current_ratio": sig.get("current_ratio"),
                         "earnings_surprise_pct": sig.get("earnings_surprise_pct"),
                         "finbert_sentiment": sig.get("finbert_sentiment"),
-                        "allocated_dollars": sig.get("allocated_dollars"),
-                        "exact_shares": sig.get("exact_shares"),
-                        "max_shares": int(sig.get("max_shares", 0)) if sig.get("max_shares") is not None else None,
+                        "allocated_dollars": None,
+                        "exact_shares": None,
+                        "max_shares": None,
                         "next_earnings_date": sig.get("next_earnings_date"),
                         "days_to_earnings": sig.get("days_to_earnings"),
                         "earnings_rejected": bool(sig.get("earnings_rejected", False)),

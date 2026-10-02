@@ -391,7 +391,7 @@ class TestRecommendationLifecycle(unittest.TestCase):
 
         with patch("jobs.generate_signals.get_client", return_value=mock_client), \
              patch("jobs.generate_signals.get_regime", return_value={"regime": "bull", "spy_price": 500, "spy_200dma": 450}), \
-             patch("jobs.generate_signals.apply_vix_override", return_value=("bull", ["Pullback Recovery"], 1.0)), \
+             patch("jobs.generate_signals.apply_vix_override", return_value=("bull", ["Pullback Recovery"])), \
              patch("jobs.generate_signals.glob.glob", return_value=["dummy.parquet"]), \
              patch("jobs.generate_signals.load_universe", return_value=(["AAPL"], {"AAPL": "Apple"}, {"AAPL": "Tech"})), \
              patch("jobs.generate_signals.get_cache_manager", return_value=mock_cm), \
@@ -436,7 +436,7 @@ class TestRecommendationLifecycle(unittest.TestCase):
 
         with patch("jobs.generate_signals.get_client", return_value=mock_client), \
              patch("jobs.generate_signals.get_regime", return_value={"regime": "bull", "spy_price": 500, "spy_200dma": 450}), \
-             patch("jobs.generate_signals.apply_vix_override", return_value=("bull", ["Pullback Recovery"], 1.0)), \
+             patch("jobs.generate_signals.apply_vix_override", return_value=("bull", ["Pullback Recovery"])), \
              patch("jobs.generate_signals.glob.glob", return_value=["dummy.parquet"]), \
              patch("jobs.generate_signals.load_universe", return_value=(["AAPL"], {"AAPL": "Apple"}, {"AAPL": "Tech"})), \
              patch("jobs.generate_signals.get_cache_manager", return_value=mock_cm), \

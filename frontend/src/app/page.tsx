@@ -1,4 +1,4 @@
-import { fetchPortfolioSignals, fetchClosedSignals, fetchScanHistory, getLatestScanLog } from '../lib/database';
+import { fetchActiveRecommendations, fetchClosedSignals, fetchScanHistory, getLatestScanLog } from '../lib/database';
 import { Recommendation, ScanHistoryEntry, ScanLog } from '../types/database';
 import StockIdeasApp from '../components/stock-ideas-app';
 
@@ -16,7 +16,7 @@ export default async function Page() {
 
   try {
     const [active, closed, history, scanLog] = await Promise.all([
-      fetchPortfolioSignals(),
+      fetchActiveRecommendations(),
       fetchClosedSignals(),
       fetchScanHistory(14),
       getLatestScanLog(),

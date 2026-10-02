@@ -18,8 +18,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.ranker import SignalRanker
-from src.position_sizer import assign_tier
+from src.ranker import SignalRanker, assign_tier
 
 
 class TestStrategyDeduplication(unittest.TestCase):

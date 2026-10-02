@@ -44,7 +44,7 @@ from src.ranker import (
     validate_candidate_features,
 )
 from src.strategies.target_calculator import calculate_targets
-from src.position_sizer import assign_tier
+from src.ranker import assign_tier
 
 BENCHMARK_UNIVERSE = [
     # Mega-cap Tech

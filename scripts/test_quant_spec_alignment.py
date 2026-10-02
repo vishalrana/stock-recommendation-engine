@@ -59,9 +59,9 @@ from src.filters.earnings_filter import (
     earnings_risk_filter,
     fetch_earnings_calendar,
 )
-from src.position_sizer import (
-    allocate_capital,
-    validate_candidate_for_allocation,
+from src.ranker import (
+    assign_tier,
+    validate_candidate_features,
 )
 
 
@@ -346,58 +346,29 @@ def test_9_earnings_cache_freshness():
     print("  --> PASS: Earnings cache freshness correctly respects 24h TTL")
 
 
-def test_10_position_sizer_hardening():
-    print("\n--- Test 10: Position Sizer Hardening (Requires final_adjusted_half_kelly) ---")
-    valid_candidate = {
+def test_10_pure_recommendation_architecture():
+    print("\n--- Test 10: Pure Recommendation Architecture (No Portfolio / Sizing Machinery) ---")
+    pos_sizer_path = os.path.join(PROJECT_ROOT, "src", "position_sizer.py")
+    assert not os.path.exists(pos_sizer_path), "src/position_sizer.py must not exist"
+
+    # Validation uses validate_candidate_features in src.ranker
+    valid_features = {
         "ticker": "AAPL",
         "strategy": "trend_following",
-        "tier_label": "Strong Buy",
-        "composite_score": 88.0,
-        "expectancy_score": 58.8,
-        "regime_score": 90.0,
-        "momentum_score": 85.0,
-        "winrate_score": 70.0,
-        "context_score": 80.0,
-        "entry_price": 150.0,
-        "stop_loss": 140.0,
-        "weighted_rr_honest": 2.5,
-        "final_adjusted_half_kelly": 0.035,
-        "is_valid": True,
+        "current_rsi": 55.0,
+        "price": 150.0,
+        "dma_50": 140.0,
+        "volume_ratio": 1.2,
+        "macd_histogram": 0.5,
+        "winrate_score": 65.0,
     }
+    is_valid, msg = validate_candidate_features(valid_features)
+    assert is_valid is True, f"Expected valid candidate, got {msg}"
 
-    # Valid candidate with final_adjusted_half_kelly allocates properly
-    is_valid, _ = validate_candidate_for_allocation(valid_candidate)
-    assert is_valid is True
-
-    funded, _ = allocate_capital([valid_candidate], portfolio_value=100000.0, cash_balance=50000.0)
-    assert len(funded) == 1
-    assert funded[0]["final_adjusted_half_kelly"] == 0.035
-    assert funded[0]["allocated_dollars"] == 3500.0
-    assert funded[0]["exact_shares"] == round(3500.0 / 150.0, 4)
-
-    # Candidate missing final_adjusted_half_kelly must fail validation
-    invalid_candidate = {
-        "ticker": "AAPL",
-        "strategy": "trend_following",
-        "tier_label": "Strong Buy",
-        "composite_score": 88.0,
-        "expectancy_score": 58.8,
-        "regime_score": 90.0,
-        "momentum_score": 85.0,
-        "winrate_score": 70.0,
-        "context_score": 80.0,
-        "entry_price": 150.0,
-        "stop_loss": 140.0,
-        "weighted_rr_honest": 2.5,
-        # missing final_adjusted_half_kelly and half_kelly_fraction
-        "is_valid": True,
-    }
-
-    is_valid_inv, reason = validate_candidate_for_allocation(invalid_candidate)
-    assert is_valid_inv is False
-    assert "Invalid or non-positive Half-Kelly fraction" in reason
-
-    print("  --> PASS: Allocator strictly requires final_adjusted_half_kelly with zero unadjusted fallback")
+    # Tier assignment is pure quality-driven without capital/sizing
+    tier = assign_tier(88.0, 2.5)
+    assert tier == "Strong Buy"
+    print("  --> PASS: Pure recommendation architecture verified with zero portfolio/sizing machinery")
 
 
 def main():
@@ -413,7 +384,7 @@ def main():
     test_7_reach_probability_zero_fallback()
     test_8_scale_out_survival_boundary()
     test_9_earnings_cache_freshness()
-    test_10_position_sizer_hardening()
+    test_10_pure_recommendation_architecture()
     print("\n" + "=" * 80)
     print("  ALL 10 QUANT SPEC ALIGNMENT TESTS PASSED PERFECTLY!")
     print("=" * 80)

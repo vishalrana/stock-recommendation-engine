@@ -1,7 +1,7 @@
 import { getSupabase } from './supabase';
 import { Recommendation, ScanLog, ScanHistoryEntry } from '../types/database';
 
-export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
+export async function fetchActiveRecommendations(): Promise<Recommendation[]> {
   const supabase = getSupabase();
 
   // 1. Fetch ONLY active qualified recommendations without capital constraints
@@ -43,6 +43,8 @@ export async function fetchPortfolioSignals(): Promise<Recommendation[]> {
 
   return activeFormatted as Recommendation[];
 }
+
+export const fetchPortfolioSignals = fetchActiveRecommendations;
 
 export async function fetchScanLogSignals(): Promise<Recommendation[]> {
   const supabase = getSupabase();

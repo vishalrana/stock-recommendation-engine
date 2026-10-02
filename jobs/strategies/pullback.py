@@ -365,7 +365,7 @@ class PullbackRecoveryStrategy(StrategyInterface):
         if stop_loss is None:
             return None, "failed_maxrisk_gate"
 
-        entry_price = round(highs[t] * 1.001, 2)
+        entry_price = round(c, 2)
         if stop_loss >= entry_price:
             return None, "failed_maxrisk_gate"
 

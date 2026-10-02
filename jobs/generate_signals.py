@@ -47,6 +47,7 @@ from src.strategies.target_calculator import calculate_targets
 from src.filters.earnings_filter import fetch_earnings_calendar, earnings_risk_filter
 from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
 from src.quant_config import STRATEGY_STOP_CONFIG, normalize_strategy_key
+from src.entry_location import evaluate_entry_location
 
 
 def get_cache_mode(args) -> str:
@@ -1058,8 +1059,44 @@ def run_scan(
                 rejected_signals_to_insert.append(sig)
                 continue
 
-            # Candidate passes all filters and qualifies!
+            # 3. Evaluate Entry Location & Market Structure
+            loc_res = evaluate_entry_location(sig, ticker_df, strategy_name)
+            sig["entry_state"] = loc_res.state
+            sig["entry_location_reason"] = loc_res.reason
+            sig["support_level"] = loc_res.support_level
+            sig["resistance_level"] = loc_res.resistance_level
+            sig["range_position_pct"] = loc_res.range_position_pct
+
             t_upper = ticker.upper()
+            is_already_active = t_upper in open_tickers
+
+            if not is_already_active:
+                if loc_res.state == "WAIT":
+                    logger.info(f"[ENTRY LOCATION WAIT] Candidate {ticker} ({strategy_name}): {loc_res.reason}")
+                    sig["status"] = "rejected"
+                    sig["rejection_reason"] = f"WAIT: {loc_res.reason}"
+                    sig["allocated_dollars"] = 0.0
+                    sig["exact_shares"] = 0.0
+                    sig["max_shares"] = 0
+                    sig["position_sizing"] = f"WAIT ({sig['scale_out_weights']})"
+                    rejected_signals_to_insert.append(sig)
+                    continue
+                elif loc_res.state == "REJECT":
+                    logger.info(f"[ENTRY LOCATION REJECT] Candidate {ticker} ({strategy_name}): {loc_res.reason}")
+                    sig["status"] = "rejected"
+                    sig["rejection_reason"] = f"Rejected location: {loc_res.reason}"
+                    sig["allocated_dollars"] = 0.0
+                    sig["exact_shares"] = 0.0
+                    sig["max_shares"] = 0
+                    sig["position_sizing"] = f"REJECT ({sig['scale_out_weights']})"
+                    rejected_signals_to_insert.append(sig)
+                    continue
+                else:
+                    # Update narrative with objective market structure confirmation
+                    if loc_res.reason:
+                        sig["narrative"] = f"{sig.get('narrative', '')} | {loc_res.reason}".strip(" |")
+
+            # Candidate passes all filters and qualifies!
             if t_upper in seen_qualified_strategy_tickers:
                 winner_sig = seen_qualified_strategy_tickers[t_upper]
                 logger.info(

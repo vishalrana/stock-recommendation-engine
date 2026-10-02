@@ -17,8 +17,14 @@
 
 The Entry Location Engine is **conceptually sound, supported by historical replay data for adequately sampled momentum strategies, and quantitatively calibrated against the 129-session benchmark dataset**. 
 
-- **The Problem Addressed:** The pre-existing engine frequently recommended stocks in compromised market locations—specifically trading directly underneath overhead resistance, into multi-week exhaustion wicks, or immediately upon breaking down through critical support. The counterfactual replay suggests that Old recommendations trading within $\le 1.0\%$ of resistance suffered an elevated **34.6% stop-loss hit rate**, sub-50% win rates (48.0%), and negative early returns (-0.07% 5D).
-- **Scope of Evidence:** Empirical findings directly support strategies with adequate sample size ($N \ge 30$: 52-Week High Breakout, Cross-Sectional Momentum). For low-sample strategies ($N < 30$: Trend Following, Sector Rotation, Pullback Recovery, PEAD, Mean Reversion), outcomes are consistent with expected structural filtering but remain statistically inconclusive across diverse regimes.
+- **Scope of Evidence:** Entry Location has adequate historical evidence for the strategies with sufficient samples in the evaluated replay. Validation for the remaining strategies is inconclusive because of insufficient historical observations.
+  - **52-Week High Breakout:** Adequately sampled.
+  - **Cross-Sectional Momentum:** Adequately sampled.
+  - **Trend Following:** Insufficient sample.
+  - **Sector Rotation:** Insufficient sample.
+  - **Pullback Recovery:** Insufficient sample.
+  - **PEAD:** Insufficient sample.
+  - **Mean Reversion:** Insufficient sample / inactive under the evaluated bull regime.
 - **The Diagnosis & Resolution of the 71.8% Volume Drop:**
   In the initial audit run, recommendation volume dropped severely from 213 down to 60 (71.8% reduction), caused by:
   1. A mathematical sign flaw where `distance_to_resistance_pct` produced negative numbers when price was above resistance, triggering `is_near_resistance` on *every breakout and trend continuation* above resistance and shunting them into `WAIT`.
@@ -69,7 +75,14 @@ Evaluation conducted across 129 daily sessions:
 | **Sector Rotation** | 6 | 2 | 10 | 0 | **33.3%** | +0.55% | +1.10% | +1.45% | **50.0%** | -2.10% | +3.80% | 25.0% | +1.80% | +1.50% | +0.65 | *[Small N]* |
 | **Mean Reversion** | 0 | 0 | 0 | 0 | **0.0%** | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | *[Zero N - Regime]* |
 
-*\* Scope & Sample Size Constraints: Empirical evidence directly supports strategies with adequate sample sizes ($N \ge 30$: 52-Week High Breakout with $N=92$ Old / $36$ New, and Cross-Sectional Momentum with $N=109$ Old / $37$ New). In contrast, conclusions for Trend Following ($N=6$), Sector Rotation ($N=6$), Pullback Recovery ($N=1$), PEAD ($N=0$), and Mean Reversion ($N=0$) remain statistically inconclusive due to insufficient historical observations in the evaluated bull window ($N < 30$). (Note: SPY remained exclusively in `bull` regime above its 200 DMA from Feb-Aug 2026, which naturally deactivates Mean Reversion per `REGIME_STRATEGY_MAP` and compresses pullbacks).*
+*\* Scope & Sample Size Constraints: Entry Location has adequate historical evidence for the strategies with sufficient samples in the evaluated replay. Validation for the remaining strategies is inconclusive because of insufficient historical observations.
+- **52-Week High:** Adequately sampled.
+- **Cross-Sectional Momentum:** Adequately sampled.
+- **Trend Following:** Insufficient sample.
+- **Sector Rotation:** Insufficient sample.
+- **Pullback Recovery:** Insufficient sample.
+- **PEAD:** Insufficient sample.
+- **Mean Reversion:** Insufficient sample / inactive under the evaluated bull regime.*
 
 ---
 

@@ -28,6 +28,8 @@ TEST_SUITES = [
     "scripts/test_macd_normalization.py",
     "scripts/test_p0_fixes.py",
     "scripts/test_validator_serialization.py",
+    "scripts/test_us_universe.py",
+    "scripts/test_cache_safety_and_resilience.py",
 ]
 
 

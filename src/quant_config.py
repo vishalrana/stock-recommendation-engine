@@ -305,3 +305,13 @@ def normalize_strategy_key(strategy: str) -> str:
         return "mean_reversion"
     return s
 
+
+# ==============================================================================
+# 11. US UNIVERSE & LIQUIDITY FILTERS (Section 11)
+# Configurable universe-level filters for broad US equity discovery
+# ==============================================================================
+US_UNIVERSE_MIN_PRICE: float = 5.0                  # Minimum stock price ($)
+US_UNIVERSE_MIN_DOLLAR_VOLUME: float = 5_000_000.0  # 20-day average daily dollar volume ($5M)
+US_UNIVERSE_MIN_HISTORY_DAYS: int = 252             # 1 trading year of history required
+US_UNIVERSE_DOLLAR_VOLUME_WINDOW: int = 20          # 20 trading sessions for dollar volume window
+

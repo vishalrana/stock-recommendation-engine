@@ -46,8 +46,21 @@ from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
 from src.strategies.target_calculator import calculate_targets
 from src.filters.earnings_filter import fetch_earnings_calendar, earnings_risk_filter
 from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
-from src.quant_config import STRATEGY_STOP_CONFIG, normalize_strategy_key
+from src.quant_config import (
+    STRATEGY_STOP_CONFIG,
+    normalize_strategy_key,
+    US_UNIVERSE_MIN_PRICE,
+    US_UNIVERSE_MIN_DOLLAR_VOLUME,
+    US_UNIVERSE_MIN_HISTORY_DAYS,
+    US_UNIVERSE_DOLLAR_VOLUME_WINDOW,
+)
 from src.entry_location import evaluate_entry_location
+from src.universe import (
+    USEquitiesUniverseProvider,
+    evaluate_point_in_time_liquidity,
+    to_canonical_ticker,
+    to_provider_ticker,
+)
 
 VIX_EMERGENCY_THRESHOLD: float = 40.0
 
@@ -107,8 +120,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_universe() -> tuple[list, dict, dict]:
-    """Load S&P 500 + Nasdaq-100 universe from Wikipedia (deduplicated)."""
+def load_sp500_nasdaq_universe() -> tuple[list, dict, dict]:
+    """Load S&P 500 + Nasdaq-100 universe from Wikipedia (deduplicated) as benchmark set."""
     tickers: list[str] = []
     company_names: dict[str, str] = {}
     industries: dict[str, str] = {}
@@ -192,6 +205,45 @@ def load_universe() -> tuple[list, dict, dict]:
     return tickers, company_names, industries
 
 
+def load_universe(source: Optional[str] = None) -> tuple[list, dict, dict]:
+    """
+    Load stock discovery universe.
+    Governed by UNIVERSE_SOURCE env var or argument:
+      - 'expanded' (default): Broad US-listed common equities from USEquitiesUniverseProvider
+      - 'benchmark' / 'sp500_nasdaq': S&P 500 + Nasdaq-100 constituents
+    """
+    if source is None:
+        source = os.environ.get("UNIVERSE_SOURCE", "expanded").lower()
+
+    if source in {"benchmark", "sp500_nasdaq", "legacy"}:
+        logger.info("Loading benchmark universe (S&P 500 + Nasdaq-100)...")
+        return load_sp500_nasdaq_universe()
+
+    try:
+        provider = USEquitiesUniverseProvider()
+        records = provider.get_universe()
+        if not records:
+            logger.warning("USEquitiesUniverseProvider returned empty universe. Using benchmark fallback...")
+            return load_sp500_nasdaq_universe()
+
+        tickers = []
+        company_names = {}
+        industries = {}
+        for r in records:
+            t = r.data_provider_ticker
+            if t in BLACKLIST:
+                continue
+            tickers.append(t)
+            company_names[t] = r.company_name
+            industries[t] = r.sector if r.sector and r.sector != "Unknown" else r.industry
+
+        logger.info("Loaded broad US equity universe: %d eligible common equities.", len(tickers))
+        return tickers, company_names, industries
+    except Exception as e:
+        logger.error("Failed to load broad US universe: %s. Falling back to S&P/Nasdaq...", e)
+        return load_sp500_nasdaq_universe()
+
+
 def load_etf_universe() -> list[str]:
     """Load sector ETF universe."""
     from jobs.strategies.sector_rotation import SECTOR_ETFS
@@ -221,6 +273,11 @@ def run_cross_sectional_screen(universe: list[str], cache_manager) -> list[tuple
     
     returns.sort(key=lambda x: x[1], reverse=True)
     top_15pct = max(1, int(len(returns) * 0.15))
+    logger.info(
+        "[CROSS-SECTIONAL] Evaluated %d tickers with valid 63D data. Top 15%% threshold selects %d candidates.",
+        len(returns),
+        top_15pct,
+    )
     return returns[:top_15pct]
 
 
@@ -413,6 +470,7 @@ def run_scan(
     force_refresh: bool = False,
     target_tickers: Optional[List[str]] = None,
     verbose: bool = False,
+    universe_source: Optional[str] = None,
 ) -> dict:
     start_time = time.time()
 
@@ -476,7 +534,7 @@ def run_scan(
     logger.info("Regime detected: %s", regime_str)
     logger.info("Active strategies: %s", ", ".join(allowed_strategies))
 
-    all_u_tickers, all_u_names, all_u_industries = load_universe()
+    all_u_tickers, all_u_names, all_u_industries = load_universe(source=universe_source)
     if is_targeted:
         clean_targets = []
         for item in target_tickers:
@@ -620,6 +678,7 @@ def run_scan(
         "failed_maxgap_gate": 0,
         "failed_earnings_gate": 0,
         "failed_trades_gate": 0,
+        "failed_liquidity_gate": 0,
         "momentum_exceptions": 0,
     }
     rsi_passed_count = 0
@@ -683,6 +742,20 @@ def run_scan(
                     )
                     gate_rejections["failed_adx_gate"] += 1
                     continue
+
+                # Point-in-time liquidity & data integrity filter for common equities
+                if strategy.name != 'Sector Rotation':
+                    is_liquid, liq_reason, _ = evaluate_point_in_time_liquidity(
+                        raw,
+                        as_of_date=preload_end_str,
+                        min_price=US_UNIVERSE_MIN_PRICE,
+                        min_dollar_volume=US_UNIVERSE_MIN_DOLLAR_VOLUME,
+                        min_history_days=US_UNIVERSE_MIN_HISTORY_DAYS,
+                        dollar_volume_window=US_UNIVERSE_DOLLAR_VOLUME_WINDOW,
+                    )
+                    if not is_liquid:
+                        gate_rejections["failed_liquidity_gate"] += 1
+                        continue
 
                 df = calculate_indicators(raw).sort_index()
                 scanned_count += 1
@@ -1453,6 +1526,12 @@ def main():
         default=None,
         help="Targeted evaluation for specified tickers only (e.g. for Refresh Current Ideas)",
     )
+    parser.add_argument(
+        "--universe",
+        choices=["expanded", "benchmark"],
+        default=None,
+        help="Universe source ('expanded' for broad US common equities, 'benchmark' for S&P 500 + Nasdaq-100)",
+    )
     args = parser.parse_args()
 
     run_scan(
@@ -1461,6 +1540,7 @@ def main():
         force_refresh=getattr(args, "force_refresh", False),
         target_tickers=getattr(args, "tickers", None),
         verbose=getattr(args, "verbose", False),
+        universe_source=getattr(args, "universe", None),
     )
 
 

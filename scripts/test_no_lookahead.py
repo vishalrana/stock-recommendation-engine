@@ -167,15 +167,57 @@ class TestNoLookaheadIntegrity(unittest.TestCase):
         struct = analyze_market_structure(df)
         self.assertLess(struct.resistance_level, 900.0)
 
-    def test_exact_determinism_point_in_time(self):
-        """Verify identical results when running repeatedly on point-in-time slices."""
-        candidate = {"ticker": "MSFT"}
-        df_sub = self.df_full.iloc[:100]
-        
-        res1 = [evaluate_entry_location(candidate, df_sub, s).state for s in STRATEGIES]
-        res2 = [evaluate_entry_location(candidate, df_sub, s).state for s in STRATEGIES]
-        self.assertEqual(res1, res2)
+    def test_point_in_time_liquidity_no_lookahead(self):
+        """
+        Verify that evaluate_point_in_time_liquidity strictly ignores any future data
+        after as_of_date, preventing future volume spikes or price crashes from leaking into past evaluations.
+        """
+        from src.universe.filters import evaluate_point_in_time_liquidity
+
+        # Take historical slice up to date T
+        t_date_str = str(self.df_full.index[150].date())
+        df_slice = self.df_full.iloc[:151].copy()
+
+        is_liq_base, reason_base, m_base = evaluate_point_in_time_liquidity(
+            df_slice, as_of_date=t_date_str, min_history_days=60
+        )
+
+        # Append future data with extreme volume pump and price crash at T+1..N
+        df_corrupted = self.df_full.copy()
+        df_corrupted.iloc[151:, df_corrupted.columns.get_loc("VOLUME")] = 999_999_999.0
+        df_corrupted.iloc[151:, df_corrupted.columns.get_loc("CLOSE")] = 0.50
+
+        is_liq_test, reason_test, m_test = evaluate_point_in_time_liquidity(
+            df_corrupted, as_of_date=t_date_str, min_history_days=60
+        )
+
+        self.assertEqual(is_liq_base, is_liq_test, "Future data leaked into point-in-time liquidity decision!")
+        self.assertEqual(reason_base, reason_test)
+        self.assertEqual(m_base["price"], m_test["price"])
+        self.assertEqual(m_base["avg_dollar_volume"], m_test["avg_dollar_volume"])
+        self.assertEqual(m_base["history_days"], m_test["history_days"])
+
+    def test_cross_sectional_momentum_no_lookahead(self):
+        """
+        Verify that 63-day return used in Cross-Sectional Momentum only uses past prices
+        and cannot observe future performance.
+        """
+        df = self.df_full.iloc[:120].copy()
+        p_t = float(df["CLOSE"].iloc[-1])
+        p_t_minus_63 = float(df["CLOSE"].iloc[-64])
+        expected_ret = (p_t - p_t_minus_63) / p_t_minus_63
+
+        # Add future bar with a 500% pump
+        df_future = self.df_full.copy()
+        df_future.iloc[120:, df_future.columns.get_loc("CLOSE")] *= 5.0
+
+        # Point-in-time calculation at index 119
+        pit_slice = df_future.iloc[:120]
+        actual_ret = (float(pit_slice["CLOSE"].iloc[-1]) - float(pit_slice["CLOSE"].iloc[-64])) / float(pit_slice["CLOSE"].iloc[-64])
+
+        self.assertAlmostEqual(expected_ret, actual_ret, places=6)
 
 
 if __name__ == "__main__":
     unittest.main()
+

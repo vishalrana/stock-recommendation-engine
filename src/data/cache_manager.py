@@ -115,13 +115,20 @@ class CacheManager:
         return None
 
     def save_data_for_date(self, date_str: str, df: pd.DataFrame) -> None:
-        """Save MultiIndex DataFrame for a specific date."""
+        """Save MultiIndex DataFrame for a specific date, merging with existing data if present."""
         cache_path = self._get_cache_path(date_str)
         # Validation: do not write empty or mostly-null data
         if df.empty or "CLOSE" not in df.columns or df["CLOSE"].isna().mean() > 0.5:
             logger.warning(f"Rejecting save for {date_str}: >50% NaN values in CLOSE")
             return
         try:
+            if os.path.exists(cache_path):
+                try:
+                    existing_df = pd.read_parquet(cache_path, engine="pyarrow")
+                    combined = pd.concat([existing_df, df])
+                    df = combined[~combined.index.duplicated(keep="last")].sort_index()
+                except Exception as merge_err:
+                    logger.debug(f"Could not merge with existing {cache_path}: {merge_err}")
             df.to_parquet(cache_path, engine="pyarrow")
         except Exception as e:
             logger.error(f"Failed to save cache for {date_str}: {e}")
@@ -162,14 +169,14 @@ class CacheManager:
 
         logger.info(f"Downloading data for {len(tickers)} tickers from {start_date} to {end_date}...")
         
-        # Primary attempt: Download all tickers at once
-        full_df = _fetch(tickers)
-        if not full_df.empty:
-            return full_df
-            
-        logger.warning(f"Full batch download failed. Falling back to smaller batches (size={batch_size})...")
+        # Primary attempt: Download all tickers at once if small batch
+        if len(tickers) <= 100:
+            full_df = _fetch(tickers)
+            if not full_df.empty:
+                return full_df
+            logger.warning(f"Batch download failed. Falling back to smaller batches (size={batch_size})...")
         
-        # Fallback: Download in chunks
+        # Fallback / Large universe: Download in chunks
         chunked_dfs = []
         for i in range(0, len(tickers), batch_size):
             chunk = tickers[i:i+batch_size]
@@ -190,40 +197,57 @@ class CacheManager:
             logger.error(f"Failed to merge batch downloads: {e}")
             return pd.DataFrame()
 
-    def refresh_cache(self, tickers: List[str], start_date: str, end_date: str) -> None:
+    def ingest_dataframe_to_cache(self, df: pd.DataFrame) -> int:
         """
-        Fetch data for multiple tickers, transform to MultiIndex, and cache by date.
+        Transform yfinance group_by='ticker' DataFrame and save/merge to daily parquet files.
+        Returns the number of dates updated.
         """
-        df = self.download_batch_with_retry(tickers, start_date, end_date)
-        if df.empty:
-            logger.error("Download returned no data. Cache refresh failed.")
-            return
-
-        # Stack yfinance group_by='ticker' columns: (Ticker, Metric) -> MultiIndex index: [Ticker, Date]
+        if df is None or df.empty:
+            return 0
         try:
-            # Drop any columns that are all NaN (e.g. invalid tickers)
             df = df.dropna(how='all', axis=1)
-            
-            # Stack the ticker level (level 0) to index
             stacked = df.stack(level=0)
             stacked.index.names = ["Date", "Ticker"]
             stacked = stacked.reorder_levels(["Ticker", "Date"]).sort_index()
             stacked.columns = stacked.columns.str.upper()
             
-            # Filter to required columns
             valid_cols = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
             stacked = stacked[[c for c in valid_cols if c in stacked.columns]]
-            
-            # Cache each day separately
+            if stacked.empty:
+                return 0
+                
             grouped = stacked.groupby(level="Date")
             for date_val, group in grouped:
-                # date_val can be Timestamp
                 date_str = pd.to_datetime(date_val).strftime("%Y-%m-%d")
                 self.save_data_for_date(date_str, group)
-                
-            logger.info(f"Successfully cached {len(grouped)} daily files.")
+            return len(grouped)
         except Exception as e:
-            logger.error(f"Failed to transform and cache downloaded data: {e}", exc_info=True)
+            logger.error(f"Failed to transform and cache dataframe: {e}", exc_info=True)
+            return 0
+
+    def refresh_cache(self, tickers: List[str], start_date: str, end_date: str, batch_size: int = 100) -> None:
+        """
+        Fetch data for multiple tickers, transform to MultiIndex, and cache by date.
+        Processes in manageable chunks to ensure low memory usage and fault tolerance.
+        """
+        if not tickers:
+            return
+            
+        # Process in chunks of batch_size
+        total_chunks = (len(tickers) - 1) // batch_size + 1
+        logger.info(f"Refreshing cache for {len(tickers)} tickers across {total_chunks} chunks...")
+        
+        for idx in range(0, len(tickers), batch_size):
+            chunk = tickers[idx:idx + batch_size]
+            chunk_num = idx // batch_size + 1
+            logger.info(f"[CACHE SYNC] Fetching chunk {chunk_num}/{total_chunks} ({len(chunk)} tickers)...")
+            chunk_df = self.download_batch_with_retry(chunk, start_date, end_date)
+            if not chunk_df.empty:
+                dates_updated = self.ingest_dataframe_to_cache(chunk_df)
+                logger.info(f"[CACHE SYNC] Chunk {chunk_num}/{total_chunks} ingested ({dates_updated} dates updated).")
+            else:
+                logger.warning(f"[CACHE SYNC] Chunk {chunk_num}/{total_chunks} returned no data.")
+            time.sleep(1)
 
     def preload_history(self, start_date: str, end_date: str) -> int:
         """

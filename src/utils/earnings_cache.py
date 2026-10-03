@@ -1,100 +1,175 @@
+"""
+Earnings Cache Utility Module
+==============================
+Provides cached lookup for last and next earnings dates, integrating with
+the unified multi-layer earnings cache and Supabase backend.
+"""
+
 import os
-import json
 import time
 import logging
 import datetime
-from typing import Optional, Tuple
-import yfinance as yf
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
+
+from src.filters.earnings_filter import (
+    load_local_cache,
+    save_local_cache,
+    normalize_date_str,
+    fetch_single_ticker_provider,
+    persist_supabase_earnings,
+    DEFAULT_EARNINGS_CACHE_FILE,
+    EARNINGS_CACHE_TTL_SECONDS,
+    EarningsStatus,
+)
 
 logger = logging.getLogger(__name__)
 
-CACHE_FILE = "data/cache/earnings_dates_cache.json"
-TTL_SECONDS = 86400  # 24 hours
+CACHE_FILE = str(DEFAULT_EARNINGS_CACHE_FILE)
+TTL_SECONDS = EARNINGS_CACHE_TTL_SECONDS
+
 
 def _load_cache() -> dict:
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load earnings cache file: {e}")
-    return {}
+    return load_local_cache(DEFAULT_EARNINGS_CACHE_FILE)
+
 
 def _save_cache(cache: dict) -> None:
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(cache, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to save earnings cache file: {e}")
+    save_local_cache(cache, DEFAULT_EARNINGS_CACHE_FILE)
 
-def get_ticker_earnings(ticker: str, as_of_date: Optional[datetime.date] = None) -> Tuple[Optional[str], Optional[str]]:
+
+def get_ticker_earnings(
+    ticker: str,
+    as_of_date: Optional[datetime.date] = None,
+    supabase=None,
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Get (last_earnings_date, next_earnings_date) for a ticker.
-    Reads from local cache if valid; otherwise fetches from yfinance.
+    Reads from local cache if valid; otherwise checks Supabase, then fetches from yfinance.
     Dates are returned as ISO string formats (YYYY-MM-DD) or None.
     If as_of_date is provided, returns the most recent earnings date on or before as_of_date.
     """
-    ticker = ticker.upper()
+    ticker = ticker.strip().upper()
     cache = _load_cache()
     now = time.time()
-    
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    # 1. Check local cache
     if ticker in cache:
         entry = cache[ticker]
+        next_e = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
+        last_e = normalize_date_str(entry.get("last_earnings_date") or entry.get("last_earnings"))
+        all_dates = [normalize_date_str(d) for d in entry.get("all_earnings", []) if normalize_date_str(d)]
+
+        # Updated timestamp check
+        updated_at = entry.get("updated_at") or entry.get("cached_at", 0)
+        is_fresh = False
+        if isinstance(updated_at, (int, float)):
+            is_fresh = (now - updated_at) < TTL_SECONDS
+        elif isinstance(updated_at, str):
+            try:
+                dt = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                is_fresh = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() < TTL_SECONDS
+            except Exception:
+                is_fresh = False
+
         if as_of_date is not None:
-            as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)
-            all_dates = entry.get("all_earnings", [])
+            as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)[:10]
             if all_dates:
                 past = [d for d in all_dates if d <= as_of_str]
                 if past:
-                    return max(past), entry.get("next_earnings")
-            last_e = entry.get("last_earnings")
+                    return max(past), next_e
             if last_e and last_e <= as_of_str:
-                return last_e, entry.get("next_earnings")
-            return None, entry.get("next_earnings")
-        elif now - entry.get("updated_at", 0) < TTL_SECONDS:
-            logger.debug(f"Earnings cache HIT for {ticker}")
-            return entry.get("last_earnings"), entry.get("next_earnings")
-            
-    # Cache miss - fetch from yfinance
-    logger.info(f"Earnings cache MISS for {ticker}, fetching from yfinance...")
-    last_earnings = None
-    next_earnings = None
-    all_earnings = []
-    
+                return last_e, next_e
+            return None, next_e
+        elif is_fresh:
+            logger.debug("Earnings cache HIT for %s", ticker)
+            return last_e, next_e
+
+    # 2. Check Supabase persistent cache if client available
+    if supabase is not None:
+        try:
+            res = supabase.table("earnings_calendar").select("*").eq("ticker", ticker).execute()
+            if res.data and len(res.data) > 0:
+                row = res.data[0]
+                sb_next = normalize_date_str(row.get("next_earnings_date"))
+                sb_last = normalize_date_str(row.get("last_earnings_date"))
+                cache[ticker] = {
+                    "ticker": ticker,
+                    "last_earnings": sb_last,
+                    "next_earnings": sb_next,
+                    "last_earnings_date": sb_last,
+                    "next_earnings_date": sb_next,
+                    "all_earnings": [sb_last] if sb_last else [],
+                    "updated_at": now_iso,
+                    "cached_at": now,
+                    "status": row.get("status") or (EarningsStatus.KNOWN_UPCOMING.value if sb_next else EarningsStatus.KNOWN_CLEAR.value),
+                }
+                _save_cache(cache)
+                if as_of_date is not None:
+                    as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)[:10]
+                    last_valid = sb_last if (sb_last and sb_last <= as_of_str) else None
+                    return last_valid, sb_next
+                return sb_last, sb_next
+        except Exception as e:
+            logger.warning("Supabase lookup failed for %s: %s", ticker, e)
+
+    # 3. Provider fetch with retry and backoff
+    logger.info("Earnings cache MISS for %s, fetching from provider...", ticker)
+    sym, next_earnings, last_earnings, fiscal_p, fetch_status = fetch_single_ticker_provider(ticker)
+
+    # Extract all earnings dates if possible
+    all_earnings: List[str] = []
+    if last_earnings:
+        all_earnings.append(last_earnings)
+
     try:
+        import yfinance as yf
         t = yf.Ticker(ticker)
-        
-        # 1. Fetch last earnings date from earnings_dates index
-        dates = t.earnings_dates
-        if dates is not None and not dates.empty:
-            current_date = as_of_date or datetime.date.today()
-            all_earnings = sorted(list({d.date().strftime("%Y-%m-%d") for d in dates.index}))
-            past_dates = [d for d in dates.index if d.date() <= current_date]
-            if past_dates:
-                last_earnings = max(past_dates).strftime("%Y-%m-%d")
-                
-        # 2. Fetch next earnings date from calendar
-        calendar = t.calendar
-        if calendar is not None:
-            if isinstance(calendar, dict):
-                e_dates = calendar.get("Earnings Date")
-                if e_dates and isinstance(e_dates, list) and len(e_dates) > 0:
-                    next_earnings = datetime.datetime.strptime(str(e_dates[0]), "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d")
-            elif hasattr(calendar, "empty") and not calendar.empty:
-                if hasattr(calendar, "index") and len(calendar.index) > 0:
-                    next_earnings = datetime.datetime.strptime(str(calendar.index[0]), "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d")
-                    
-    except Exception as e:
-        logger.debug(f"Failed to fetch yfinance earnings for {ticker}: {e}")
-        
-    # Save to cache even if None (prevents endless retries on failed tickers)
+        edates = getattr(t, "earnings_dates", None)
+        if edates is not None and hasattr(edates, "index") and len(edates.index) > 0:
+            all_earnings = sorted(list({normalize_date_str(d) for d in edates.index if normalize_date_str(d)}))
+    except Exception:
+        pass
+
+    # Save to local cache
     cache[ticker] = {
+        "ticker": ticker,
         "last_earnings": last_earnings,
         "next_earnings": next_earnings,
+        "last_earnings_date": last_earnings,
+        "next_earnings_date": next_earnings,
         "all_earnings": all_earnings,
-        "updated_at": now
+        "updated_at": now_iso,
+        "cached_at": now,
+        "status": fetch_status,
     }
     _save_cache(cache)
-    
+
+    # Persist to Supabase if client available
+    if supabase is not None and fetch_status in (EarningsStatus.KNOWN_UPCOMING.value, EarningsStatus.KNOWN_CLEAR.value):
+        try:
+            persist_supabase_earnings([
+                {
+                    "ticker": ticker,
+                    "next_earnings_date": next_earnings,
+                    "last_earnings_date": last_earnings,
+                    "fiscal_period": fiscal_p,
+                    "updated_at": now_iso,
+                }
+            ], supabase)
+        except Exception as e:
+            logger.warning("Supabase persist failed for %s: %s", ticker, e)
+
+    if as_of_date is not None:
+        as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)[:10]
+        if all_earnings:
+            past = [d for d in all_earnings if d <= as_of_str]
+            if past:
+                return max(past), next_earnings
+        if last_earnings and last_earnings <= as_of_str:
+            return last_earnings, next_earnings
+        return None, next_earnings
+
     return last_earnings, next_earnings

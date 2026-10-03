@@ -1025,6 +1025,8 @@ def run_scan(
                 scan_date=scan_dt,
                 strategy=strategy_name,
                 earnings_calendar=earnings_calendar_cache,
+                instrument_type=sig.get("instrument_type"),
+                is_etf=sig.get("is_etf"),
             )
             sig["next_earnings_date"] = er_res.get("next_earnings_date")
             sig["days_to_earnings"] = er_res.get("days_to_earnings")

@@ -74,6 +74,7 @@ class ScoreCalibrator:
         self.band_stats: Dict[str, Dict[str, Any]] = {}
         self.strat_band_stats: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.strat_band_regime_stats: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        self.ticker_strat_band_regime_stats: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
         if self.records:
             self._fit()
 
@@ -145,35 +146,56 @@ class ScoreCalibrator:
         for k, recs in by_sbr.items():
             self.strat_band_regime_stats[k] = _calc_stats(recs)
 
+        # 4. Ticker + Strategy + Band + Regime stats
+        by_tsbr: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = {}
+        for r in matured:
+            tick = str(r.get("ticker", "")).upper()
+            if tick:
+                strat = normalize_strategy_key(r.get("strategy", ""))
+                b = find_score_band(float(r["composite_score"]))
+                reg = str(r.get("regime", "")).lower()
+                by_tsbr.setdefault((tick, strat, b, reg), []).append(r)
+
+        for k, recs in by_tsbr.items():
+            self.ticker_strat_band_regime_stats[k] = _calc_stats(recs)
+
     def get_outcome_probabilities(
         self,
         score: float,
         strategy_name: Optional[str] = None,
         regime: Optional[str] = None,
+        ticker: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Hierarchical outcome probability lookup with Bayesian smoothing.
         Hierarchy:
-        1. strategy + band + regime (if sample >= 20)
-        2. strategy + band (if sample >= 15)
-        3. score band (if sample >= 10)
-        4. canonical prior (Beta-Binomial smoothed)
+        1. ticker + strategy + score band + regime (if sample >= 20)
+        2. strategy + score band + regime (if sample >= 20)
+        3. strategy + score band (if sample >= 15)
+        4. score band empirical probability (if sample >= 10)
+        5. canonical Bayesian / prior fallback when empirical sample is insufficient
+        6. explicit INSUFFICIENT_SAMPLE state if fallback cannot be established
         """
         strat_key = normalize_strategy_key(strategy_name) if strategy_name else "trend_following"
         band = find_score_band(score)
         reg_key = str(regime).strip().lower() if regime else ""
+        tick_key = str(ticker).strip().upper() if ticker else ""
 
         # Prior for strategy
         prior = CANONICAL_TARGET_PRIORS.get(strat_key, GLOBAL_CANONICAL_PRIOR)
 
         # Check hierarchy
+        tsbr_key = (tick_key, strat_key, band, reg_key)
         sbr_key = (strat_key, band, reg_key)
         sb_key = (strat_key, band)
         
         stats = None
         tier_used = "canonical_prior"
         
-        if sbr_key in self.strat_band_regime_stats and self.strat_band_regime_stats[sbr_key]["sample"] >= MIN_SAMPLE_REGIME_STRATEGY:
+        if tick_key and tsbr_key in self.ticker_strat_band_regime_stats and self.ticker_strat_band_regime_stats[tsbr_key]["sample"] >= MIN_SAMPLE_REGIME_STRATEGY:
+            stats = self.ticker_strat_band_regime_stats[tsbr_key]
+            tier_used = "ticker_strategy_band_regime"
+        elif sbr_key in self.strat_band_regime_stats and self.strat_band_regime_stats[sbr_key]["sample"] >= MIN_SAMPLE_REGIME_STRATEGY:
             stats = self.strat_band_regime_stats[sbr_key]
             tier_used = "strategy_band_regime"
         elif sb_key in self.strat_band_stats and self.strat_band_stats[sb_key]["sample"] >= MIN_SAMPLE_STRATEGY:
@@ -183,7 +205,9 @@ class ScoreCalibrator:
             stats = self.band_stats[band]
             tier_used = "score_band"
 
-        if stats and stats["sample"] >= MIN_SAMPLE_SCORE_BAND:
+        is_sufficient = stats is not None and stats["sample"] >= MIN_SAMPLE_SCORE_BAND
+
+        if is_sufficient:
             n = stats["sample"]
             # Beta-Binomial shrinkage towards canonical prior
             p_t1 = (stats["t1_hits"] + SMOOTHING_ALPHA * prior["t1"]) / (n + SMOOTHING_ALPHA)
@@ -194,7 +218,10 @@ class ScoreCalibrator:
             sample_size = n
             mean_ret = stats["mean_return"]
             median_ret = stats["median_return"]
-        else:
+            emp_t1 = stats["p_t1_raw"]
+            emp_t2 = stats["p_t2_raw"]
+            emp_t3 = stats["p_t3_raw"]
+        elif prior:
             # Fallback directly to canonical Bayesian prior
             p_t1 = prior["t1"]
             p_t2 = prior["t2"]
@@ -204,6 +231,34 @@ class ScoreCalibrator:
             sample_size = stats["sample"] if stats else 0
             mean_ret = 0.0
             median_ret = 0.0
+            emp_t1 = None
+            emp_t2 = None
+            emp_t3 = None
+        else:
+            # Invariant 6: explicit INSUFFICIENT_SAMPLE state if even fallback cannot be established
+            tier_used = "insufficient_sample"
+            return {
+                "score": round(float(score), 2),
+                "score_band": band,
+                "strategy": strat_key,
+                "p_t1": None,
+                "p_t2": None,
+                "p_t3": None,
+                "p_stop": None,
+                "p_positive": None,
+                "empirical_p_t1": None,
+                "empirical_p_t2": None,
+                "empirical_p_t3": None,
+                "analytical_p_t1": None,
+                "analytical_p_t2": None,
+                "analytical_p_t3": None,
+                "mean_return": 0.0,
+                "median_return": 0.0,
+                "sample_size": 0,
+                "calibration_tier": tier_used,
+                "is_sufficient_sample": False,
+                "empirical_status": "INSUFFICIENT_SAMPLE",
+            }
 
         # Monotonicity enforcement: P(T1) >= P(T2) >= P(T3)
         p_t1 = max(0.0, min(1.0, float(p_t1)))
@@ -211,6 +266,14 @@ class ScoreCalibrator:
         p_t3 = max(0.0, min(p_t2, float(p_t3)))
         p_stop = max(0.0, min(1.0, float(p_stop)))
         p_pos = max(0.0, min(1.0, float(p_pos)))
+
+        confidence = "prior"
+        if sample_size >= 20:
+            confidence = "high"
+        elif sample_size >= 10:
+            confidence = "medium"
+        elif sample_size >= 5:
+            confidence = "low"
 
         return {
             "score": round(float(score), 2),
@@ -221,16 +284,25 @@ class ScoreCalibrator:
             "p_t3": round(p_t3, 4),
             "p_stop": round(p_stop, 4),
             "p_positive": round(p_pos, 4),
+            "empirical_p_t1": round(emp_t1, 4) if emp_t1 is not None else None,
+            "empirical_p_t2": round(emp_t2, 4) if emp_t2 is not None else None,
+            "empirical_p_t3": round(emp_t3, 4) if emp_t3 is not None else None,
+            "analytical_p_t1": round(p_t1, 4),
+            "analytical_p_t2": round(p_t2, 4),
+            "analytical_p_t3": round(p_t3, 4),
             "mean_return": round(mean_ret, 2),
             "median_return": round(median_ret, 2),
             "sample_size": sample_size,
             "calibration_tier": tier_used,
-            "is_sufficient_sample": sample_size >= MIN_SAMPLE_SCORE_BAND,
+            "is_sufficient_sample": is_sufficient,
+            "empirical_status": "VALIDATED" if is_sufficient else "INSUFFICIENT_SAMPLE",
+            "confidence": confidence,
         }
 
     def generate_score_outcome_table(self) -> List[Dict[str, Any]]:
         """
-        Generate empirical table rows for the required Section 22 report.
+        Generate empirical table rows for the required Section 22/23 report.
+        Distinguishes TRUE EMPIRICAL CALIBRATION vs BAYESIAN / PRIOR FALLBACK vs INSUFFICIENT SAMPLE.
         If a band has insufficient sample size, values are marked 'INSUFFICIENT SAMPLE'.
         """
         rows = []
@@ -243,22 +315,36 @@ class ScoreCalibrator:
                 rows.append({
                     "band": band_str,
                     "sample": sample,
+                    "empirical_win_rate": "INSUFFICIENT SAMPLE",
+                    "empirical_expectancy": "INSUFFICIENT SAMPLE",
+                    "p_t1": "INSUFFICIENT SAMPLE",
+                    "p_t2": "INSUFFICIENT SAMPLE",
+                    "p_t3": "INSUFFICIENT SAMPLE",
                     "t1": "INSUFFICIENT SAMPLE",
                     "t2": "INSUFFICIENT SAMPLE",
                     "t3": "INSUFFICIENT SAMPLE",
                     "stop": "INSUFFICIENT SAMPLE",
                     "positive": "INSUFFICIENT SAMPLE",
+                    "fallback_used": "canonical_prior",
+                    "confidence": "prior",
                     "status": "INSUFFICIENT SAMPLE",
                 })
             else:
                 rows.append({
                     "band": band_str,
                     "sample": sample,
+                    "empirical_win_rate": f"{st['p_pos_raw']:.1%}",
+                    "empirical_expectancy": f"{st['mean_return']:.2f}%",
+                    "p_t1": f"{st['p_t1_raw']:.1%}",
+                    "p_t2": f"{st['p_t2_raw']:.1%}",
+                    "p_t3": f"{st['p_t3_raw']:.1%}",
                     "t1": f"{st['p_t1_raw']:.1%}",
                     "t2": f"{st['p_t2_raw']:.1%}",
                     "t3": f"{st['p_t3_raw']:.1%}",
                     "stop": f"{st['p_stop_raw']:.1%}",
                     "positive": f"{st['p_pos_raw']:.1%}",
+                    "fallback_used": "empirical_score_band",
+                    "confidence": "high" if sample >= 20 else "medium",
                     "status": "VALIDATED",
                 })
         return rows

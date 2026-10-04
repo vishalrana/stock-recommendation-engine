@@ -18,16 +18,26 @@ logger = logging.getLogger(__name__)
 from src.quant_config import SURVIVORSHIP_BIAS_HAIRCUT
 
 
+# In-memory cache for static delisted tickers
+_DELISTED_TICKERS_CACHE: Optional[List[Dict[str, Any]]] = None
+
+
 def load_delisted_tickers() -> List[Dict[str, Any]]:
     """Loads the static registry of 50+ delisted S&P 500 tickers."""
+    global _DELISTED_TICKERS_CACHE
+    if _DELISTED_TICKERS_CACHE is not None:
+        return _DELISTED_TICKERS_CACHE
+
     root = Path(__file__).resolve().parent.parent.parent
     config_path = root / "config" / "delisted_tickers.json"
     if not config_path.exists():
+        _DELISTED_TICKERS_CACHE = []
         return []
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data.get("delisted_tickers", [])
+            _DELISTED_TICKERS_CACHE = data.get("delisted_tickers", [])
+            return _DELISTED_TICKERS_CACHE
     except Exception as e:
         logger.warning(f"Failed loading delisted_tickers.json: {e}")
         return []

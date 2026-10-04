@@ -77,6 +77,10 @@ class TargetCalculationResult:
         return asdict(self)
 
 
+# Global in-memory cache for reach distributions: (ticker, holding_days) -> np.ndarray
+_REACH_DIST_CACHE: Dict[Tuple[str, int], np.ndarray] = {}
+
+
 def get_reach_prob_distribution(
     ticker: str,
     holding_days: int,
@@ -88,17 +92,23 @@ def get_reach_prob_distribution(
     For each start day d in the lookback window:
         max_gain_d = (max(Close[d : d + H + 1]) - Close[d]) / Close[d]
     """
-    cache_dir = os.path.join("data", "cache", "reach_dists")
-    cache_file = os.path.join(cache_dir, f"{ticker.upper()}.parquet")
+    t_up = ticker.upper()
+    cache_key = (t_up, int(holding_days))
+    if cache_key in _REACH_DIST_CACHE:
+        return _REACH_DIST_CACHE[cache_key]
 
-    # Check disk cache if price_df not explicitly passed
-    if price_df is None and os.path.exists(cache_file):
+    cache_dir = os.path.join("data", "cache", "reach_dists")
+    cache_file = os.path.join(cache_dir, f"{t_up}.parquet")
+
+    # 1. Check disk cache
+    if os.path.exists(cache_file):
         try:
             cached_df = pd.read_parquet(cache_file)
             col_name = f"max_gain_{holding_days}d"
             if col_name in cached_df.columns:
                 vals = cached_df[col_name].dropna().to_numpy(dtype=float)
                 if len(vals) > 0:
+                    _REACH_DIST_CACHE[cache_key] = vals
                     return vals
         except Exception as e:
             logger.debug("Failed reading reach_dist cache for %s: %s", ticker, e)
@@ -159,6 +169,7 @@ def get_reach_prob_distribution(
     except Exception as e:
         logger.debug("Failed saving reach_dist cache for %s: %s", ticker, e)
 
+    _REACH_DIST_CACHE[cache_key] = arr
     return arr
 
 

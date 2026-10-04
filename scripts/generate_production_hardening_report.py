@@ -138,8 +138,13 @@ def generate_report():
             2
         )
 
-        tier = assign_tier(comp_score)
+        has_setup = len(qual_signals) > 0
+        strat_status = qual_signals[0]["strategy"] if has_setup else "NO_SETUP"
+        tier = assign_tier(comp_score, has_strategy_setup=has_setup)
         
+        # Recommendation composite score display vs analytical score
+        comp_display = comp_score if has_setup else f"N/A (Analytical: {comp_score:.2f} — NO STRATEGY SETUP)"
+
         # Earnings filter
         earnings_res = earnings_risk_filter(t, scan_date, strat_key, {})
         
@@ -164,19 +169,21 @@ def generate_report():
             price_df=df,
         )
 
-        is_rec = (comp_score >= 65.0) and earnings_res["pass"] and (el_res.state == "BUY")
+        # A recommendation requires a valid strategy setup, qualifying composite score, earnings pass, and BUY entry state
+        is_rec = has_setup and (comp_score >= 65.0) and earnings_res["pass"] and (el_res.state == "BUY")
 
         d_info = {
             "ticker": t,
-            "strategy": strat_name if qual_signals else "None (Did not qualify raw)",
-            "qualified_raw": len(qual_signals) > 0,
+            "strategy": strat_status,
+            "qualified_raw": has_setup,
             "raw_win_rate": hardened_m["raw_win_rate"],
             "shrunk_win_rate": hardened_m["shrunk_win_rate"],
             "completed_trades": hardened_m["completed_trades"],
             "provenance": hardened_m["win_rate_provenance"],
             "confidence": hardened_m["metric_confidence"],
             "momentum_score": mom_score,
-            "composite_score": comp_score,
+            "composite_score": comp_display,
+            "raw_composite_score": comp_score,
             "tier": tier,
             "earnings_pass": earnings_res["pass"],
             "earnings_reason": earnings_res.get("reason_code"),

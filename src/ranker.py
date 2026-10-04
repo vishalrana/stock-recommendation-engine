@@ -161,15 +161,18 @@ def compute_context_score(
     return max(0.0, min(100.0, float(raw)))
 
 
-def assign_tier(composite_score: float, honest_rr: float = 2.0) -> str:
+def assign_tier(composite_score: float, honest_rr: float = 2.0, has_strategy_setup: bool = True) -> str:
     """
-    Assign recommendation tier based strictly on composite score.
+    Assign recommendation tier based strictly on composite score and strategy qualification.
     R:R is preserved as an analytical output and for signature compatibility only,
     and NEVER qualifies or disqualifies a recommendation.
+    If has_strategy_setup is False, returns 'NO_SETUP' (preventing unmerited Buy tiers).
     - Strong Buy: composite_score >= 80.0
     - Buy: composite_score >= 65.0
     - Rejected: all others
     """
+    if not has_strategy_setup:
+        return "NO_SETUP"
     score = float(composite_score)
     if score >= 80.0:
         return "Strong Buy"

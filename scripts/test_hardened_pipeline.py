@@ -315,6 +315,63 @@ class TestHardenedPipeline(unittest.TestCase):
         result = unittest.TextTestRunner(verbosity=0).run(suite)
         self.assertTrue(result.wasSuccessful())
 
+    # 21. ORCL / NO_SETUP Diagnostic Semantics (Section 4)
+    def test_21_orcl_no_setup_semantics(self):
+        # A ticker with NO qualifying strategy setup must NOT receive a Buy/Strong Buy tier
+        comp_score = 66.75  # analytically > 65.0
+        tier = assign_tier(comp_score, has_strategy_setup=False)
+        self.assertEqual(tier, "NO_SETUP")
+        
+        # When has_strategy_setup=True, Buy tier is allowed
+        tier_valid = assign_tier(comp_score, has_strategy_setup=True)
+        self.assertEqual(tier_valid, "Buy")
+
+    # 22. Empirical vs Analytical Probability Separation & 6-tier Hierarchy (Section 2)
+    def test_22_empirical_vs_analytical_hierarchy(self):
+        # Initialize calibrator with empty / sparse records
+        calibrator = ScoreCalibrator([])
+        probs = calibrator.get_outcome_probabilities(score=68.0, strategy_name="trend_following", regime="bull", ticker="AAPL")
+        
+        # Sparse records must trigger canonical prior fallback without fabricating empirical numbers
+        self.assertFalse(probs["is_sufficient_sample"])
+        self.assertEqual(probs["empirical_status"], "INSUFFICIENT_SAMPLE")
+        self.assertEqual(probs["calibration_tier"], "canonical_prior")
+        self.assertIsNone(probs["empirical_p_t1"])
+        self.assertIsNotNone(probs["analytical_p_t1"])
+        self.assertTrue(0.0 <= probs["analytical_p_t1"] <= 1.0)
+        self.assertTrue(probs["analytical_p_t1"] >= probs["analytical_p_t2"] >= probs["analytical_p_t3"])
+
+        # Table rows must report INSUFFICIENT SAMPLE
+        table_rows = calibrator.generate_score_outcome_table()
+        for row in table_rows:
+            self.assertEqual(row["status"], "INSUFFICIENT SAMPLE")
+            self.assertEqual(row["fallback_used"], "canonical_prior")
+
+    # 23. Repository Execution & Allocation Isolation (Section 5)
+    def test_23_repository_execution_isolation(self):
+        import src.ranker as rk
+        # Ensure no Kelly or portfolio allocation methods exist in active ranker
+        forbidden_attrs = [
+            "calculate_half_kelly", "half_kelly", "allocate_capital",
+            "calculate_normalized_sizing", "execute_trade", "place_order"
+        ]
+        for attr in forbidden_attrs:
+            self.assertFalse(hasattr(rk, attr), f"Ranker must not have active method: {attr}")
+
+    # 24. Reach Distribution Cache Efficiency (Section 13)
+    def test_24_reach_distribution_caching(self):
+        from src.strategies.target_calculator import get_reach_prob_distribution, _REACH_DIST_CACHE
+        # Call with mock price_df
+        dates = pd.date_range("2025-01-01", periods=60, freq="B")
+        df_mock = pd.DataFrame({"CLOSE": np.linspace(100, 150, 60)}, index=dates)
+        dist1 = get_reach_prob_distribution("CACHE_TEST_TICKER", 10, price_df=df_mock)
+        # Should be in memory cache
+        self.assertIn(("CACHE_TEST_TICKER", 10), _REACH_DIST_CACHE)
+        self.assertGreater(len(dist1), 0)
+        # Second call hits memory cache
+        dist2 = get_reach_prob_distribution("CACHE_TEST_TICKER", 10, price_df=None)
+        np.testing.assert_array_equal(dist1, dist2)
+
 
 if __name__ == "__main__":
     unittest.main()

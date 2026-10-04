@@ -312,7 +312,11 @@ class CacheManager:
             # Filter by date range
             mask = (df.index >= start_date) & (df.index <= end_date)
             return df.loc[mask]
-            
+
+        # If history was already preloaded into memory, a miss means the ticker does not exist in cache
+        if self._history_cache:
+            return None
+
         # 2. Disk fallback (reading matching daily files)
         logger.debug(f"Cache miss for {ticker} in memory, reading daily files from disk...")
         start_dt = pd.to_datetime(start_date)

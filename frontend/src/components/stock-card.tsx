@@ -109,7 +109,7 @@ export default function StockCard({
     recommendation.finbert_sentiment !== null &&
     recommendation.finbert_sentiment !== undefined &&
     !isNaN(Number(recommendation.finbert_sentiment)) &&
-    Number(recommendation.finbert_sentiment) > 0.15
+    Number(recommendation.finbert_sentiment) > 0.20
   ) {
     evidenceItems.push({
       label: 'Positive news',
@@ -141,7 +141,7 @@ export default function StockCard({
     }
   }
 
-  // 4. Fundamentally strong (hide if metrics unavailable)
+  // 4. Fundamentally strong (strictly require actual D/E < 1.0 and CR > 1.5 with genuine data)
   const de = recommendation.de_ratio;
   const cr = recommendation.current_ratio;
   if (
@@ -158,22 +158,20 @@ export default function StockCard({
       label: 'Fundamentally strong',
       detail: `D/E ${Number(de).toFixed(2)} · Current ratio ${Number(cr).toFixed(2)}`,
     });
-  } else if (
-    recommendation.context_fundamental !== null &&
-    recommendation.context_fundamental !== undefined &&
-    !isNaN(Number(recommendation.context_fundamental)) &&
-    Number(recommendation.context_fundamental) >= 15
-  ) {
-    evidenceItems.push({
-      label: 'Fundamentally strong',
-      detail: 'Healthy balance sheet',
-    });
   }
 
   // Win rate and Analytical R:R helpers
-  const winRateDisplay = (recommendation.past_win_rate !== null && recommendation.past_win_rate !== undefined && !isNaN(Number(recommendation.past_win_rate)))
-    ? `${(Number(recommendation.past_win_rate) * 100).toFixed(0)}%`
-    : 'Not enough history';
+  let winRateDisplay = 'Not enough history';
+  if (
+    recommendation.past_win_rate !== null &&
+    recommendation.past_win_rate !== undefined &&
+    !isNaN(Number(recommendation.past_win_rate)) &&
+    Number(recommendation.past_win_rate) > 0
+  ) {
+    const rawWr = Number(recommendation.past_win_rate);
+    const wrPct = rawWr <= 1.0 ? rawWr * 100 : rawWr;
+    winRateDisplay = `${wrPct.toFixed(0)}%`;
+  }
 
   const rrVal = recommendation.weighted_rr_honest ?? recommendation.weighted_rr ?? recommendation.risk_reward;
   const rrDisplay = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal)))

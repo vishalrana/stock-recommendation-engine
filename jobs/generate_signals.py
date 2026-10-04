@@ -252,13 +252,14 @@ def load_etf_universe() -> list[str]:
     return list(SECTOR_ETFS.keys())
 
 
-def run_cross_sectional_screen(universe: list[str], cache_manager) -> list[tuple]:
+def run_cross_sectional_screen(universe: list[str], cache_manager, as_of_date: Optional[str] = None) -> list[tuple]:
     """Pre-screen: calculate 3-month returns for all tickers in universe, keep top 15%."""
     returns = []
     
     # Calculate returns over last 120 days to ensure 63 trading days are covered
-    end_date_str = datetime.now().date().isoformat()
-    start_date_str = (datetime.now().date() - timedelta(days=120)).isoformat()
+    ref_dt = datetime.fromisoformat(as_of_date).date() if as_of_date else datetime.now().date()
+    end_date_str = ref_dt.isoformat()
+    start_date_str = (ref_dt - timedelta(days=120)).isoformat()
 
     for ticker in universe:
         try:
@@ -496,12 +497,22 @@ def run_scan(
     logger.info("Cache mode: %s", cache_mode.upper())
     logger.info("=" * 60)
 
-    scan_date_today = datetime.now().date().isoformat()
-    signal_date = scan_date_today
+    import datetime as dt_module
+    scan_execution_timestamp = dt_module.datetime.now(dt_module.timezone.utc).isoformat()
 
     regime_info = get_regime()
     sma_regime = regime_info["regime"]
     regime_str = sma_regime
+
+    market_data_date = regime_info.get("date")
+    if not market_data_date:
+        market_data_date = dt_module.datetime.now().date().isoformat()
+    recommendation_date = market_data_date
+    scan_date_today = market_data_date
+    signal_date = market_data_date
+    scan_date_dt = dt_module.datetime.fromisoformat(market_data_date).date() if isinstance(market_data_date, str) else market_data_date
+
+    logger.info("Market data date: %s | Execution timestamp (UTC): %s", market_data_date, scan_execution_timestamp)
 
     use_hmm = os.environ.get("USE_HMM", "false").lower() == "true"
     if use_hmm:
@@ -568,7 +579,7 @@ def run_scan(
 
     # ── Cache Refresh (mode-aware) ────────────────────────────────────
     t_download_start = time.time()
-    end_date_dt = datetime.now().date()
+    end_date_dt = scan_date_dt
 
     if cache_mode == "force":
         logger.info("FORCE: Clearing all cache and re-downloading full history...")
@@ -690,8 +701,8 @@ def run_scan(
     signals_blocked = 0
 
     # Preload the entire daily cache history into memory once for all tickers to maximize speed!
-    preload_end_str = datetime.now().date().isoformat()
-    preload_start_str = (datetime.now().date() - timedelta(days=500)).isoformat()
+    preload_end_str = market_data_date
+    preload_start_str = (scan_date_dt - timedelta(days=500)).isoformat()
     cache_manager.preload_history(preload_start_str, preload_end_str)
 
     # Indicator cache across strategy passes to prevent redundant DataFrame calculations
@@ -724,7 +735,7 @@ def run_scan(
             if is_targeted:
                 current_universe = tickers
             else:
-                screened_info = run_cross_sectional_screen(tickers, cache_manager)
+                screened_info = run_cross_sectional_screen(tickers, cache_manager, as_of_date=market_data_date)
                 current_universe = [x[0] for x in screened_info]
         else:
             current_universe = tickers

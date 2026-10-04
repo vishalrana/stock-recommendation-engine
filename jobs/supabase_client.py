@@ -166,8 +166,22 @@ def update_history_outcome(ticker, status, exit_price, sell_signal=True, allocat
     scan_date_str = record.get('scan_date')
     
     return_pct = None
-    if entry_price > 0 and exit_price is not None:
-        return_pct = round(((exit_price - entry_price) / entry_price) * 100, 2)
+    if entry_price > 0:
+        t1 = float(record.get('target_1') or 0) if record.get('target_1') else None
+        t2 = float(record.get('target_2') or 0) if record.get('target_2') else None
+        t3 = float(record.get('target_3') or 0) if record.get('target_3') else None
+        sl = float(record.get('stop_loss') or 0) if record.get('stop_loss') else entry_price * 0.93
+
+        from src.outcome.outcome_calculator import calculate_static_scale_out_return
+        return_pct = calculate_static_scale_out_return(
+            entry_price=entry_price,
+            stop_loss=sl,
+            target_1=t1,
+            target_2=t2,
+            target_3=t3,
+            outcome=outcome,
+            exit_price=exit_price,
+        )
         
     holding_days = None
     if scan_date_str:

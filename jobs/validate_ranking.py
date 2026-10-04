@@ -60,65 +60,27 @@ def evaluate_signal(row: dict) -> dict | None:
     except Exception:
         return None
 
-    # Walk day by day to find first event (stop or target hit)
-    for i, (dt, row_data) in enumerate(df.iterrows()):
-        
-        day_high = float(row_data['High'])
-        day_low = float(row_data['Low'])
-        day_close = float(row_data['Close'])
-        holding_days = i + 1
+    from src.outcome.outcome_calculator import evaluate_signal_outcome, SAME_DAY_AMBIGUITY_POLICY
 
-        outcome_date_str = dt.date().isoformat() if hasattr(dt, 'date') else str(dt)[:10]
+    res = evaluate_signal_outcome(
+        df=df,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_1=target_1,
+        target_2=target_2,
+        target_3=target_3,
+        max_holding_days=EXPIRY_TRADING_DAYS,
+        ambiguity_policy=SAME_DAY_AMBIGUITY_POLICY,
+    )
+    if res:
+        return {
+            'outcome': res['outcome'],
+            'outcome_return_pct': res['outcome_return_pct'],
+            'outcome_date': res['outcome_date'],
+            'outcome_holding_days': res['outcome_holding_days'],
+        }
+    return None
 
-        # Check stop first (stop takes priority on same day)
-        if day_low <= stop_loss:
-            # Approximate exit at stop (could be worse due to gap, use stop as estimate)
-            exit_price = stop_loss
-            return_pct = float(round((exit_price - entry_price) / entry_price * 100, 4))
-            return {
-                'outcome': 'stopped',
-                'outcome_return_pct': return_pct,
-                'outcome_date': outcome_date_str,
-                'outcome_holding_days': holding_days
-            }
-
-        # Check targets (highest first — if T3 hit same day as T1, credit T3)
-        if target_3 and day_high >= target_3:
-            return_pct = float(round((target_3 - entry_price) / entry_price * 100, 4))
-            return {
-                'outcome': 'hit_t3',
-                'outcome_return_pct': return_pct,
-                'outcome_date': outcome_date_str,
-                'outcome_holding_days': holding_days
-            }
-        if target_2 and day_high >= target_2:
-            return_pct = float(round((target_2 - entry_price) / entry_price * 100, 4))
-            return {
-                'outcome': 'hit_t2',
-                'outcome_return_pct': return_pct,
-                'outcome_date': outcome_date_str,
-                'outcome_holding_days': holding_days
-            }
-        if day_high >= target_1:
-            return_pct = float(round((target_1 - entry_price) / entry_price * 100, 4))
-            return {
-                'outcome': 'hit_t1',
-                'outcome_return_pct': return_pct,
-                'outcome_date': outcome_date_str,
-                'outcome_holding_days': holding_days
-            }
-
-        # Check expiry
-        if holding_days >= EXPIRY_TRADING_DAYS:
-            return_pct = float(round((day_close - entry_price) / entry_price * 100, 4))
-            return {
-                'outcome': 'expired',
-                'outcome_return_pct': return_pct,
-                'outcome_date': outcome_date_str,
-                'outcome_holding_days': holding_days
-            }
-
-    return None  # Still open, not enough bars yet
 
 
 def run_validation():

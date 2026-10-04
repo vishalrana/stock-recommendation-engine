@@ -348,4 +348,11 @@ REASON_EARNINGS_OUTSIDE_BLACKOUT = "EARNINGS_OUTSIDE_BLACKOUT"
 REASON_EARNINGS_BLACKOUT_BLOCK = "EARNINGS_BLACKOUT_BLOCK"
 REASON_SECTOR_ETF_EXEMPT = "SECTOR_ETF_EXEMPT"
 
+# ==============================================================================
+# 15. CATALYST RECENCY CONFIGURATION & AMBIGUITY POLICY
+# ==============================================================================
+EARNINGS_CATALYST_MAX_AGE_DAYS: int = 45   # Positive earnings surprise must be <= 45 days old to override blackout
+NEWS_CATALYST_MAX_AGE_DAYS: int = 14       # Positive news sentiment must be recent (<= 14 days)
+SAME_DAY_AMBIGUITY_POLICY: str = "STOP_FIRST"
+
 

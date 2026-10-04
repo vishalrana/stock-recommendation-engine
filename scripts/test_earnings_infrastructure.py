@@ -249,8 +249,8 @@ class TestEarningsInfrastructure(unittest.TestCase):
             mock_provider.return_value = ("SURVIVOR", None, None, None, EarningsStatus.UNKNOWN.value)
             res = fetch_earnings_calendar(["SURVIVOR"], supabase=None, cache_path=self.test_cache_file)
             
-            # Must NOT be marked UNKNOWN; survives using cached past date and falls back to KNOWN_CLEAR!
-            self.assertEqual(res["SURVIVOR"]["status"], EarningsStatus.KNOWN_CLEAR.value)
+            # Stale + failed refresh must be UNKNOWN to prevent silent KNOWN_CLEAR evasion
+            self.assertEqual(res["SURVIVOR"]["status"], EarningsStatus.UNKNOWN.value)
             self.assertEqual(res["SURVIVOR"]["last_earnings_date"], "2026-08-15")
             self.assertEqual(res["SURVIVOR"]["source"], "cache_fallback")
 

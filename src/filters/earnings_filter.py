@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 from src.quant_config import (
     EARNINGS_BLACKOUT_DAYS,
     EARNINGS_CACHE_TTL_SECONDS,
+    EARNINGS_CATALYST_MAX_AGE_DAYS,
+    NEWS_CATALYST_MAX_AGE_DAYS,
     REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE,
     REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
     REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST,
@@ -452,9 +454,18 @@ def fetch_earnings_calendar(
                             prior_last = normalize_date_str(
                                 prior.get("last_earnings_date") or prior.get("last_earnings")
                             )
+                            is_fresh = is_earnings_record_fresh(prior, EARNINGS_CACHE_TTL_SECONDS)
+                            if is_fresh and prior_next and prior_next >= today_iso:
+                                fallback_status = EarningsStatus.KNOWN_UPCOMING.value
+                            elif is_fresh and not prior_next:
+                                fallback_status = EarningsStatus.KNOWN_CLEAR.value
+                            else:
+                                fallback_status = EarningsStatus.UNKNOWN.value
+
                             logger.info(
-                                "[EARNINGS CACHE] Provider failed for %s, falling back to cached earnings",
+                                "[EARNINGS CACHE] Provider failed for %s, falling back to cached earnings (status: %s)",
                                 sym_orig,
+                                fallback_status,
                             )
                             calendar_map[sym_orig] = {
                                 "ticker": sym_orig,
@@ -462,11 +473,7 @@ def fetch_earnings_calendar(
                                 "last_earnings_date": prior_last,
                                 "fiscal_period": prior.get("fiscal_period"),
                                 "updated_at": prior.get("updated_at") or now_iso,
-                                "status": (
-                                    EarningsStatus.KNOWN_UPCOMING.value
-                                    if prior_next
-                                    else EarningsStatus.KNOWN_CLEAR.value
-                                ),
+                                "status": fallback_status,
                                 "source": "cache_fallback",
                             }
                         else:
@@ -489,17 +496,21 @@ def fetch_earnings_calendar(
                         prior_last = normalize_date_str(
                             prior.get("last_earnings_date") or prior.get("last_earnings")
                         )
+                        is_fresh = is_earnings_record_fresh(prior, EARNINGS_CACHE_TTL_SECONDS)
+                        if is_fresh and prior_next and prior_next >= today_iso:
+                            fallback_status = EarningsStatus.KNOWN_UPCOMING.value
+                        elif is_fresh and not prior_next:
+                            fallback_status = EarningsStatus.KNOWN_CLEAR.value
+                        else:
+                            fallback_status = EarningsStatus.UNKNOWN.value
+
                         calendar_map[sym_orig] = {
                             "ticker": sym_orig,
                             "next_earnings_date": prior_next,
                             "last_earnings_date": prior_last,
                             "fiscal_period": prior.get("fiscal_period"),
                             "updated_at": prior.get("updated_at") or now_iso,
-                            "status": (
-                                EarningsStatus.KNOWN_UPCOMING.value
-                                if prior_next
-                                else EarningsStatus.KNOWN_CLEAR.value
-                            ),
+                            "status": fallback_status,
                             "source": "cache_fallback",
                         }
                     else:
@@ -591,18 +602,6 @@ def earnings_risk_filter(
             "last_earnings_date": None,
         }
 
-    # Evaluate Catalyst classification
-    is_pos_catalyst = (
-        catalyst_type == "positive"
-        or (earnings_surprise_pct is not None and earnings_surprise_pct > 0.0)
-        or (news_sentiment is not None and news_sentiment > 0.20)
-    )
-    is_neg_catalyst = (
-        catalyst_type == "negative"
-        or (earnings_surprise_pct is not None and earnings_surprise_pct <= -10.0)
-        or (news_sentiment is not None and news_sentiment <= -0.30)
-    )
-
     entry = (earnings_calendar.get(ticker.upper()) if earnings_calendar else {}) or {}
     next_date_val = entry.get("next_earnings_date") or entry.get("next_earnings")
     last_date_val = entry.get("last_earnings_date") or entry.get("last_earnings")
@@ -612,6 +611,43 @@ def earnings_risk_filter(
 
     next_dt = datetime.date.fromisoformat(next_dt_str) if next_dt_str else None
     last_dt = datetime.date.fromisoformat(last_dt_str) if last_dt_str else None
+
+    # Calculate days since last earnings release to enforce catalyst recency
+    days_since_earnings = (scan_date - last_dt).days if (last_dt and scan_date) else None
+
+    # Recency check: Earnings surprise must be within EARNINGS_CATALYST_MAX_AGE_DAYS (<= 45 days)
+    # to be qualified as an active catalyst capable of overriding blackout risk.
+    is_old_surprise = (
+        days_since_earnings is not None
+        and (days_since_earnings > EARNINGS_CATALYST_MAX_AGE_DAYS or days_since_earnings < 0)
+    )
+    earnings_surprise_is_recent = (
+        earnings_surprise_pct is not None
+        and earnings_surprise_pct > 0.0
+        and not is_old_surprise
+    )
+
+    if earnings_surprise_pct is not None and earnings_surprise_pct > 0.0 and not earnings_surprise_is_recent:
+        logger.debug(
+            "[EARNINGS CATALYST] %s: Positive surprise +%.2f%% from %s days ago exceeds %d-day window; "
+            "will not override upcoming blackout.",
+            ticker,
+            earnings_surprise_pct,
+            str(days_since_earnings),
+            EARNINGS_CATALYST_MAX_AGE_DAYS,
+        )
+
+    # Evaluate Catalyst classification
+    is_pos_catalyst = (
+        catalyst_type == "positive"
+        or earnings_surprise_is_recent
+        or (news_sentiment is not None and news_sentiment > 0.20)
+    )
+    is_neg_catalyst = (
+        catalyst_type == "negative"
+        or (earnings_surprise_pct is not None and earnings_surprise_pct <= -10.0 and (days_since_earnings is None or days_since_earnings <= EARNINGS_CATALYST_MAX_AGE_DAYS))
+        or (news_sentiment is not None and news_sentiment <= -0.30)
+    )
 
     # 3. Special handling for PEAD: Post-Earnings Announcement Drift strategy
     if strat_key == "pead":

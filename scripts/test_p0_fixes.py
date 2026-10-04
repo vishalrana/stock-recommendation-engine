@@ -236,8 +236,14 @@ def test_p0_5_decommission_portfolio_drawdown_controls():
     print("\n--- Testing P0-5: Decommission Portfolio Drawdown & Risk Controls ---")
     risk_controls_path = os.path.join(PROJECT_ROOT, "src", "risk_controls.py")
     assert not os.path.exists(risk_controls_path), "src/risk_controls.py must be deleted"
+    from unittest.mock import patch, MagicMock
+    import pandas as pd
     from jobs.generate_signals import apply_vix_override
-    r, s = apply_vix_override("bull", ["Trend Following"])
+    with patch("yfinance.Ticker") as mock_yf:
+        mock_inst = MagicMock()
+        mock_inst.history.return_value = pd.DataFrame({"Close": [18.5]})
+        mock_yf.return_value = mock_inst
+        r, s = apply_vix_override("bull", ["Trend Following"])
     assert r in ("bull", "bear")
     assert isinstance(s, list)
     print("Risk controls isolated to market regime with zero simulated portfolio halts: PASS")

@@ -106,11 +106,12 @@ class Week52HighStrategy(StrategyInterface):
         narrative = ", ".join(parts) + "."
 
         # Scoring
-        past_win_rate = metrics.get('win_rate', 55.0) if metrics else 55.0
-        total_trades = metrics.get('total_trades', 0) if metrics else 0
-        expectancy_pct = metrics.get('expectancy_pct', 2.0) if metrics else 2.0
+        past_win_rate = metrics.get('shrunk_win_rate', metrics.get('win_rate', 50.0)) if metrics else 50.0
+        total_trades = metrics.get('completed_trades', metrics.get('total_trades', 0)) if metrics else 0
+        expectancy_pct = metrics.get('shrunk_expectancy', metrics.get('expectancy_pct', 1.79)) if metrics else 1.79
         wins = metrics.get('wins', 0) if metrics else 0
         losses = metrics.get('losses', 0) if metrics else 0
+
 
         momentum_score = 0
         if pct_vs_52w > 0: momentum_score = 30
@@ -153,9 +154,10 @@ class Week52HighStrategy(StrategyInterface):
         if expectancy_pct < MIN_EXPECTANCY:
             is_blocked = True
             blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if total_trades < MIN_SAMPLE:
+        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
             is_blocked = True
             blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
+
 
         if is_blocked:
             tier_label = 'Blocked'

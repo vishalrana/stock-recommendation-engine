@@ -30,7 +30,9 @@ from io import StringIO
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
+import numpy as np
 import requests
+
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
@@ -266,12 +268,18 @@ def run_cross_sectional_screen(universe: list[str], cache_manager) -> list[tuple
             close_col = "CLOSE" if "CLOSE" in raw.columns else "Close"
             price = raw[close_col].iloc[-1]
             price_63d = raw[close_col].iloc[-63]
-            ret = (price / price_63d - 1) * 100 if price_63d > 0 else 0
-            returns.append((ticker, ret))
+            if price is not None and price_63d is not None and float(price_63d) > 0:
+                ret = (float(price) / float(price_63d) - 1.0) * 100.0
+                if ret is not None and not np.isnan(ret) and np.isfinite(ret):
+                    returns.append((ticker, float(ret)))
         except Exception:
             continue
     
-    returns.sort(key=lambda x: x[1], reverse=True)
+    # Deterministic sort: descending by return, ties broken alphabetically by ticker (Section 5)
+    returns.sort(key=lambda x: (-x[1], x[0]))
+    if not returns:
+        logger.info("[CROSS-SECTIONAL] No valid returns computed; returning empty candidate list.")
+        return []
     top_15pct = max(1, int(len(returns) * 0.15))
     logger.info(
         "[CROSS-SECTIONAL] Evaluated %d tickers with valid 63D data. Top 15%% threshold selects %d candidates.",
@@ -282,21 +290,15 @@ def run_cross_sectional_screen(universe: list[str], cache_manager) -> list[tuple
 
 
 def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries: dict) -> dict:
-    """Build per-ticker metrics dict for strategy scan."""
-    m = metrics_map.get(ticker.upper(), {})
-    wins = m.get("wins", 0)
-    losses = m.get("losses", 0)
-    return {
-        "win_rate": m.get("win_rate", 0.0),
-        "expectancy_pct": m.get("expectancy_pct", 0.0),
-        "total_trades": m.get("total_signals", 0),
-        "wins": wins,
-        "losses": losses,
-        "completed_trades": wins + losses,
-        "median_win_return": m.get("median_win_return", 0.0),
-        "company_name": company_names.get(ticker, ticker),
-        "industry": industries.get(ticker, "Unknown"),
-    }
+    """Build per-ticker metrics dict for strategy scan using Bayesian shrinkage (Section 2)."""
+    from src.utils.metrics_pipeline import build_hardened_metrics
+    t_up = ticker.upper()
+    m_record = metrics_map.get(t_up)
+    hardened = build_hardened_metrics(ticker=t_up, raw_record=m_record)
+    hardened["company_name"] = company_names.get(ticker, ticker)
+    hardened["industry"] = industries.get(ticker, "Unknown")
+    return hardened
+
 
 
 def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
@@ -628,7 +630,8 @@ def run_scan(
     # ── Earnings Calendar Preload (Cached Daily) ─────────────────────
     earnings_calendar_cache = {}
     try:
-        earnings_calendar_cache = fetch_earnings_calendar(tickers, supabase=supabase)
+        allow_earnings_net = not (dry_run or cache_mode == "local")
+        earnings_calendar_cache = fetch_earnings_calendar(tickers, supabase=supabase, allow_network=allow_earnings_net)
         logger.info(f"[EARNINGS CALENDAR] Loaded {len(earnings_calendar_cache)} ticker schedules")
     except Exception as ec_err:
         logger.warning(f"Could not load earnings calendar: {ec_err}")
@@ -691,6 +694,9 @@ def run_scan(
     preload_start_str = (datetime.now().date() - timedelta(days=500)).isoformat()
     cache_manager.preload_history(preload_start_str, preload_end_str)
 
+    # Indicator cache across strategy passes to prevent redundant DataFrame calculations
+    evaluated_dfs: dict = {}
+
     for strategy in STRATEGIES:
         if strategy.name not in allowed_strategies:
             skipped_strategies[strategy.name] = regime_str
@@ -730,34 +736,45 @@ def run_scan(
                 continue
 
             try:
-                raw = cache_manager.get_ticker_history(ticker, preload_start_str, preload_end_str)
-                if raw is None or raw.empty:
-                    continue
-
-                if len(raw) < 60:
-                    logger.warning(
-                        "%s: not enough history (%d bars) for stable ADX. Skipping.",
-                        ticker,
-                        len(raw),
-                    )
-                    gate_rejections["failed_adx_gate"] += 1
-                    continue
-
-                # Point-in-time liquidity & data integrity filter for common equities
-                if strategy.name != 'Sector Rotation':
-                    is_liquid, liq_reason, _ = evaluate_point_in_time_liquidity(
-                        raw,
-                        as_of_date=preload_end_str,
-                        min_price=US_UNIVERSE_MIN_PRICE,
-                        min_dollar_volume=US_UNIVERSE_MIN_DOLLAR_VOLUME,
-                        min_history_days=US_UNIVERSE_MIN_HISTORY_DAYS,
-                        dollar_volume_window=US_UNIVERSE_DOLLAR_VOLUME_WINDOW,
-                    )
-                    if not is_liquid:
-                        gate_rejections["failed_liquidity_gate"] += 1
+                # Fast indicator & liquidity cache across strategies
+                if ticker in evaluated_dfs:
+                    df = evaluated_dfs[ticker]
+                    if df is None:
+                        continue
+                else:
+                    raw = cache_manager.get_ticker_history(ticker, preload_start_str, preload_end_str)
+                    if raw is None or raw.empty:
+                        evaluated_dfs[ticker] = None
                         continue
 
-                df = calculate_indicators(raw).sort_index()
+                    if len(raw) < 60:
+                        logger.warning(
+                            "%s: not enough history (%d bars) for stable ADX. Skipping.",
+                            ticker,
+                            len(raw),
+                        )
+                        gate_rejections["failed_adx_gate"] += 1
+                        evaluated_dfs[ticker] = None
+                        continue
+
+                    # Point-in-time liquidity & data integrity filter for common equities
+                    if strategy.name != 'Sector Rotation':
+                        is_liquid, liq_reason, _ = evaluate_point_in_time_liquidity(
+                            raw,
+                            as_of_date=preload_end_str,
+                            min_price=US_UNIVERSE_MIN_PRICE,
+                            min_dollar_volume=US_UNIVERSE_MIN_DOLLAR_VOLUME,
+                            min_history_days=US_UNIVERSE_MIN_HISTORY_DAYS,
+                            dollar_volume_window=US_UNIVERSE_DOLLAR_VOLUME_WINDOW,
+                        )
+                        if not is_liquid:
+                            gate_rejections["failed_liquidity_gate"] += 1
+                            evaluated_dfs[ticker] = None
+                            continue
+
+                    df = calculate_indicators(raw).sort_index()
+                    evaluated_dfs[ticker] = df
+
                 scanned_count += 1
                 successfully_evaluated_tickers.add(ticker)
 
@@ -849,31 +866,52 @@ def run_scan(
                 logger.warning(f"Could not compute momentum score for {sig.get('ticker')}: {m_err}")
                 sig["momentum_score"] = None
 
-            # 2. Historical Win Rate Score & Provenance (P0-6)
+            # 2. Historical Win Rate Score & Provenance (P0-6 & Section 2)
+            from src.utils.metrics_pipeline import build_hardened_metrics
             t_upper = sig["ticker"].upper()
-            w_val = sig.get("strategy_win_rate") or sig.get("past_win_rate")
+            m_rec = metrics_map.get(t_upper)
+            hardened = build_hardened_metrics(
+                ticker=t_upper,
+                raw_record=m_rec,
+                strategy_name=sig.get("strategy"),
+                strategy_win_rate=sig.get("strategy_win_rate"),
+                past_win_rate=sig.get("past_win_rate"),
+            )
+
             if sig.get("strategy_win_rate") is not None:
                 provenance = "strategy_specific"
             elif sig.get("past_win_rate") is not None:
                 provenance = "candidate_provided"
             elif t_upper in metrics_map:
-                w_val = metrics_map[t_upper].get("win_rate")
                 provenance = "generic_ticker_prior"
             else:
                 provenance = "unavailable"
 
-            if w_val is not None:
-                sig["winrate_score"] = float(w_val)
-                sig["win_rate"] = float(w_val)
-                sig["past_win_rate"] = float(w_val)
-                sig["win_rate_provenance"] = provenance
-            else:
-                sig["winrate_score"] = None
-                sig["win_rate_provenance"] = "unavailable"
+            shrunk_wr = hardened["shrunk_win_rate"]
+            raw_wr = hardened["raw_win_rate"]
 
-            # 3. Strategy Expectancy Score
+            sig["winrate_score"] = float(shrunk_wr)
+            sig["win_rate"] = float(shrunk_wr)
+            sig["shrunk_win_rate"] = float(shrunk_wr)
+            sig["raw_win_rate"] = float(raw_wr)
+            sig["win_rate_provenance"] = provenance
+            sig["metric_source"] = hardened["metric_source"]
+            sig["metric_confidence"] = hardened["metric_confidence"]
+            sig["metric_sample_size"] = hardened["metric_sample_size"]
+            sig["completed_trades"] = hardened["completed_trades"]
+            sig["wins"] = hardened["wins"]
+            sig["losses"] = hardened["losses"]
+            sig["expectancy_pct"] = hardened["shrunk_expectancy"]
+            sig["raw_expectancy"] = hardened["raw_expectancy"]
+            sig["shrunk_expectancy"] = hardened["shrunk_expectancy"]
+
+            # 3. Strategy Expectancy Score (Section 2 & 9)
             strat_name = sig.get("strategy", "Trend Following")
-            sig["expectancy_score"] = compute_expectancy_score(strat_name)
+            sig["expectancy_score"] = compute_expectancy_score(
+                strat_name,
+                adjusted_expectancy_pct=hardened["shrunk_expectancy"] if hardened["completed_trades"] > 0 else None,
+            )
+
 
             # 4. Continuous Regime Score
             sig["regime_score"] = compute_regime_alignment(strat_name, regime_str)
@@ -1027,20 +1065,33 @@ def run_scan(
                 earnings_calendar=earnings_calendar_cache,
                 instrument_type=sig.get("instrument_type"),
                 is_etf=sig.get("is_etf"),
+                earnings_surprise_pct=sig.get("earnings_surprise_pct"),
+                news_sentiment=sig.get("finbert_sentiment"),
+                catalyst_type=sig.get("catalyst_override"),
+                allow_unknown_date=True,
             )
             sig["next_earnings_date"] = er_res.get("next_earnings_date")
             sig["days_to_earnings"] = er_res.get("days_to_earnings")
+            sig["earnings_reason_code"] = er_res.get("reason_code")
 
             if not er_res.get("pass", True):
                 sig["status"] = "rejected"
                 sig["earnings_rejected"] = True
                 sig["rejection_reason"] = er_res.get("reason", "Earnings blackout")
                 earnings_rejected_count += 1
-                logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']}")
+                logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']} [{sig['earnings_reason_code']}]")
                 rejected_signals_to_insert.append(sig)
                 continue
             else:
                 sig["earnings_rejected"] = False
+
+            # Early exit for non-qualifying scores (Buy threshold is 65.0)
+            if score < 65.0:
+                sig["tier_label"] = "Rejected"
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Composite score {score:.1f} below Buy threshold (65.0)"
+                rejected_signals_to_insert.append(sig)
+                continue
 
             atr = float(sig.get("atr_14", 0.0))
 

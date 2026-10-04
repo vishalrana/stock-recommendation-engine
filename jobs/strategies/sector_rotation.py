@@ -138,18 +138,19 @@ class SectorRotationStrategy(StrategyInterface):
 
         # === COMPOSITE SCORING ===
         # ETF metrics may not exist in ticker_metrics, use defaults if not seeded
-        if metrics and metrics.get('total_trades', 0) > 0:
-            past_win_rate = metrics.get('win_rate', 55.0)
-            total_trades = metrics.get('total_trades', 0)
-            expectancy_pct = metrics.get('expectancy_pct', 2.0)
+        if metrics and (metrics.get('completed_trades', metrics.get('total_trades', 0)) > 0):
+            past_win_rate = metrics.get('shrunk_win_rate', metrics.get('win_rate', 55.0))
+            total_trades = metrics.get('completed_trades', metrics.get('total_trades', 0))
+            expectancy_pct = metrics.get('shrunk_expectancy', metrics.get('expectancy_pct', 1.02))
             wins = metrics.get('wins', 0)
             losses = metrics.get('losses', 0)
         else:
             past_win_rate = 55.0
             total_trades = 5  # Passes MIN_SAMPLE = 5
-            expectancy_pct = 2.0
+            expectancy_pct = 1.02
             wins = 3
             losses = 2
+
 
         # Sector momentum score (0-30)
         momentum_score = 0
@@ -205,9 +206,10 @@ class SectorRotationStrategy(StrategyInterface):
         if expectancy_pct < MIN_EXPECTANCY:
             is_blocked = True
             blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if total_trades < MIN_SAMPLE:
+        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
             is_blocked = True
             blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
+
 
         if is_blocked:
             tier_label = 'Blocked'

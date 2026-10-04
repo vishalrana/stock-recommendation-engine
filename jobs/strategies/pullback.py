@@ -25,10 +25,10 @@ MIN_SAMPLE_SIZE = 5            # Relaxed from 10
 
 
 def apply_guardrails(signal: dict) -> dict:
-    """Override tier label if historical performance is below minimums."""
-    win_rate = signal.get("past_win_rate", 0)
-    expectancy = signal.get("expectancy_pct", 0)
-    sample = signal.get("total_trades", 0)
+    """Override tier label if historical performance is below minimums (consumes shrunk metrics)."""
+    win_rate = signal.get("shrunk_win_rate", signal.get("past_win_rate", 50.0))
+    expectancy = signal.get("shrunk_expectancy", signal.get("expectancy_pct", 1.44))
+    sample = signal.get("completed_trades", signal.get("total_trades", 0))
 
     reasons = []
 
@@ -36,7 +36,7 @@ def apply_guardrails(signal: dict) -> dict:
         reasons.append(f"Win rate {win_rate:.1f}% below {MIN_WIN_RATE}%")
     if expectancy < MIN_EXPECTANCY:
         reasons.append(f"Expectancy {expectancy:.2f}% below {MIN_EXPECTANCY}%")
-    if sample < MIN_SAMPLE_SIZE:
+    if 0 < sample < MIN_SAMPLE_SIZE and win_rate < MIN_WIN_RATE:
         reasons.append(f"Sample size {sample} below {MIN_SAMPLE_SIZE} trades")
 
     if reasons:

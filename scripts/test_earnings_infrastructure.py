@@ -256,16 +256,22 @@ class TestEarningsInfrastructure(unittest.TestCase):
 
     # 15. UNKNOWN when no reliable data exists
     def test_15_unknown_when_no_reliable_data_exists(self):
-        # Empty cache, provider returns UNKNOWN -> result is UNKNOWN (fails closed)
+        from src.quant_config import REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST
+        # Empty cache, provider returns UNKNOWN -> result is UNKNOWN
         with patch("src.filters.earnings_filter.fetch_single_ticker_provider") as mock_provider:
             mock_provider.return_value = ("NO_DATA_CO", None, None, None, EarningsStatus.UNKNOWN.value)
             res = fetch_earnings_calendar(["NO_DATA_CO"], supabase=None, cache_path=self.test_cache_file)
             self.assertEqual(res["NO_DATA_CO"]["status"], EarningsStatus.UNKNOWN.value)
 
-            # Evaluate through earnings risk filter -> must be rejected
-            decision = earnings_risk_filter("NO_DATA_CO", self.scan_date, "trend_following", res)
-            self.assertFalse(decision["pass"])
-            self.assertEqual(decision["status"], EarningsStatus.UNKNOWN.value)
+            # Evaluate through earnings risk filter with allow_unknown_date=False -> must fail closed
+            decision_closed = earnings_risk_filter("NO_DATA_CO", self.scan_date, "trend_following", res, allow_unknown_date=False)
+            self.assertFalse(decision_closed["pass"])
+            self.assertEqual(decision_closed["status"], EarningsStatus.UNKNOWN.value)
+
+            # Evaluate with default allow_unknown_date=True (no negative catalyst) -> proceeds safely
+            decision_default = earnings_risk_filter("NO_DATA_CO", self.scan_date, "trend_following", res)
+            self.assertTrue(decision_default["pass"])
+            self.assertEqual(decision_default["reason_code"], REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST)
 
     # 16. Correct blackout calculation
     def test_16_correct_blackout_calculation(self):

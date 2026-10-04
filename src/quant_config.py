@@ -315,3 +315,37 @@ US_UNIVERSE_MIN_DOLLAR_VOLUME: float = 5_000_000.0  # 20-day average daily dolla
 US_UNIVERSE_MIN_HISTORY_DAYS: int = 252             # 1 trading year of history required
 US_UNIVERSE_DOLLAR_VOLUME_WINDOW: int = 20          # 20 trading sessions for dollar volume window
 
+# ==============================================================================
+# 12. BAYESIAN SHRINKAGE CONFIGURATION (Section 2)
+# ==============================================================================
+BAYESIAN_SHRINKAGE_ALPHA: float = 5.0
+BAYESIAN_PRIOR_WIN_RATE: float = 50.0  # 50.0% neutral prior
+BAYESIAN_PRIOR_EXPECTANCY_PCT: float = 1.44  # Baseline historical expectancy
+MIN_SAMPLE_SIZE_EVIDENCE: int = 5
+
+# ==============================================================================
+# 13. EMPIRICAL SCORE CALIBRATION BANDS (Section 3 & 4)
+# ==============================================================================
+SCORE_CALIBRATION_BANDS = [
+    {"band": "50-54.99", "min": 50.0, "max": 54.99},
+    {"band": "55-59.99", "min": 55.0, "max": 59.99},
+    {"band": "60-64.99", "min": 60.0, "max": 64.99},
+    {"band": "65-69.99", "min": 65.0, "max": 69.99},
+    {"band": "70-74.99", "min": 70.0, "max": 74.99},
+    {"band": "75-79.99", "min": 75.0, "max": 79.99},
+    {"band": "80+",      "min": 80.0, "max": 100.0},
+]
+
+# ==============================================================================
+# 14. EARNINGS & CATALYST REASON CODES (Section 6)
+# ==============================================================================
+REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE = "EARNINGS_POSITIVE_CATALYST_OVERRIDE"
+REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK = "EARNINGS_NEGATIVE_CATALYST_BLOCK"
+REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST = "EARNINGS_DATE_UNKNOWN_NO_CATALYST"
+REASON_EARNINGS_DATE_UNKNOWN_POSITIVE = "EARNINGS_DATE_UNKNOWN_POSITIVE_CATALYST"
+REASON_EARNINGS_DATE_UNKNOWN_NEGATIVE = "EARNINGS_DATE_UNKNOWN_NEGATIVE_CATALYST_BLOCK"
+REASON_EARNINGS_OUTSIDE_BLACKOUT = "EARNINGS_OUTSIDE_BLACKOUT"
+REASON_EARNINGS_BLACKOUT_BLOCK = "EARNINGS_BLACKOUT_BLOCK"
+REASON_SECTOR_ETF_EXEMPT = "SECTOR_ETF_EXEMPT"
+
+

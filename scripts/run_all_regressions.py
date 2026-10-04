@@ -31,6 +31,7 @@ TEST_SUITES = [
     "scripts/test_us_universe.py",
     "scripts/test_cache_safety_and_resilience.py",
     "scripts/test_earnings_infrastructure.py",
+    "scripts/test_hardened_pipeline.py",
 ]
 
 
@@ -59,21 +60,21 @@ def run_all():
         elapsed = time.time() - t0
 
         if res.returncode == 0:
-            print(f"[+] PASSED: {test_path:<50} ({elapsed:.2f}s)")
+            print(f"[+] PASSED: {test_path:<50} ({elapsed:.2f}s)", flush=True)
             passed += 1
             results.append((test_path, "PASS", elapsed, ""))
         else:
-            print(f"[!] FAILED: {test_path:<50} ({elapsed:.2f}s)")
-            print("--- Output ---")
-            print(res.stdout[-400:] if res.stdout else "")
-            print(res.stderr[-400:] if res.stderr else "")
-            print("--------------")
+            print(f"[!] FAILED: {test_path:<50} ({elapsed:.2f}s)", flush=True)
+            print("--- Output ---", flush=True)
+            print(res.stdout[-400:] if res.stdout else "", flush=True)
+            print(res.stderr[-400:] if res.stderr else "", flush=True)
+            print("--------------", flush=True)
             failed += 1
             results.append((test_path, "FAIL", elapsed, res.stderr or res.stdout))
 
-    print("=" * 70)
-    print(f"REGRESSION RUN COMPLETE: {passed} PASSED, {failed} FAILED across {len(results)} suites")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print(f"REGRESSION RUN COMPLETE: {passed} PASSED, {failed} FAILED across {len(results)} suites", flush=True)
+    print("=" * 70, flush=True)
     return failed == 0
 
 

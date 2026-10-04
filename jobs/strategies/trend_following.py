@@ -123,11 +123,12 @@ class TrendFollowingStrategy(StrategyInterface):
         narrative = generate_trend_narrative(price, sma200, sma50, volume_ratio, current_rsi, adx_value)
 
         # === COMPOSITE SCORING ===
-        past_win_rate = metrics.get('win_rate', 50.0) if metrics else 50.0
-        total_trades = metrics.get('total_trades', 0) if metrics else 0
-        expectancy_pct = metrics.get('expectancy_pct', 0.0) if metrics else 0.0
+        past_win_rate = metrics.get('shrunk_win_rate', metrics.get('win_rate', 50.0)) if metrics else 50.0
+        total_trades = metrics.get('completed_trades', metrics.get('total_trades', 0)) if metrics else 0
+        expectancy_pct = metrics.get('shrunk_expectancy', metrics.get('expectancy_pct', 1.44)) if metrics else 1.44
         wins = metrics.get('wins', 0) if metrics else 0
         losses = metrics.get('losses', 0) if metrics else 0
+
 
         # Trend-specific momentum score (0-30)
         pct_vs_200 = (price / sma200 - 1) * 100
@@ -185,9 +186,10 @@ class TrendFollowingStrategy(StrategyInterface):
         if expectancy_pct < MIN_EXPECTANCY:
             is_blocked = True
             blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if total_trades < MIN_SAMPLE:
+        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
             is_blocked = True
             blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
+
 
         if is_blocked:
             tier_label = 'Blocked'

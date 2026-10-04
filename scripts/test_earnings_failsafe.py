@@ -94,16 +94,22 @@ class TestEarningsFailsafe(unittest.TestCase):
         self.assertTrue(res_pead["pass"], "PEAD must remain exempt even if earnings data is stale")
 
     def test_5_api_failure_unknown_status_fails_closed(self):
-        # Ticker missing from calendar entirely
+        from src.quant_config import REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST
+        # Ticker missing from calendar entirely: with allow_unknown_date=False, must fail closed
         cal = {}
-        res = earnings_risk_filter("UNKNOWN_CO", self.scan_date, "trend_following", cal)
-        self.assertFalse(res["pass"], "Missing earnings data must fail closed for blackout strategies")
+        res = earnings_risk_filter("UNKNOWN_CO", self.scan_date, "trend_following", cal, allow_unknown_date=False)
+        self.assertFalse(res["pass"], "Missing earnings data must fail closed when allow_unknown_date=False")
         self.assertEqual(res["status"], EarningsStatus.UNKNOWN.value)
 
-        # Calendar is None
-        res_none = earnings_risk_filter("UNKNOWN_CO", self.scan_date, "pullback_recovery", None)
-        self.assertFalse(res_none["pass"], "None earnings_calendar must fail closed for blackout strategies")
+        # Calendar is None with allow_unknown_date=False
+        res_none = earnings_risk_filter("UNKNOWN_CO", self.scan_date, "pullback_recovery", None, allow_unknown_date=False)
+        self.assertFalse(res_none["pass"], "None earnings_calendar must fail closed when allow_unknown_date=False")
         self.assertEqual(res_none["status"], EarningsStatus.UNKNOWN.value)
+
+        # Under default P0 rule (allow_unknown_date=True with no negative catalyst): can proceed
+        res_default = earnings_risk_filter("UNKNOWN_CO", self.scan_date, "trend_following", cal)
+        self.assertTrue(res_default["pass"])
+        self.assertEqual(res_default["reason_code"], REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST)
 
     def test_6_pead_exemption_across_all_unknown_and_stale_states(self):
         # PEAD with None calendar

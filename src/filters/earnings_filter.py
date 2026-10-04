@@ -26,10 +26,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
-# Canonical Quantitative Configuration (Single Source of Truth)
 from src.quant_config import (
     EARNINGS_BLACKOUT_DAYS,
     EARNINGS_CACHE_TTL_SECONDS,
+    REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE,
+    REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
+    REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST,
+    REASON_EARNINGS_DATE_UNKNOWN_POSITIVE,
+    REASON_EARNINGS_DATE_UNKNOWN_NEGATIVE,
+    REASON_EARNINGS_OUTSIDE_BLACKOUT,
+    REASON_EARNINGS_BLACKOUT_BLOCK,
+    REASON_SECTOR_ETF_EXEMPT,
 )
 
 DEFAULT_EARNINGS_CACHE_FILE = (
@@ -535,25 +542,27 @@ def earnings_risk_filter(
     earnings_calendar: Optional[Dict[str, Any]] = None,
     instrument_type: Optional[str] = None,
     is_etf: Optional[bool] = None,
+    earnings_surprise_pct: Optional[float] = None,
+    news_sentiment: Optional[float] = None,
+    catalyst_type: Optional[str] = None,
+    is_unreliable_data: bool = False,
+    allow_unknown_date: bool = True,
 ) -> Dict[str, Any]:
     """
-    Evaluates whether a candidate ticker falls within a strategy blackout window.
-    Strict fail-safe: Unknown or stale earnings data must NOT default to pass
-    for strategies requiring a blackout window.
+    Evaluates whether a candidate ticker passes earnings risk filtering based on
+    event risk and catalyst matrix (Section 6).
+
+    Catalyst Matrix:
+    1. Known date, outside blackout + Positive/Neutral -> CAN PROCEED (EARNINGS_OUTSIDE_BLACKOUT)
+    2. Known date, inside blackout + Positive catalyst -> CAN PROCEED (EARNINGS_POSITIVE_CATALYST_OVERRIDE)
+    3. Known date, inside blackout + Negative/Neutral -> BLOCK/REJECT (EARNINGS_BLACKOUT_BLOCK / EARNINGS_NEGATIVE_CATALYST_BLOCK)
+    4. Unknown date + Positive earnings news -> CAN PROCEED (EARNINGS_DATE_UNKNOWN_POSITIVE_CATALYST)
+    5. Unknown date + Negative earnings news -> BLOCK/REJECT (EARNINGS_DATE_UNKNOWN_NEGATIVE_CATALYST_BLOCK)
+    6. Unknown date + No meaningful info -> CAN PROCEED (EARNINGS_DATE_UNKNOWN_NO_CATALYST)
 
     Exemptions:
     - Sector ETFs (strat_key == 'sector_rotation' or instrument_type == 'ETF' or is_etf == True)
     - Post-Earnings Announcement Drift (PEAD)
-
-    Returns:
-        {
-            'pass': bool,
-            'reason': Optional[str],
-            'status': str,
-            'days_to_earnings': Optional[int],
-            'next_earnings_date': Optional[str],
-            'last_earnings_date': Optional[str],
-        }
     """
     strat_key = normalize_strategy_key(strategy)
     blackout = EARNINGS_BLACKOUT_DAYS.get(strat_key, 5)
@@ -563,11 +572,36 @@ def earnings_risk_filter(
         return {
             "pass": True,
             "reason": "Sector ETF (exempt from corporate earnings blackout)",
+            "reason_code": REASON_SECTOR_ETF_EXEMPT,
             "status": EarningsStatus.KNOWN_CLEAR.value,
             "days_to_earnings": None,
             "next_earnings_date": None,
             "last_earnings_date": None,
         }
+
+    # 2. Hard failure for explicitly unreliable or corrupted data
+    if is_unreliable_data:
+        return {
+            "pass": False,
+            "reason": "Earnings data is unreliable - fail closed",
+            "reason_code": "DATA_UNRELIABLE_FAIL_CLOSED",
+            "status": EarningsStatus.UNKNOWN.value,
+            "days_to_earnings": None,
+            "next_earnings_date": None,
+            "last_earnings_date": None,
+        }
+
+    # Evaluate Catalyst classification
+    is_pos_catalyst = (
+        catalyst_type == "positive"
+        or (earnings_surprise_pct is not None and earnings_surprise_pct > 0.0)
+        or (news_sentiment is not None and news_sentiment > 0.20)
+    )
+    is_neg_catalyst = (
+        catalyst_type == "negative"
+        or (earnings_surprise_pct is not None and earnings_surprise_pct <= -10.0)
+        or (news_sentiment is not None and news_sentiment <= -0.30)
+    )
 
     entry = (earnings_calendar.get(ticker.upper()) if earnings_calendar else {}) or {}
     next_date_val = entry.get("next_earnings_date") or entry.get("next_earnings")
@@ -579,8 +613,7 @@ def earnings_risk_filter(
     next_dt = datetime.date.fromisoformat(next_dt_str) if next_dt_str else None
     last_dt = datetime.date.fromisoformat(last_dt_str) if last_dt_str else None
 
-    # 2. Special handling for PEAD: Post-Earnings Announcement Drift strategy
-    # PEAD is exempt from pre-earnings blackout because it trades post-earnings reaction
+    # 3. Special handling for PEAD: Post-Earnings Announcement Drift strategy
     if strat_key == "pead":
         if last_dt is not None:
             days_since = (scan_date - last_dt).days
@@ -588,6 +621,7 @@ def earnings_risk_filter(
                 return {
                     "pass": True,
                     "reason": "Post-earnings window",
+                    "reason_code": "PEAD_POST_EARNINGS_WINDOW",
                     "status": EarningsStatus.KNOWN_CLEAR.value,
                     "days_to_earnings": -days_since,
                     "next_earnings_date": next_dt.isoformat() if next_dt else None,
@@ -596,22 +630,11 @@ def earnings_risk_filter(
         return {
             "pass": True,
             "reason": "PEAD window (exempt from pre-earnings blackout)",
+            "reason_code": "PEAD_EXEMPT",
             "status": entry.get("status", EarningsStatus.KNOWN_CLEAR.value),
             "days_to_earnings": None,
             "next_earnings_date": next_dt.isoformat() if next_dt else None,
             "last_earnings_date": last_dt.isoformat() if last_dt else None,
-        }
-
-    # 3. For all blackout-dependent strategies (blackout > 0):
-    # If no calendar or ticker not present: FAIL-CLOSED
-    if not earnings_calendar or ticker.upper() not in earnings_calendar:
-        return {
-            "pass": False,
-            "reason": f"Earnings status {EarningsStatus.UNKNOWN.value} - blackout safety check failed",
-            "status": EarningsStatus.UNKNOWN.value,
-            "days_to_earnings": None,
-            "next_earnings_date": None,
-            "last_earnings_date": None,
         }
 
     # 4. Check status and freshness
@@ -620,27 +643,39 @@ def earnings_risk_filter(
         if is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS):
             status = EarningsStatus.KNOWN_UPCOMING.value if next_dt else EarningsStatus.KNOWN_CLEAR.value
         else:
-            status = EarningsStatus.STALE.value
+            status = EarningsStatus.STALE.value if entry else EarningsStatus.UNKNOWN.value
 
-    # Fail closed on STALE or UNKNOWN
-    if status in (EarningsStatus.STALE.value, EarningsStatus.UNKNOWN.value):
-        logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): Earnings status {status}")
+    # Fail closed on STALE data
+    if status == EarningsStatus.STALE.value:
+        logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): Earnings data STALE")
         return {
             "pass": False,
             "reason": f"Earnings status {status} - blackout safety check failed",
+            "reason_code": "EARNINGS_DATA_STALE",
             "status": status,
             "days_to_earnings": None,
             "next_earnings_date": next_dt.isoformat() if next_dt else None,
             "last_earnings_date": last_dt.isoformat() if last_dt else None,
         }
 
-    # 5. If upcoming earnings date is known
+    # 5. When upcoming earnings date is known
     if next_dt is not None:
         days_to_earnings = (next_dt - scan_date).days
         if days_to_earnings < 0:
+            if is_neg_catalyst:
+                return {
+                    "pass": False,
+                    "reason": "Negative earnings/news catalyst veto",
+                    "reason_code": REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
+                    "status": EarningsStatus.KNOWN_CLEAR.value,
+                    "days_to_earnings": None,
+                    "next_earnings_date": next_dt.isoformat(),
+                    "last_earnings_date": last_dt.isoformat() if last_dt else None,
+                }
             return {
                 "pass": True,
                 "reason": "Past earnings",
+                "reason_code": REASON_EARNINGS_OUTSIDE_BLACKOUT,
                 "status": EarningsStatus.KNOWN_CLEAR.value,
                 "days_to_earnings": None,
                 "next_earnings_date": next_dt.isoformat(),
@@ -648,43 +683,115 @@ def earnings_risk_filter(
             }
 
         if days_to_earnings <= blackout:
-            reason_msg = f"Earnings in {days_to_earnings}d (blackout: {blackout}d)"
-            logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): {reason_msg}")
-            return {
-                "pass": False,
-                "reason": reason_msg,
-                "status": EarningsStatus.KNOWN_UPCOMING.value,
-                "days_to_earnings": days_to_earnings,
-                "next_earnings_date": next_dt.isoformat(),
-                "last_earnings_date": last_dt.isoformat() if last_dt else None,
-            }
+            if is_pos_catalyst:
+                logger.info(f"[EARNINGS RISK GATE] {ticker} ({strategy}): Positive catalyst overrides {days_to_earnings}d blackout")
+                return {
+                    "pass": True,
+                    "reason": f"Positive earnings catalyst overrides {days_to_earnings}d blackout",
+                    "reason_code": REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE,
+                    "status": EarningsStatus.KNOWN_UPCOMING.value,
+                    "days_to_earnings": days_to_earnings,
+                    "next_earnings_date": next_dt.isoformat(),
+                    "last_earnings_date": last_dt.isoformat() if last_dt else None,
+                }
+            else:
+                reason_msg = f"Earnings in {days_to_earnings}d (blackout: {blackout}d)"
+                reason_cd = REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK if is_neg_catalyst else REASON_EARNINGS_BLACKOUT_BLOCK
+                logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): {reason_msg}")
+                return {
+                    "pass": False,
+                    "reason": reason_msg,
+                    "reason_code": reason_cd,
+                    "status": EarningsStatus.KNOWN_UPCOMING.value,
+                    "days_to_earnings": days_to_earnings,
+                    "next_earnings_date": next_dt.isoformat(),
+                    "last_earnings_date": last_dt.isoformat() if last_dt else None,
+                }
         else:
+            # Outside blackout
+            if is_neg_catalyst:
+                return {
+                    "pass": False,
+                    "reason": "Negative earnings/news catalyst veto",
+                    "reason_code": REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
+                    "status": EarningsStatus.KNOWN_UPCOMING.value,
+                    "days_to_earnings": days_to_earnings,
+                    "next_earnings_date": next_dt.isoformat(),
+                    "last_earnings_date": last_dt.isoformat() if last_dt else None,
+                }
             return {
                 "pass": True,
                 "reason": "Earnings passed",
+                "reason_code": REASON_EARNINGS_OUTSIDE_BLACKOUT,
                 "status": EarningsStatus.KNOWN_UPCOMING.value,
                 "days_to_earnings": days_to_earnings,
                 "next_earnings_date": next_dt.isoformat(),
                 "last_earnings_date": last_dt.isoformat() if last_dt else None,
             }
 
-    # 6. If confirmed clear
+    # 6. If confirmed clear (no upcoming earnings scheduled)
     if status == EarningsStatus.KNOWN_CLEAR.value:
+        if is_neg_catalyst:
+            return {
+                "pass": False,
+                "reason": "Negative earnings/news catalyst veto",
+                "reason_code": REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
+                "status": EarningsStatus.KNOWN_CLEAR.value,
+                "days_to_earnings": None,
+                "next_earnings_date": None,
+                "last_earnings_date": last_dt.isoformat() if last_dt else None,
+            }
         return {
             "pass": True,
             "reason": "Earnings clear",
+            "reason_code": REASON_EARNINGS_OUTSIDE_BLACKOUT,
             "status": EarningsStatus.KNOWN_CLEAR.value,
             "days_to_earnings": None,
             "next_earnings_date": None,
             "last_earnings_date": last_dt.isoformat() if last_dt else None,
         }
 
-    # 7. Final fallback: fail closed
-    return {
-        "pass": False,
-        "reason": f"Earnings status {EarningsStatus.UNKNOWN.value} - unconfirmed earnings schedule",
-        "status": EarningsStatus.UNKNOWN.value,
-        "days_to_earnings": None,
-        "next_earnings_date": None,
-        "last_earnings_date": None,
-    }
+    # 7. When earnings date is unknown (missing from calendar or UNKNOWN)
+    if is_neg_catalyst:
+        return {
+            "pass": False,
+            "reason": "Negative earnings news/catalyst veto",
+            "reason_code": REASON_EARNINGS_DATE_UNKNOWN_NEGATIVE,
+            "status": EarningsStatus.UNKNOWN.value,
+            "days_to_earnings": None,
+            "next_earnings_date": None,
+            "last_earnings_date": None,
+        }
+    elif is_pos_catalyst:
+        return {
+            "pass": True,
+            "reason": "Unknown earnings date with positive catalyst",
+            "reason_code": REASON_EARNINGS_DATE_UNKNOWN_POSITIVE,
+            "status": EarningsStatus.UNKNOWN.value,
+            "days_to_earnings": None,
+            "next_earnings_date": None,
+            "last_earnings_date": None,
+        }
+    else:
+        # No meaningful info
+        if allow_unknown_date:
+            return {
+                "pass": True,
+                "reason": "Unknown earnings date without negative catalyst",
+                "reason_code": REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST,
+                "status": EarningsStatus.UNKNOWN.value,
+                "days_to_earnings": None,
+                "next_earnings_date": None,
+                "last_earnings_date": None,
+            }
+        else:
+            return {
+                "pass": False,
+                "reason": f"Earnings status {EarningsStatus.UNKNOWN.value} - unconfirmed earnings schedule",
+                "reason_code": "EARNINGS_UNKNOWN_FAIL_CLOSED",
+                "status": EarningsStatus.UNKNOWN.value,
+                "days_to_earnings": None,
+                "next_earnings_date": None,
+                "last_earnings_date": None,
+            }
+

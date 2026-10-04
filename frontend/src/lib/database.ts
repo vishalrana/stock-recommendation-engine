@@ -23,14 +23,14 @@ export async function fetchActiveRecommendations(): Promise<Recommendation[]> {
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
     return {
       ...s,
-      tier_label: s.tier_label || 'Buy',
+      tier_label: s.tier_label || (Number(s.composite_score) >= 80 ? 'Strong Buy' : Number(s.composite_score) >= 65 ? 'Buy' : 'Hold'),
       status: s.status || 'open',
       entry_date: s.entry_date || s.scan_date,
-      past_win_rate: m.win_rate ?? 0,
-      total_trades: (m.wins ?? 0) + (m.losses ?? 0),
-      expectancy_pct: m.expectancy_pct ?? 0,
-      wins: m.wins ?? 0,
-      losses: m.losses ?? 0,
+      past_win_rate: m.win_rate !== undefined && m.win_rate !== null ? m.win_rate : null,
+      total_trades: (m.wins !== undefined && m.losses !== undefined) ? (m.wins + m.losses) : null,
+      expectancy_pct: m.expectancy_pct !== undefined && m.expectancy_pct !== null ? m.expectancy_pct : null,
+      wins: m.wins ?? null,
+      losses: m.losses ?? null,
     };
   });
 
@@ -43,8 +43,6 @@ export async function fetchActiveRecommendations(): Promise<Recommendation[]> {
 
   return activeFormatted as Recommendation[];
 }
-
-export const fetchPortfolioSignals = fetchActiveRecommendations;
 
 export async function fetchScanLogSignals(): Promise<Recommendation[]> {
   const supabase = getSupabase();
@@ -106,7 +104,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
 
     combined.push({
       ...h,
-      tier_label: h.tier_label || 'Buy',
+      tier_label: h.tier_label || (Number(h.composite_score) >= 80 ? 'Strong Buy' : Number(h.composite_score) >= 65 ? 'Buy' : 'Hold'),
       entry_date: h.scan_date,
       exit_date: h.outcome_date || h.exit_date,
       status: outcome,
@@ -114,11 +112,11 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
       sell_signal: true,
       sell_signal_reason: reason,
       sell_price: h.exit_price || h.price,
-      past_win_rate: m.win_rate ?? 0,
-      total_trades: (m.wins ?? 0) + (m.losses ?? 0),
-      expectancy_pct: m.expectancy_pct ?? 0,
-      wins: m.wins ?? 0,
-      losses: m.losses ?? 0,
+      past_win_rate: m.win_rate !== undefined && m.win_rate !== null ? m.win_rate : null,
+      total_trades: (m.wins !== undefined && m.losses !== undefined) ? (m.wins + m.losses) : null,
+      expectancy_pct: m.expectancy_pct !== undefined && m.expectancy_pct !== null ? m.expectancy_pct : null,
+      wins: m.wins ?? null,
+      losses: m.losses ?? null,
     });
   }
 
@@ -131,13 +129,13 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
     combined.push({
       ...s,
-      tier_label: s.tier_label || (s.status === 'rejected' ? 'Rejected' : 'Buy'),
+      tier_label: s.tier_label || (s.status === 'rejected' ? 'Rejected' : Number(s.composite_score) >= 80 ? 'Strong Buy' : Number(s.composite_score) >= 65 ? 'Buy' : 'Hold'),
       entry_date: s.entry_date || s.scan_date,
-      past_win_rate: m.win_rate ?? 0,
-      total_trades: (m.wins ?? 0) + (m.losses ?? 0),
-      expectancy_pct: m.expectancy_pct ?? 0,
-      wins: m.wins ?? 0,
-      losses: m.losses ?? 0,
+      past_win_rate: m.win_rate !== undefined && m.win_rate !== null ? m.win_rate : null,
+      total_trades: (m.wins !== undefined && m.losses !== undefined) ? (m.wins + m.losses) : null,
+      expectancy_pct: m.expectancy_pct !== undefined && m.expectancy_pct !== null ? m.expectancy_pct : null,
+      wins: m.wins ?? null,
+      losses: m.losses ?? null,
     });
   }
 
@@ -327,11 +325,15 @@ export async function fetchScanHistory(limit = 14): Promise<ScanHistoryEntry[]> 
   }
 }
 
-export function calculatePWin(score: number): number {
-  const z = -0.15 * (score - 65.0);
-  const sigmoid = 1.0 / (1.0 + Math.exp(z));
-  const p = 0.35 + 0.40 * sigmoid;
-  return Math.max(0.35, Math.min(0.75, Math.round(p * 10000) / 10000));
+/**
+ * Analytical win probability extractor.
+ * Strictly uses backend analytical reach probability; never synthesizes ad-hoc client-side curves.
+ */
+export function getAnalyticalWinProbability(sig: Recommendation): number | null {
+  if (sig.reach_prob_t1 !== undefined && sig.reach_prob_t1 !== null) {
+    return Number(sig.reach_prob_t1);
+  }
+  return null;
 }
 
 export function getRejectionReason(sig: Recommendation): string {
@@ -367,15 +369,15 @@ export function getRejectionReason(sig: Recommendation): string {
   if (sig.status === 'cancelled_gap_up') {
     return 'Cancelled: Gap > 3%';
   }
-  if (sig.reach_prob_t1 !== undefined && sig.reach_prob_t1 !== null && Number(sig.reach_prob_t1) < 0.25) {
-    return `ReachProb T1 < 25% (${(Number(sig.reach_prob_t1) * 100).toFixed(0)}%)`;
+
+  const score = sig.composite_score;
+  if (score !== undefined && score !== null && Number(score) < 65) {
+    return `Below recommendation threshold (Score ${Number(score).toFixed(1)} < 65)`;
   }
-
-  const rr = sig.weighted_rr_honest ?? sig.weighted_rr ?? 0;
-  const score = sig.composite_score || 50;
-
-  if (sig.tier_label === 'Rejected' || Number(score) < 65) {
-    return `Tier Rejected (Score ${Number(score).toFixed(1)}, R:R ${Number(rr).toFixed(2)})`;
+  if (sig.tier_label === 'Rejected') {
+    return score !== undefined && score !== null
+      ? `Below recommendation threshold (Score ${Number(score).toFixed(1)} < 65)`
+      : 'Below recommendation threshold (Score < 65)';
   }
 
   return 'Setup criteria not met';

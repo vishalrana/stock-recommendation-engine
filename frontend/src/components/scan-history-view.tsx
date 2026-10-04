@@ -111,7 +111,7 @@ export default function ScanHistoryView({ scanHistory }: ScanHistoryViewProps) {
                   </div>
                 ) : (
                   <p className="text-xs text-slate-400">
-                    Quality and risk filters preserved capital. Cash is a valid position.
+                    No qualifying stock idea met the recommendation criteria.
                   </p>
                 )}
               </div>

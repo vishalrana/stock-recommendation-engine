@@ -26,6 +26,24 @@ function getDaysActive(dateStr?: string | null): string {
   }
 }
 
+function formatEarningsDate(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  try {
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      const d = new Date(year, month, day);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+    const d = new Date(dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00`);
+    return isNaN(d.getTime()) ? dateStr : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch {
+    return dateStr;
+  }
+}
+
 export default function StockCard({
   recommendation,
   livePrice,
@@ -43,7 +61,7 @@ export default function StockCard({
   const price = (displayedPriceVal !== undefined && displayedPriceVal !== null && !isNaN(Number(displayedPriceVal)))
     ? Number(displayedPriceVal).toFixed(2)
     : '—';
-  
+
   const t1 = recommendation.target_1 ? Number(recommendation.target_1).toFixed(2) : null;
   const t2 = recommendation.target_2 ? Number(recommendation.target_2).toFixed(2) : null;
   const t3 = recommendation.target_3 ? Number(recommendation.target_3).toFixed(2) : null;
@@ -59,6 +77,108 @@ export default function StockCard({
   if (t2) targetParts.push(`T2 $${t2}`);
   if (t3) targetParts.push(`T3 $${t3}`);
   const targetsDisplay = targetParts.length > 0 ? targetParts.join(' · ') : 'Trailing Stop';
+
+  // Build validated supporting evidence items (hide any criteria that are unavailable)
+  const evidenceItems: { label: string; detail: string }[] = [];
+
+  // 1. Positive earnings surprise
+  if (
+    recommendation.earnings_surprise_pct !== null &&
+    recommendation.earnings_surprise_pct !== undefined &&
+    !isNaN(Number(recommendation.earnings_surprise_pct)) &&
+    Number(recommendation.earnings_surprise_pct) > 0
+  ) {
+    evidenceItems.push({
+      label: 'Positive earnings',
+      detail: `+${Number(recommendation.earnings_surprise_pct).toFixed(1)}% earnings surprise`,
+    });
+  } else if (
+    recommendation.context_earnings !== null &&
+    recommendation.context_earnings !== undefined &&
+    !isNaN(Number(recommendation.context_earnings)) &&
+    Number(recommendation.context_earnings) >= 15
+  ) {
+    evidenceItems.push({
+      label: 'Positive earnings',
+      detail: 'Earnings momentum',
+    });
+  }
+
+  // 2. Positive news sentiment (never fabricate headlines)
+  if (
+    recommendation.finbert_sentiment !== null &&
+    recommendation.finbert_sentiment !== undefined &&
+    !isNaN(Number(recommendation.finbert_sentiment)) &&
+    Number(recommendation.finbert_sentiment) > 0.15
+  ) {
+    evidenceItems.push({
+      label: 'Positive news',
+      detail: 'Positive news sentiment',
+    });
+  } else if (
+    recommendation.context_news !== null &&
+    recommendation.context_news !== undefined &&
+    !isNaN(Number(recommendation.context_news)) &&
+    Number(recommendation.context_news) >= 15
+  ) {
+    evidenceItems.push({
+      label: 'Positive news',
+      detail: 'Positive news signal',
+    });
+  }
+
+  // 3. Next earnings date (hide if null / unknown)
+  if (recommendation.next_earnings_date && recommendation.next_earnings_date.trim() !== '') {
+    const formattedDate = formatEarningsDate(recommendation.next_earnings_date);
+    if (formattedDate) {
+      const days = (recommendation.days_to_earnings !== null && recommendation.days_to_earnings !== undefined && Number(recommendation.days_to_earnings) > 0)
+        ? ` (${recommendation.days_to_earnings}d)`
+        : '';
+      evidenceItems.push({
+        label: 'Next earnings',
+        detail: `${formattedDate}${days}`,
+      });
+    }
+  }
+
+  // 4. Fundamentally strong (hide if metrics unavailable)
+  const de = recommendation.de_ratio;
+  const cr = recommendation.current_ratio;
+  if (
+    de !== null &&
+    de !== undefined &&
+    cr !== null &&
+    cr !== undefined &&
+    !isNaN(Number(de)) &&
+    !isNaN(Number(cr)) &&
+    Number(de) < 1.0 &&
+    Number(cr) > 1.5
+  ) {
+    evidenceItems.push({
+      label: 'Fundamentally strong',
+      detail: `D/E ${Number(de).toFixed(2)} · Current ratio ${Number(cr).toFixed(2)}`,
+    });
+  } else if (
+    recommendation.context_fundamental !== null &&
+    recommendation.context_fundamental !== undefined &&
+    !isNaN(Number(recommendation.context_fundamental)) &&
+    Number(recommendation.context_fundamental) >= 15
+  ) {
+    evidenceItems.push({
+      label: 'Fundamentally strong',
+      detail: 'Healthy balance sheet',
+    });
+  }
+
+  // Win rate and Analytical R:R helpers
+  const winRateDisplay = (recommendation.past_win_rate !== null && recommendation.past_win_rate !== undefined && !isNaN(Number(recommendation.past_win_rate)))
+    ? `${(Number(recommendation.past_win_rate) * 100).toFixed(0)}%`
+    : 'Not enough history';
+
+  const rrVal = recommendation.weighted_rr_honest ?? recommendation.weighted_rr ?? recommendation.risk_reward;
+  const rrDisplay = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal)))
+    ? `${Number(rrVal).toFixed(2)}:1 (analytical)`
+    : null;
 
   return (
     <div
@@ -76,6 +196,17 @@ export default function StockCard({
             <h3 className="font-extrabold text-xl text-white tracking-tight leading-tight">
               {ticker}
             </h3>
+            {recommendation.tier_label && (
+              <span
+                className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                  recommendation.tier_label === 'Strong Buy'
+                    ? 'bg-purple-950/60 text-purple-300 border-purple-800/80'
+                    : 'bg-emerald-950/60 text-emerald-300 border-emerald-800/80'
+                }`}
+              >
+                {recommendation.tier_label}
+              </span>
+            )}
           </div>
           {company && (
             <p className="text-xs text-slate-400 font-medium truncate mt-0.5 leading-normal" title={company}>
@@ -108,6 +239,28 @@ export default function StockCard({
         </div>
       </div>
 
+      {/* Supporting Evidence (Rendered only when validated evidence criteria are met) */}
+      {evidenceItems.length > 0 && (
+        <div className="mt-3 pt-2.5 border-t border-slate-800/60">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
+            Supporting Evidence
+          </span>
+          <div className="space-y-1">
+            {evidenceItems.map((item, idx) => (
+              <div key={idx} className="flex items-center justify-between text-[11px]">
+                <span className="flex items-center gap-1.5 text-slate-300 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+                  {item.label}
+                </span>
+                <span className="font-mono text-slate-400 text-[10px]">
+                  {item.detail}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Card footer: Subtle Remove action + Expand indicator */}
       <div className="mt-3.5 pt-2.5 border-t border-slate-800/40 flex items-center justify-between">
         <button
@@ -129,7 +282,7 @@ export default function StockCard({
         </div>
       </div>
 
-      {/* Expanded view: Technical Candlestick Chart + Why this idea? */}
+      {/* Expanded view: Technical Candlestick Chart + Strategy Setup + Analytical R:R / Win Rate */}
       {isExpanded && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -156,14 +309,38 @@ export default function StockCard({
             </div>
           </div>
 
-          {/* Why this idea? Section */}
-          <div className="p-3.5 bg-slate-900/60 border border-slate-800/80 rounded-xl">
-            <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-              Why this idea?
-            </h4>
-            <p className="text-xs text-slate-200 leading-relaxed font-medium">
-              {whyExplanation}
-            </p>
+          {/* Strategy Setup and Analytical Context */}
+          <div className="p-3.5 bg-slate-900/60 border border-slate-800/80 rounded-xl space-y-2.5">
+            <div>
+              <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                Strategy Setup
+              </h4>
+              <p className="text-xs text-slate-200 leading-relaxed font-medium">
+                {whyExplanation}
+              </p>
+            </div>
+
+            {/* Analytical Metrics Block */}
+            <div className="pt-2 border-t border-slate-800/60 grid grid-cols-2 gap-2 text-[11px]">
+              <div>
+                <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
+                  Historical Win Rate
+                </span>
+                <span className="text-slate-300 font-mono font-medium">
+                  {winRateDisplay}
+                </span>
+              </div>
+              {rrDisplay && (
+                <div>
+                  <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
+                    Analytical R:R
+                  </span>
+                  <span className="text-slate-300 font-mono font-medium">
+                    {rrDisplay}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

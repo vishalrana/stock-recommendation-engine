@@ -121,7 +121,7 @@ export default function ClosedIdeasView({ closedIdeas }: ClosedIdeasViewProps) {
           if (t3) targetParts.push(`T3 $${t3}`);
           const targetsDisplay = targetParts.length > 0 ? targetParts.join(' · ') : 'Trailing Stop';
 
-          const key = rec.id ? `closed_${rec.id}` : `${ticker}_${rec.scan_date}_${index}`;
+          const key = rec.id ? `closed_${rec.id}` : (rec.signal_id ? `closed_sig_${rec.signal_id}` : `closed_${index}`);
 
           return (
             <div

@@ -115,7 +115,7 @@ def compute_targets(df: pd.DataFrame, entry: float) -> dict:
 
 
 def compute_weighted_rr(entry: float, stop: float, targets: dict) -> float:
-    """Compute weighted R/R using 50/30/20 position sizing."""
+    """Compute weighted R/R using 50/30/20 scale-out model."""
     risk = entry - stop
     if risk <= 0:
         return 0.0

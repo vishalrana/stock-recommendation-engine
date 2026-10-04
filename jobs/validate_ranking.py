@@ -18,14 +18,11 @@ import pandas as pd
 import yfinance as yf
 from datetime import date, timedelta
 from jobs.supabase_client import supabase
+from src.utils.market_date import get_market_date, get_trading_days_ago
 
 EVALUATION_TRADING_DAYS = 10  # evaluate after 10 trading days
 EXPIRY_TRADING_DAYS = 20      # mark expired after 20 trading days with no hit
 
-def get_trading_days_ago(n: int) -> date:
-    """Return the calendar date that is approximately n trading days in the past."""
-    # Use pandas business day offset as approximation
-    return (pd.Timestamp.today() - pd.offsets.BDay(n)).date()
 
 def evaluate_signal(row: dict) -> dict | None:
     """
@@ -45,7 +42,7 @@ def evaluate_signal(row: dict) -> dict | None:
 
     # Fetch daily OHLCV from scan_date + 1 forward
     start = scan_date + timedelta(days=1)
-    end = date.today()
+    end = get_market_date()
 
     try:
         df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)

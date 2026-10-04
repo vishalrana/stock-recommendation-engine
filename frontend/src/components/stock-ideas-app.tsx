@@ -453,7 +453,7 @@ export default function StockIdeasApp({
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {activeIdeas.map((idea) => {
-                  const cardId = idea.id || `${idea.ticker}_${idea.scan_date}`;
+                  const cardId = idea.id ? String(idea.id) : (idea.signal_id ? String(idea.signal_id) : `${idea.ticker}_${idea.scan_date}`);
                   const tickerKey = idea.ticker?.trim().toUpperCase() || '';
                   return (
                     <StockCard

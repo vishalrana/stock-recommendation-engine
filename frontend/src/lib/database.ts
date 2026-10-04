@@ -189,14 +189,14 @@ export async function fetchClosedSignals(): Promise<Recommendation[]> {
     console.error('Error fetching closed history from signals_history:', historyError);
   }
 
-  // Track unique instances by primary key / signal_id / (ticker + scan_date)
+  // Track unique instances strictly by primary key (id) and signal_id
   const seenInstances = new Set<string>();
   const closedIdeas: Recommendation[] = [];
 
   for (const h of (closedHistory || [])) {
-    const instanceKey = h.id ? `hist_${h.id}` : h.signal_id ? `sig_${h.signal_id}` : `${h.ticker}_${h.scan_date}`;
-    if (seenInstances.has(instanceKey)) continue;
-    seenInstances.add(instanceKey);
+    const instanceKey = h.id ? `hist_${h.id}` : (h.signal_id ? `sig_${h.signal_id}` : null);
+    if (instanceKey && seenInstances.has(instanceKey)) continue;
+    if (instanceKey) seenInstances.add(instanceKey);
 
     const outcome = h.outcome || 'closed';
     let reason = h.sell_signal_reason || 'Closed';

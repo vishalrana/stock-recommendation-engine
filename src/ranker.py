@@ -688,7 +688,7 @@ class SignalRanker:
         # If 0 total (Strong Buy + Buy): return empty list
         total_eligible_count = len(t1_eligible) + len(t2_eligible)
         if total_eligible_count == 0:
-            logger.info("No high-confidence setups tonight. Cash is a position.")
+            logger.info("No qualifying stock ideas tonight.")
             result = pd.DataFrame(columns=df_filtered.columns)
             if "temp_tier" in result.columns:
                 result = result.drop(columns=["temp_tier"])

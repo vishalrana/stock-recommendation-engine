@@ -83,24 +83,27 @@ def update_signals_status(ticker, status, exit_price, sell_signal, sell_signal_r
 
     if signal_id:
         return supabase.table('signals').update(update_data).eq('id', signal_id).execute()
-    elif status == 'manually_removed':
-        import logging
-        logging.getLogger(__name__).error(f"[MANUAL REMOVAL] Refusing unsafe ticker-only update for {ticker}. Exact signal_id is required.")
-        return None
     else:
-        return supabase.table('signals').update(update_data).eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+        import logging
+        logging.getLogger(__name__).error(
+            f"[MUTATION REFUSED] Refusing unsafe mutation for ticker={ticker} status={status}. Exact signal_id is required."
+        )
+        return None
 
 
 def update_signals_price(ticker, current_price, signal_id=None):
     if not supabase:
-        return
+        return None
+    if not signal_id:
+        import logging
+        logging.getLogger(__name__).error(
+            f"[PRICE UPDATE REFUSED] Refusing unsafe price update for ticker={ticker}. Exact signal_id is required."
+        )
+        return None
     q = supabase.table('signals').update({
         'price': current_price
     })
-    if signal_id:
-        q.eq('id', signal_id).execute()
-    else:
-        q.eq('ticker', ticker).in_('status', ['open', 'pending']).execute()
+    return q.eq('id', signal_id).execute()
 
 
 def update_portfolio_realized_pnl(pnl_dollars):

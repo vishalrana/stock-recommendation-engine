@@ -2,7 +2,7 @@
 Target Calculator — Strategy-Specific ATR Targets with Reach Probability Filtering
 ===================================================================================
 Replaces fixed global targets with volatility-adjusted, empirical reach-probability
-filtered targets to calculate honest weighted risk-to-reward ratios and position sizing.
+filtered targets to calculate honest weighted risk-to-reward ratios and scale-out weights.
 
 Layer 1: Strategy-Specific ATR-Based Targets with Fixed Floors
 Layer 2: Reach Probability Filtering over 504 trading days

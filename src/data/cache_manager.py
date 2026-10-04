@@ -104,23 +104,28 @@ class CacheManager:
         return last < cutoff
 
     def get_data_for_date(self, date_str: str) -> Optional[pd.DataFrame]:
-        """Load MultiIndex DataFrame for a specific date from cache."""
+        """Load MultiIndex DataFrame for a specific date from cache. Removes corrupt files."""
         cache_path = self._get_cache_path(date_str)
         if os.path.exists(cache_path):
             try:
                 df = pd.read_parquet(cache_path, engine="pyarrow")
                 return df
             except Exception as e:
-                logger.warning(f"Failed to load cache for {date_str}: {e}")
+                logger.warning(f"Corrupt or unreadable cache file for {date_str}: {e}. Removing corrupt cache file.")
+                try:
+                    os.remove(cache_path)
+                except Exception:
+                    pass
         return None
 
     def save_data_for_date(self, date_str: str, df: pd.DataFrame) -> None:
-        """Save MultiIndex DataFrame for a specific date, merging with existing data if present."""
+        """Atomically save MultiIndex DataFrame for a specific date, merging with existing data if present."""
         cache_path = self._get_cache_path(date_str)
         # Validation: do not write empty or mostly-null data
         if df.empty or "CLOSE" not in df.columns or df["CLOSE"].isna().mean() > 0.5:
             logger.warning(f"Rejecting save for {date_str}: >50% NaN values in CLOSE")
             return
+        tmp_path = f"{cache_path}.tmp.{os.getpid()}_{int(time.time() * 1000)}"
         try:
             if os.path.exists(cache_path):
                 try:
@@ -129,9 +134,16 @@ class CacheManager:
                     df = combined[~combined.index.duplicated(keep="last")].sort_index()
                 except Exception as merge_err:
                     logger.debug(f"Could not merge with existing {cache_path}: {merge_err}")
-            df.to_parquet(cache_path, engine="pyarrow")
+            df.to_parquet(tmp_path, engine="pyarrow")
+            os.replace(tmp_path, cache_path)
         except Exception as e:
-            logger.error(f"Failed to save cache for {date_str}: {e}")
+            logger.error(f"Failed to atomically save cache for {date_str}: {e}")
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def download_batch_with_retry(self, tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
         """

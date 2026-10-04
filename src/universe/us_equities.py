@@ -59,6 +59,7 @@ class USEquitiesUniverseProvider(UniverseProvider):
         self._universe: Dict[str, SecurityRecord] = {}
         self._provider_ticker_map: Dict[str, str] = {}  # provider_ticker -> canonical_ticker
         self._stats: Dict[str, int] = {}
+        self.is_fallback: bool = False
         self._load_universe_data()
 
     @property
@@ -328,7 +329,8 @@ class USEquitiesUniverseProvider(UniverseProvider):
         """
         Resilient fallback to S&P 500 + Nasdaq-100 when external network calls fail completely.
         """
-        logger.warning("Engaging fallback universe loader: S&P 500 + Nasdaq-100 constituents.")
+        logger.warning("[UNIVERSE DEGRADED] Engaging fallback universe loader: S&P 500 + Nasdaq-100 constituents.")
+        self.is_fallback = True
         records = {}
         # Try local CSV first
         csv_path = Path("outputs/backtest_summary.csv")

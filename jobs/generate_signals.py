@@ -207,6 +207,15 @@ def load_sp500_nasdaq_universe() -> tuple[list, dict, dict]:
     return tickers, company_names, industries
 
 
+LAST_UNIVERSE_IS_FALLBACK: bool = False
+
+
+def is_universe_degraded() -> bool:
+    """Return whether the most recently loaded universe degraded from broad to fallback."""
+    global LAST_UNIVERSE_IS_FALLBACK
+    return LAST_UNIVERSE_IS_FALLBACK
+
+
 def load_universe(source: Optional[str] = None) -> tuple[list, dict, dict]:
     """
     Load stock discovery universe.
@@ -214,18 +223,21 @@ def load_universe(source: Optional[str] = None) -> tuple[list, dict, dict]:
       - 'expanded' (default): Broad US-listed common equities from USEquitiesUniverseProvider
       - 'benchmark' / 'sp500_nasdaq': S&P 500 + Nasdaq-100 constituents
     """
+    global LAST_UNIVERSE_IS_FALLBACK
     if source is None:
         source = os.environ.get("UNIVERSE_SOURCE", "expanded").lower()
 
     if source in {"benchmark", "sp500_nasdaq", "legacy"}:
+        LAST_UNIVERSE_IS_FALLBACK = False
         logger.info("Loading benchmark universe (S&P 500 + Nasdaq-100)...")
         return load_sp500_nasdaq_universe()
 
     try:
         provider = USEquitiesUniverseProvider()
         records = provider.get_universe()
-        if not records:
-            logger.warning("USEquitiesUniverseProvider returned empty universe. Using benchmark fallback...")
+        if not records or getattr(provider, "is_fallback", False):
+            LAST_UNIVERSE_IS_FALLBACK = True
+            logger.warning("[UNIVERSE DEGRADED] USEquitiesUniverseProvider degraded to fallback. Benchmark universe loaded.")
             return load_sp500_nasdaq_universe()
 
         tickers = []
@@ -239,10 +251,12 @@ def load_universe(source: Optional[str] = None) -> tuple[list, dict, dict]:
             company_names[t] = r.company_name
             industries[t] = r.sector if r.sector and r.sector != "Unknown" else r.industry
 
+        LAST_UNIVERSE_IS_FALLBACK = False
         logger.info("Loaded broad US equity universe: %d eligible common equities.", len(tickers))
         return tickers, company_names, industries
     except Exception as e:
-        logger.error("Failed to load broad US universe: %s. Falling back to S&P/Nasdaq...", e)
+        LAST_UNIVERSE_IS_FALLBACK = True
+        logger.error("[UNIVERSE DEGRADED] Failed to load broad US universe: %s. Falling back to S&P/Nasdaq benchmark...", e)
         return load_sp500_nasdaq_universe()
 
 
@@ -322,18 +336,20 @@ def reconcile_recommendation_lifecycle(
     target_tickers: set = None,
     updated_analytics: dict = None,
     successfully_evaluated_tickers: Optional[Set[str]] = None,
+    universe_is_fallback: bool = False,
 ):
     """
     Reconcile active recommendations against latest market prices and scan qualification.
     Pure recommendation engine lifecycle:
     1. Scan Failure Safeguard: If scan failed or scanned_count < min_required_scanned, skip invalidation.
-    2. Per-Ticker Quote Safeguard: If market quote is unavailable, skip lifecycle transition.
-    3. Incomplete Evaluation Safeguard: Only invalidate if ticker was actually successfully evaluated.
-    4. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
-    5. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
-    6. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
+    2. Universe Coverage Safeguard: If broad universe degraded to fallback, skip invalidation.
+    3. Per-Ticker Quote Safeguard: If market quote is unavailable, skip lifecycle transition.
+    4. Incomplete Evaluation Safeguard: Only invalidate if ticker was actually successfully evaluated.
+    5. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
+    6. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
+    7. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
        status/outcome -> 'invalidated' with specific disqualification reason.
-    7. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
+    8. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
     
     Crucial:
     - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
@@ -347,6 +363,9 @@ def reconcile_recommendation_lifecycle(
     if scanned_count < eff_min_scanned:
         logger.warning(f"[LIFECYCLE SAFEGUARD] Incomplete scan detected ({scanned_count} < {eff_min_scanned} tickers scanned). Skipping automatic invalidation.")
         return
+
+    if universe_is_fallback and target_tickers is None:
+        logger.warning("[LIFECYCLE UNIVERSE SAFEGUARD] Broad universe degraded to fallback coverage. Skipping invalidation to protect active recommendations.")
 
     try:
         from jobs.supabase_client import get_latest_bar, update_signals_price, update_signals_status, update_history_outcome
@@ -395,6 +414,11 @@ def reconcile_recommendation_lifecycle(
                 continue
                 
             # 3. Subsequent Scan Invalidation
+            # Fallback universe safeguard: do NOT invalidate if universe degraded to fallback
+            if universe_is_fallback and target_tickers is None:
+                logger.info(f"[LIFECYCLE COVERAGE SAFEGUARD] {ticker}: skipping invalidation because universe coverage was degraded.")
+                continue
+
             # Incomplete evaluation safeguard: do NOT invalidate if ticker was not successfully evaluated in this scan
             if successfully_evaluated_tickers is not None and ticker not in successfully_evaluated_tickers:
                 logger.warning(f"[LIFECYCLE INCOMPLETE SAFEGUARD] {ticker}: not successfully evaluated in this scan. Skipping invalidation.")
@@ -431,7 +455,7 @@ def reconcile_recommendation_lifecycle(
                     if signal_id:
                         supabase.table("signals").update(update_fields).eq("id", signal_id).execute()
                     else:
-                        supabase.table("signals").update(update_fields).eq("ticker", ticker).in_("status", ["open", "pending"]).execute()
+                        logger.error(f"[LIFECYCLE REFUSED] Refusing unsafe analytics update for {ticker}. Exact signal_id is required.")
                 except Exception as ana_err:
                     logger.warning(f"Could not update refreshed analytical data in signals for {ticker}: {ana_err}")
             logger.info(f"[LIFECYCLE ACTIVE] {ticker}: still qualified, price and current analytics refreshed in signals.")
@@ -497,8 +521,8 @@ def run_scan(
     logger.info("Cache mode: %s", cache_mode.upper())
     logger.info("=" * 60)
 
-    import datetime as dt_module
-    scan_execution_timestamp = dt_module.datetime.now(dt_module.timezone.utc).isoformat()
+    from src.utils.market_date import get_market_date, get_execution_timestamp_utc
+    scan_execution_timestamp = get_execution_timestamp_utc()
 
     regime_info = get_regime()
     sma_regime = regime_info["regime"]
@@ -506,10 +530,11 @@ def run_scan(
 
     market_data_date = regime_info.get("date")
     if not market_data_date:
-        market_data_date = dt_module.datetime.now().date().isoformat()
+        market_data_date = get_market_date().isoformat()
     recommendation_date = market_data_date
     scan_date_today = market_data_date
     signal_date = market_data_date
+    import datetime as dt_module
     scan_date_dt = dt_module.datetime.fromisoformat(market_data_date).date() if isinstance(market_data_date, str) else market_data_date
 
     logger.info("Market data date: %s | Execution timestamp (UTC): %s", market_data_date, scan_execution_timestamp)
@@ -1336,7 +1361,7 @@ def run_scan(
             logger.info(f"Ticker: {s['ticker']:<5} | Strategy: {s['strategy']:<25} | Composite Score: {s['composite_score']:.2f} | Status: {s['status']} | Tier: {s['tier_label']}")
         logger.info("=================================")
     else:
-        logger.info("No high-confidence setups tonight. Cash is a position.")
+        logger.info("No qualifying stock ideas tonight.")
 
     duration = round(time.time() - start_time, 2)
     status = "success"
@@ -1399,6 +1424,7 @@ def run_scan(
                 disqualification_reasons=disqualification_reasons,
                 updated_analytics=updated_analytics,
                 successfully_evaluated_tickers=successfully_evaluated_tickers,
+                universe_is_fallback=LAST_UNIVERSE_IS_FALLBACK,
             )
             logger.info("Clearing previous rejected audit entries from Supabase...")
             supabase.table("signals").delete().eq("status", "rejected").execute()
@@ -1439,9 +1465,9 @@ def run_scan(
                         "quality_score": sig.get("quality_score", sig.get("composite_score", 0.0)),
                         "tier_label": sig.get("tier_label", "Rejected"),
                         "strategy": sig.get("strategy"),
-                        "past_win_rate": m.get("win_rate", 0),
-                        "expectancy_pct": m.get("expectancy_pct", 0),
-                        "total_trades": m.get("total_trades", 0),
+                        "past_win_rate": m.get("win_rate") if (m.get("wins") is not None and m.get("losses") is not None and (m["wins"] + m["losses"]) > 0) else None,
+                        "expectancy_pct": m.get("expectancy_pct") if (m.get("wins") is not None and m.get("losses") is not None and (m["wins"] + m["losses"]) > 0) else None,
+                        "total_trades": (m["wins"] + m["losses"]) if (m.get("wins") is not None and m.get("losses") is not None and (m["wins"] + m["losses"]) > 0) else None,
                         "regime": regime_str,
                         "earnings_date": sig.get("earnings_date"),
                         "is_momentum_exception": sig.get("is_momentum_exception", False),
@@ -1510,6 +1536,9 @@ def run_scan(
         scanned_count,
         rsi_breadth_pct,
     )
+
+    if status == "success" and LAST_UNIVERSE_IS_FALLBACK and universe_source == "expanded":
+        status = "degraded_universe"
 
     scan_log_row = {
         "scan_date": signal_date,

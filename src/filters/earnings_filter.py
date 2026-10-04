@@ -643,9 +643,20 @@ def earnings_risk_filter(
         or earnings_surprise_is_recent
         or (news_sentiment is not None and news_sentiment > 0.20)
     )
+    is_neg_surprise_current = False
+    if earnings_surprise_pct is not None and earnings_surprise_pct <= -10.0:
+        if days_since_earnings is not None:
+            # Age is known: must be within EARNINGS_CATALYST_MAX_AGE_DAYS (<= 45 days)
+            is_neg_surprise_current = (0 <= days_since_earnings <= EARNINGS_CATALYST_MAX_AGE_DAYS)
+        else:
+            # Age is not known from calendar:
+            # If upcoming earnings date is known, treat negative surprise as active veto;
+            # but if earnings date is also unknown, unknown age -> insufficient evidence (avoid indefinite blocking).
+            is_neg_surprise_current = (next_dt is not None)
+
     is_neg_catalyst = (
         catalyst_type == "negative"
-        or (earnings_surprise_pct is not None and earnings_surprise_pct <= -10.0 and (days_since_earnings is None or days_since_earnings <= EARNINGS_CATALYST_MAX_AGE_DAYS))
+        or is_neg_surprise_current
         or (news_sentiment is not None and news_sentiment <= -0.30)
     )
 

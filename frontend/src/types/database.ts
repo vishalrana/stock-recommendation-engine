@@ -1,5 +1,6 @@
 export interface Recommendation {
   id?: string;
+  signal_id?: string | null;
   scan_date: string;
   ticker: string;
   company_name: string | null;
@@ -77,6 +78,7 @@ export interface Recommendation {
   next_earnings_date?: string | null;
   days_to_earnings?: number | null;
   earnings_rejected?: boolean | null;
+  catalyst_override?: string | null;
   reach_prob_adjusted?: number | null;
   reach_prob_raw?: number | null;
   outcome?: string | null;

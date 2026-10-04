@@ -82,6 +82,7 @@ export default function StockCard({
   const evidenceItems: { label: string; detail: string }[] = [];
 
   // 1. Positive earnings surprise
+  // 1. Positive earnings evidence (actual surprise or active catalyst)
   if (
     recommendation.earnings_surprise_pct !== null &&
     recommendation.earnings_surprise_pct !== undefined &&
@@ -92,19 +93,14 @@ export default function StockCard({
       label: 'Positive earnings',
       detail: `+${Number(recommendation.earnings_surprise_pct).toFixed(1)}% earnings surprise`,
     });
-  } else if (
-    recommendation.context_earnings !== null &&
-    recommendation.context_earnings !== undefined &&
-    !isNaN(Number(recommendation.context_earnings)) &&
-    Number(recommendation.context_earnings) >= 15
-  ) {
+  } else if (recommendation.catalyst_override === 'positive') {
     evidenceItems.push({
       label: 'Positive earnings',
-      detail: 'Earnings momentum',
+      detail: 'Positive catalyst override',
     });
   }
 
-  // 2. Positive news sentiment (never fabricate headlines)
+  // 2. Positive news sentiment (strictly require finbert_sentiment > 0.20)
   if (
     recommendation.finbert_sentiment !== null &&
     recommendation.finbert_sentiment !== undefined &&
@@ -114,16 +110,6 @@ export default function StockCard({
     evidenceItems.push({
       label: 'Positive news',
       detail: 'Positive news sentiment',
-    });
-  } else if (
-    recommendation.context_news !== null &&
-    recommendation.context_news !== undefined &&
-    !isNaN(Number(recommendation.context_news)) &&
-    Number(recommendation.context_news) >= 15
-  ) {
-    evidenceItems.push({
-      label: 'Positive news',
-      detail: 'Positive news signal',
     });
   }
 

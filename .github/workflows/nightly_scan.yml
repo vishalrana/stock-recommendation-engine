@@ -114,6 +114,22 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Git HEAD matches origin/main
+        run: |
+          git fetch origin main
+          LOCAL_HEAD=$(git rev-parse HEAD)
+          REMOTE_HEAD=$(git rev-parse origin/main)
+          echo "Local HEAD:  $LOCAL_HEAD"
+          echo "Remote HEAD: $REMOTE_HEAD"
+          if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+            echo "❌ ERROR: Local checkout does not match origin/main!"
+            exit 1
+          fi
+          echo "✅ HEAD verified matches origin/main"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

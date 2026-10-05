@@ -24,6 +24,9 @@ from enum import Enum
 from typing import Optional, Dict, Any, List, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import threading
+from dataclasses import dataclass, field
+
 logger = logging.getLogger(__name__)
 
 from src.quant_config import (
@@ -51,6 +54,141 @@ class EarningsStatus(str, Enum):
     KNOWN_CLEAR = "KNOWN_CLEAR"
     UNKNOWN = "UNKNOWN"
     STALE = "STALE"
+
+
+class ProviderCircuitBreaker:
+    """
+    Provider-level circuit breaker to prevent cascade failures and rate-limit loops.
+    Trips to OPEN when provider repeatedly returns 429 Too Many Requests.
+    """
+    def __init__(self, failure_threshold: int = 4, recovery_timeout: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.consecutive_rate_limits = 0
+        self.total_rate_limits = 0
+        self.state = "CLOSED"  # "CLOSED", "OPEN", "HALF_OPEN"
+        self.tripped_at: Optional[float] = None
+        self._lock = threading.Lock()
+
+    def record_success(self):
+        with self._lock:
+            self.consecutive_rate_limits = 0
+            if self.state == "HALF_OPEN":
+                self.state = "CLOSED"
+                logger.info("[CIRCUIT BREAKER CLOSED] Provider recovered successfully.")
+
+    def record_rate_limit(self):
+        with self._lock:
+            self.consecutive_rate_limits += 1
+            self.total_rate_limits += 1
+            if self.consecutive_rate_limits >= self.failure_threshold:
+                if self.state != "OPEN":
+                    logger.warning(
+                        "[CIRCUIT BREAKER OPEN] Provider hit %d consecutive rate limits. "
+                        "Suspending external earnings requests. Using cached records / UNKNOWN fallback.",
+                        self.consecutive_rate_limits,
+                    )
+                self.state = "OPEN"
+                self.tripped_at = time.time()
+
+    def can_request(self) -> bool:
+        with self._lock:
+            if self.state == "CLOSED":
+                return True
+            if self.state == "OPEN":
+                if self.tripped_at and (time.time() - self.tripped_at) > self.recovery_timeout:
+                    self.state = "HALF_OPEN"
+                    logger.info("[CIRCUIT BREAKER HALF_OPEN] Probing provider for recovery.")
+                    return True
+                return False
+            # HALF_OPEN: allow a single probe
+            return True
+
+    def reset(self):
+        with self._lock:
+            self.consecutive_rate_limits = 0
+            self.total_rate_limits = 0
+            self.state = "CLOSED"
+            self.tripped_at = None
+
+
+GLOBAL_CIRCUIT_BREAKER = ProviderCircuitBreaker()
+
+
+@dataclass
+class EarningsTracker:
+    universe_size: int = 0
+    local_cache_hits: int = 0
+    supabase_cache_hits: int = 0
+    provider_requests: int = 0
+    provider_successful: int = 0
+    provider_rate_limited: int = 0
+    provider_failed: int = 0
+    unknown_count: int = 0
+    known_upcoming_count: int = 0
+    known_clear_count: int = 0
+    positive_catalyst_count: int = 0
+    negative_catalyst_count: int = 0
+
+    negative_earnings_blocks: int = 0
+    blackout_blocks: int = 0
+    positive_overrides: int = 0
+    unknown_proceeds: int = 0
+
+    def reset(self):
+        self.universe_size = 0
+        self.local_cache_hits = 0
+        self.supabase_cache_hits = 0
+        self.provider_requests = 0
+        self.provider_successful = 0
+        self.provider_rate_limited = 0
+        self.provider_failed = 0
+        self.unknown_count = 0
+        self.known_upcoming_count = 0
+        self.known_clear_count = 0
+        self.positive_catalyst_count = 0
+        self.negative_catalyst_count = 0
+        self.negative_earnings_blocks = 0
+        self.blackout_blocks = 0
+        self.positive_overrides = 0
+        self.unknown_proceeds = 0
+
+    def format_summary(self) -> str:
+        return f"""
+============================================================
+EARNINGS DATA SUMMARY
+---------------------
+Universe: {self.universe_size}
+Local cache hits: {self.local_cache_hits}
+Supabase cache hits: {self.supabase_cache_hits}
+Provider requests: {self.provider_requests}
+Provider successful: {self.provider_successful}
+Provider rate limited: {self.provider_rate_limited}
+Provider failed: {self.provider_failed}
+Unknown: {self.unknown_count}
+Known upcoming: {self.known_upcoming_count}
+Known clear: {self.known_clear_count}
+Positive catalyst: {self.positive_catalyst_count}
+Negative catalyst: {self.negative_catalyst_count}
+
+EARNINGS IMPACT
+---------------
+Negative earnings blocks: {self.negative_earnings_blocks}
+Blackout blocks: {self.blackout_blocks}
+Positive overrides: {self.positive_overrides}
+Unknown/no-info proceeds: {self.unknown_proceeds}
+============================================================
+""".strip()
+
+
+GLOBAL_EARNINGS_TRACKER = EarningsTracker()
+
+_SESSION_FETCHED_TICKERS: set = set()
+
+
+def reset_session_cache():
+    global _SESSION_FETCHED_TICKERS
+    _SESSION_FETCHED_TICKERS.clear()
 
 
 def normalize_strategy_key(strategy: str) -> str:
@@ -104,18 +242,10 @@ def normalize_date_str(val: Any) -> Optional[str]:
     return None
 
 
-def is_earnings_record_fresh(
-    record: Optional[Dict[str, Any]], max_age_seconds: int = EARNINGS_CACHE_TTL_SECONDS
-) -> bool:
-    """
-    Check if an earnings cache record is fresh (<= 24 hours old).
-    Returns False for missing or stale records.
-    """
-    if not record or not isinstance(record, dict):
-        return False
+def _get_record_age_seconds(record: Dict[str, Any]) -> Optional[float]:
     updated_at_val = record.get("updated_at") or record.get("cached_at")
     if not updated_at_val:
-        return bool(record.get("next_earnings_date"))
+        return None
     try:
         now = datetime.datetime.now(datetime.timezone.utc)
         if isinstance(updated_at_val, (int, float)):
@@ -128,15 +258,57 @@ def is_earnings_record_fresh(
         elif isinstance(updated_at_val, datetime.date):
             dt = datetime.datetime.combine(updated_at_val, datetime.time.min, tzinfo=datetime.timezone.utc)
         else:
-            return False
-
+            return None
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
-
-        age = (now - dt).total_seconds()
-        return 0 <= age <= max_age_seconds
+        return (now - dt).total_seconds()
     except Exception:
+        return None
+
+
+def is_earnings_record_fresh(
+    record: Optional[Dict[str, Any]],
+    max_age_seconds: int = EARNINGS_CACHE_TTL_SECONDS,
+    today_iso: Optional[str] = None,
+) -> bool:
+    """
+    Evaluates freshness of an earnings record based on event lifecycle:
+    1. Future upcoming date (next_earnings_date >= today): Fresh unless older than 14 days.
+    2. Past upcoming date (next_earnings_date < today): Stale (earnings occurred, needs update).
+    3. Known clear (no earnings scheduled): Fresh for 7 days.
+    4. General record without date: Fresh for max_age_seconds (default 24h).
+    """
+    if not record or not isinstance(record, dict):
         return False
+
+    if not today_iso:
+        today_iso = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+    next_d = normalize_date_str(record.get("next_earnings_date") or record.get("next_earnings"))
+
+    # 1. If next_earnings_date is in the future, it is valid and fresh unless older than 14 days
+    if next_d and next_d >= today_iso:
+        age_seconds = _get_record_age_seconds(record)
+        if age_seconds is None or age_seconds < (14 * 86400):
+            return True
+
+    # 2. If next_earnings_date has passed, the company has reported; record is genuinely stale
+    if next_d and next_d < today_iso:
+        return False
+
+    # 3. If known clear (no earnings upcoming), fresh for 7 days
+    status = record.get("status")
+    if status == EarningsStatus.KNOWN_CLEAR.value:
+        age_seconds = _get_record_age_seconds(record)
+        if age_seconds is not None and age_seconds < (7 * 86400):
+            return True
+
+    # 4. Fallback age check for UNKNOWN or unspecified status
+    age_seconds = _get_record_age_seconds(record)
+    if age_seconds is not None:
+        return 0 <= age_seconds <= max_age_seconds
+
+    return bool(next_d and next_d >= today_iso)
 
 
 def load_local_cache(cache_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -245,11 +417,21 @@ def fetch_single_ticker_provider(
     Fetches earnings schedule for a single ticker from yfinance with retry/backoff.
     Returns: (ticker, next_earnings_date, last_earnings_date, fiscal_period, status)
     """
+    sym_upper = ticker_sym.strip().upper()
+
+    # Circuit breaker check: fail early if provider is currently open
+    if not GLOBAL_CIRCUIT_BREAKER.can_request():
+        logger.debug("[CIRCUIT BREAKER] External earnings request blocked for %s; returning UNKNOWN.", sym_upper)
+        GLOBAL_EARNINGS_TRACKER.provider_failed += 1
+        return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
+
+    GLOBAL_EARNINGS_TRACKER.provider_requests += 1
+
     for attempt in range(max_retries + 1):
         try:
             import yfinance as yf
 
-            yf_ticker = yf.Ticker(ticker_sym)
+            yf_ticker = yf.Ticker(sym_upper)
             cal = getattr(yf_ticker, "calendar", None)
             next_date = None
             last_date = None
@@ -286,8 +468,10 @@ def fetch_single_ticker_provider(
             except Exception:
                 pass
 
+            GLOBAL_CIRCUIT_BREAKER.record_success()
+            GLOBAL_EARNINGS_TRACKER.provider_successful += 1
             status = EarningsStatus.KNOWN_UPCOMING.value if next_date else EarningsStatus.KNOWN_CLEAR.value
-            return ticker_sym, next_date, last_date, fiscal_period, status
+            return sym_upper, next_date, last_date, fiscal_period, status
 
         except Exception as e:
             err_str = str(e).lower()
@@ -299,11 +483,19 @@ def fetch_single_ticker_provider(
                 or "remotedisconnected" in err_str
             )
 
+            if is_rate_limit:
+                GLOBAL_CIRCUIT_BREAKER.record_rate_limit()
+                GLOBAL_EARNINGS_TRACKER.provider_rate_limited += 1
+                if not GLOBAL_CIRCUIT_BREAKER.can_request():
+                    logger.warning("[CIRCUIT BREAKER OPEN] Aborting retries for %s due to circuit breaker trip.", sym_upper)
+                    GLOBAL_EARNINGS_TRACKER.provider_failed += 1
+                    return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
+
             if (is_rate_limit or is_timeout or is_network) and attempt < max_retries:
                 delay = (base_delay * (2**attempt)) + random.uniform(0.1, 0.4)
                 logger.warning(
                     "Earnings fetch for %s hit %s; retrying in %.2fs (attempt %d/%d)",
-                    ticker_sym,
+                    sym_upper,
                     e,
                     delay,
                     attempt + 1,
@@ -312,10 +504,12 @@ def fetch_single_ticker_provider(
                 time.sleep(delay)
                 continue
             else:
-                logger.debug("Earnings fetch skipped/failed for %s: %s", ticker_sym, e)
-                return ticker_sym, None, None, None, EarningsStatus.UNKNOWN.value
+                logger.debug("Earnings fetch skipped/failed for %s: %s", sym_upper, e)
+                GLOBAL_EARNINGS_TRACKER.provider_failed += 1
+                return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
 
-    return ticker_sym, None, None, None, EarningsStatus.UNKNOWN.value
+    GLOBAL_EARNINGS_TRACKER.provider_failed += 1
+    return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
 
 
 def fetch_earnings_calendar(
@@ -324,6 +518,7 @@ def fetch_earnings_calendar(
     cache_path: Optional[Union[str, Path]] = None,
     max_workers: int = 4,
     allow_network: bool = True,
+    max_provider_fetches: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Populates and retrieves upcoming earnings dates for universe tickers using a multi-layer cache hierarchy:
@@ -334,6 +529,7 @@ def fetch_earnings_calendar(
     5. Fallback safety: uses prior cached data if provider fails; fail-closed UNKNOWN only if no cache exists.
     """
     normalized_tickers = list(dict.fromkeys([t.strip().upper() for t in tickers if t and t.strip()]))
+    GLOBAL_EARNINGS_TRACKER.universe_size = len(normalized_tickers)
     calendar_map: Dict[str, Dict[str, Any]] = {}
     now_dt = datetime.datetime.now(datetime.timezone.utc)
     now_iso = now_dt.isoformat()
@@ -363,6 +559,7 @@ def fetch_earnings_calendar(
                     "status": st,
                     "source": "local_cache",
                 }
+                GLOBAL_EARNINGS_TRACKER.local_cache_hits += 1
 
     # 2. Layer 2: Supabase Cache for missing tickers
     missing_from_local = [t for t in normalized_tickers if t not in calendar_map]
@@ -385,6 +582,7 @@ def fetch_earnings_calendar(
                     "status": st,
                     "source": "supabase",
                 }
+                GLOBAL_EARNINGS_TRACKER.supabase_cache_hits += 1
                 # Sync into local cache
                 local_cache[sym] = {
                     "ticker": sym,
@@ -401,6 +599,15 @@ def fetch_earnings_calendar(
 
     # 3. Layer 3: External Provider for remaining missing tickers
     tickers_to_fetch = [t for t in normalized_tickers if t not in calendar_map]
+    if max_provider_fetches is not None and len(tickers_to_fetch) > max_provider_fetches:
+        logger.info(
+            "[EARNINGS CALENDAR] Bounding startup provider queries to %d (out of %d uncached tickers); "
+            "remaining tickers will be resolved on-demand for setups.",
+            max_provider_fetches,
+            len(tickers_to_fetch),
+        )
+        tickers_to_fetch = tickers_to_fetch[:max_provider_fetches]
+
     newly_fetched_records: List[Dict[str, Any]] = []
 
     if tickers_to_fetch and allow_network:
@@ -524,7 +731,7 @@ def fetch_earnings_calendar(
                             "source": "failed_fetch",
                         }
 
-    # 4. Fill any remaining unresolved tickers (e.g. allow_network=False)
+    # 4. Fill any remaining unresolved tickers (e.g. allow_network=False or bounded)
     for t in normalized_tickers:
         if t not in calendar_map:
             calendar_map[t] = {
@@ -543,7 +750,182 @@ def fetch_earnings_calendar(
     if newly_fetched_records and supabase is not None:
         persist_supabase_earnings(newly_fetched_records, supabase)
 
+    # 6. Update Tracker status totals
+    for rec in calendar_map.values():
+        st = rec.get("status")
+        if st == EarningsStatus.KNOWN_UPCOMING.value:
+            GLOBAL_EARNINGS_TRACKER.known_upcoming_count += 1
+        elif st == EarningsStatus.KNOWN_CLEAR.value:
+            GLOBAL_EARNINGS_TRACKER.known_clear_count += 1
+        else:
+            GLOBAL_EARNINGS_TRACKER.unknown_count += 1
+
     return calendar_map
+
+
+def resolve_ticker_earnings(
+    ticker: str,
+    calendar_map: Dict[str, Dict[str, Any]],
+    supabase=None,
+    cache_path: Optional[Union[str, Path]] = None,
+    allow_network: bool = True,
+) -> Dict[str, Any]:
+    """
+    On-demand single-ticker earnings resolver.
+    Used during candidate evaluation or PEAD strategy check to resolve missing/unresolved earnings data.
+    Flow:
+    1. If ticker is in calendar_map and status != UNKNOWN: return cached record.
+    2. Check local JSON cache (data/cache/earnings_dates_cache.json).
+    3. Check Supabase table ('earnings_calendar').
+    4. If allow_network and circuit breaker allows: fetch from provider (yfinance) via fetch_single_ticker_provider.
+    5. Persist to local JSON cache and Supabase.
+    6. Update calendar_map and return record.
+    """
+    sym = ticker.strip().upper()
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    now_iso = now_dt.isoformat()
+    now_ts = now_dt.timestamp()
+    today_iso = now_dt.date().isoformat()
+
+    # 1. Already resolved and confirmed in calendar_map?
+    existing = calendar_map.get(sym)
+    if existing and existing.get("status") in (
+        EarningsStatus.KNOWN_UPCOMING.value,
+        EarningsStatus.KNOWN_CLEAR.value,
+    ):
+        return existing
+
+    # 2. Check local JSON cache
+    local_cache = load_local_cache(cache_path)
+    if sym in local_cache:
+        entry = local_cache[sym]
+        next_d = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
+        last_d = normalize_date_str(entry.get("last_earnings_date") or entry.get("last_earnings"))
+        if is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS):
+            st = entry.get("status") or (
+                EarningsStatus.KNOWN_UPCOMING.value if next_d else EarningsStatus.KNOWN_CLEAR.value
+            )
+            rec = {
+                "ticker": sym,
+                "next_earnings_date": next_d,
+                "last_earnings_date": last_d,
+                "fiscal_period": entry.get("fiscal_period"),
+                "updated_at": entry.get("updated_at") or now_iso,
+                "status": st,
+                "source": "local_cache",
+            }
+            calendar_map[sym] = rec
+            GLOBAL_EARNINGS_TRACKER.local_cache_hits += 1
+            return rec
+
+    # 3. Check Supabase
+    if supabase is not None:
+        try:
+            res = supabase.table("earnings_calendar").select("*").eq("ticker", sym).execute()
+            if res.data and len(res.data) > 0:
+                row = res.data[0]
+                next_d = normalize_date_str(row.get("next_earnings_date"))
+                last_d = normalize_date_str(row.get("last_earnings_date"))
+                if is_earnings_record_fresh(row, EARNINGS_CACHE_TTL_SECONDS) or (next_d and next_d >= today_iso):
+                    st = row.get("status") or (
+                        EarningsStatus.KNOWN_UPCOMING.value if next_d else EarningsStatus.KNOWN_CLEAR.value
+                    )
+                    rec = {
+                        "ticker": sym,
+                        "next_earnings_date": next_d,
+                        "last_earnings_date": last_d,
+                        "fiscal_period": row.get("fiscal_period"),
+                        "updated_at": row.get("updated_at") or now_iso,
+                        "status": st,
+                        "source": "supabase",
+                    }
+                    calendar_map[sym] = rec
+                    GLOBAL_EARNINGS_TRACKER.supabase_cache_hits += 1
+                    local_cache[sym] = {
+                        "ticker": sym,
+                        "last_earnings": last_d,
+                        "next_earnings": next_d,
+                        "last_earnings_date": last_d,
+                        "next_earnings_date": next_d,
+                        "fiscal_period": row.get("fiscal_period"),
+                        "updated_at": row.get("updated_at") or now_iso,
+                        "cached_at": now_ts,
+                        "status": st,
+                    }
+                    save_local_cache(local_cache, cache_path)
+                    return rec
+        except Exception as e:
+            logger.debug("Supabase lookup error for %s in resolve_ticker_earnings: %s", sym, e)
+
+    # 4. Fetch from provider if allowed and circuit breaker is healthy
+    if allow_network and GLOBAL_CIRCUIT_BREAKER.can_request():
+        sym_res, next_d, last_d, fiscal_p, fetch_status = fetch_single_ticker_provider(sym)
+        if fetch_status in (EarningsStatus.KNOWN_UPCOMING.value, EarningsStatus.KNOWN_CLEAR.value):
+            rec = {
+                "ticker": sym,
+                "next_earnings_date": next_d,
+                "last_earnings_date": last_d,
+                "fiscal_period": fiscal_p,
+                "updated_at": now_iso,
+                "status": fetch_status,
+                "source": "provider",
+            }
+            calendar_map[sym] = rec
+            local_cache[sym] = {
+                "ticker": sym,
+                "last_earnings": last_d,
+                "next_earnings": next_d,
+                "last_earnings_date": last_d,
+                "next_earnings_date": next_d,
+                "fiscal_period": fiscal_p,
+                "updated_at": now_iso,
+                "cached_at": now_ts,
+                "status": fetch_status,
+            }
+            save_local_cache(local_cache, cache_path)
+            if supabase is not None:
+                persist_supabase_earnings([rec], supabase)
+            return rec
+
+    # 5. Fallback if prior cache exists
+    if sym in local_cache:
+        prior = local_cache[sym]
+        prior_next = normalize_date_str(prior.get("next_earnings_date") or prior.get("next_earnings"))
+        prior_last = normalize_date_str(prior.get("last_earnings_date") or prior.get("last_earnings"))
+        is_fresh = is_earnings_record_fresh(prior, EARNINGS_CACHE_TTL_SECONDS)
+        st = (
+            EarningsStatus.KNOWN_UPCOMING.value
+            if (is_fresh and prior_next and prior_next >= today_iso)
+            else (
+                EarningsStatus.KNOWN_CLEAR.value
+                if (is_fresh and not prior_next)
+                else EarningsStatus.UNKNOWN.value
+            )
+        )
+        rec = {
+            "ticker": sym,
+            "next_earnings_date": prior_next,
+            "last_earnings_date": prior_last,
+            "fiscal_period": prior.get("fiscal_period"),
+            "updated_at": prior.get("updated_at") or now_iso,
+            "status": st,
+            "source": "cache_fallback",
+        }
+        calendar_map[sym] = rec
+        return rec
+
+    # 6. Default UNKNOWN
+    unres = {
+        "ticker": sym,
+        "next_earnings_date": None,
+        "last_earnings_date": None,
+        "fiscal_period": None,
+        "updated_at": now_iso,
+        "status": EarningsStatus.UNKNOWN.value,
+        "source": "unresolved",
+    }
+    calendar_map[sym] = unres
+    return unres
 
 
 def earnings_risk_filter(
@@ -660,12 +1042,29 @@ def earnings_risk_filter(
         or (news_sentiment is not None and news_sentiment <= -0.30)
     )
 
+    def _track_and_return(res: Dict[str, Any]) -> Dict[str, Any]:
+        if is_pos_catalyst:
+            GLOBAL_EARNINGS_TRACKER.positive_catalyst_count += 1
+        if is_neg_catalyst:
+            GLOBAL_EARNINGS_TRACKER.negative_catalyst_count += 1
+        if not res.get("pass", True):
+            if is_neg_catalyst:
+                GLOBAL_EARNINGS_TRACKER.negative_earnings_blocks += 1
+            else:
+                GLOBAL_EARNINGS_TRACKER.blackout_blocks += 1
+        else:
+            if res.get("reason_code") == REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE:
+                GLOBAL_EARNINGS_TRACKER.positive_overrides += 1
+            elif res.get("status") == EarningsStatus.UNKNOWN.value and allow_unknown_date:
+                GLOBAL_EARNINGS_TRACKER.unknown_proceeds += 1
+        return res
+
     # 3. Special handling for PEAD: Post-Earnings Announcement Drift strategy
     if strat_key == "pead":
         if last_dt is not None:
             days_since = (scan_date - last_dt).days
             if 0 <= days_since <= 3:
-                return {
+                return _track_and_return({
                     "pass": True,
                     "reason": "Post-earnings window",
                     "reason_code": "PEAD_POST_EARNINGS_WINDOW",
@@ -673,8 +1072,8 @@ def earnings_risk_filter(
                     "days_to_earnings": -days_since,
                     "next_earnings_date": next_dt.isoformat() if next_dt else None,
                     "last_earnings_date": last_dt.isoformat() if last_dt else None,
-                }
-        return {
+                })
+        return _track_and_return({
             "pass": True,
             "reason": "PEAD window (exempt from pre-earnings blackout)",
             "reason_code": "PEAD_EXEMPT",
@@ -682,7 +1081,7 @@ def earnings_risk_filter(
             "days_to_earnings": None,
             "next_earnings_date": next_dt.isoformat() if next_dt else None,
             "last_earnings_date": last_dt.isoformat() if last_dt else None,
-        }
+        })
 
     # 4. Check status and freshness
     status = entry.get("status")
@@ -695,7 +1094,7 @@ def earnings_risk_filter(
     # Fail closed on STALE data
     if status == EarningsStatus.STALE.value:
         logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): Earnings data STALE")
-        return {
+        return _track_and_return({
             "pass": False,
             "reason": f"Earnings status {status} - blackout safety check failed",
             "reason_code": "EARNINGS_DATA_STALE",
@@ -703,14 +1102,14 @@ def earnings_risk_filter(
             "days_to_earnings": None,
             "next_earnings_date": next_dt.isoformat() if next_dt else None,
             "last_earnings_date": last_dt.isoformat() if last_dt else None,
-        }
+        })
 
     # 5. When upcoming earnings date is known
     if next_dt is not None:
         days_to_earnings = (next_dt - scan_date).days
         if days_to_earnings < 0:
             if is_neg_catalyst:
-                return {
+                return _track_and_return({
                     "pass": False,
                     "reason": "Negative earnings/news catalyst veto",
                     "reason_code": REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
@@ -718,8 +1117,8 @@ def earnings_risk_filter(
                     "days_to_earnings": None,
                     "next_earnings_date": next_dt.isoformat(),
                     "last_earnings_date": last_dt.isoformat() if last_dt else None,
-                }
-            return {
+                })
+            return _track_and_return({
                 "pass": True,
                 "reason": "Past earnings",
                 "reason_code": REASON_EARNINGS_OUTSIDE_BLACKOUT,
@@ -727,12 +1126,12 @@ def earnings_risk_filter(
                 "days_to_earnings": None,
                 "next_earnings_date": next_dt.isoformat(),
                 "last_earnings_date": last_dt.isoformat() if last_dt else None,
-            }
+            })
 
         if days_to_earnings <= blackout:
             if is_pos_catalyst:
                 logger.info(f"[EARNINGS RISK GATE] {ticker} ({strategy}): Positive catalyst overrides {days_to_earnings}d blackout")
-                return {
+                return _track_and_return({
                     "pass": True,
                     "reason": f"Positive earnings catalyst overrides {days_to_earnings}d blackout",
                     "reason_code": REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE,
@@ -740,12 +1139,12 @@ def earnings_risk_filter(
                     "days_to_earnings": days_to_earnings,
                     "next_earnings_date": next_dt.isoformat(),
                     "last_earnings_date": last_dt.isoformat() if last_dt else None,
-                }
+                })
             else:
                 reason_msg = f"Earnings in {days_to_earnings}d (blackout: {blackout}d)"
                 reason_cd = REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK if is_neg_catalyst else REASON_EARNINGS_BLACKOUT_BLOCK
                 logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): {reason_msg}")
-                return {
+                return _track_and_return({
                     "pass": False,
                     "reason": reason_msg,
                     "reason_code": reason_cd,
@@ -753,11 +1152,11 @@ def earnings_risk_filter(
                     "days_to_earnings": days_to_earnings,
                     "next_earnings_date": next_dt.isoformat(),
                     "last_earnings_date": last_dt.isoformat() if last_dt else None,
-                }
+                })
         else:
             # Outside blackout
             if is_neg_catalyst:
-                return {
+                return _track_and_return({
                     "pass": False,
                     "reason": "Negative earnings/news catalyst veto",
                     "reason_code": REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
@@ -765,8 +1164,8 @@ def earnings_risk_filter(
                     "days_to_earnings": days_to_earnings,
                     "next_earnings_date": next_dt.isoformat(),
                     "last_earnings_date": last_dt.isoformat() if last_dt else None,
-                }
-            return {
+                })
+            return _track_and_return({
                 "pass": True,
                 "reason": "Earnings passed",
                 "reason_code": REASON_EARNINGS_OUTSIDE_BLACKOUT,
@@ -774,12 +1173,12 @@ def earnings_risk_filter(
                 "days_to_earnings": days_to_earnings,
                 "next_earnings_date": next_dt.isoformat(),
                 "last_earnings_date": last_dt.isoformat() if last_dt else None,
-            }
+            })
 
     # 6. If confirmed clear (no upcoming earnings scheduled)
     if status == EarningsStatus.KNOWN_CLEAR.value:
         if is_neg_catalyst:
-            return {
+            return _track_and_return({
                 "pass": False,
                 "reason": "Negative earnings/news catalyst veto",
                 "reason_code": REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK,
@@ -787,8 +1186,8 @@ def earnings_risk_filter(
                 "days_to_earnings": None,
                 "next_earnings_date": None,
                 "last_earnings_date": last_dt.isoformat() if last_dt else None,
-            }
-        return {
+            })
+        return _track_and_return({
             "pass": True,
             "reason": "Earnings clear",
             "reason_code": REASON_EARNINGS_OUTSIDE_BLACKOUT,
@@ -796,11 +1195,11 @@ def earnings_risk_filter(
             "days_to_earnings": None,
             "next_earnings_date": None,
             "last_earnings_date": last_dt.isoformat() if last_dt else None,
-        }
+        })
 
     # 7. When earnings date is unknown (missing from calendar or UNKNOWN)
     if is_neg_catalyst:
-        return {
+        return _track_and_return({
             "pass": False,
             "reason": "Negative earnings news/catalyst veto",
             "reason_code": REASON_EARNINGS_DATE_UNKNOWN_NEGATIVE,
@@ -808,9 +1207,9 @@ def earnings_risk_filter(
             "days_to_earnings": None,
             "next_earnings_date": None,
             "last_earnings_date": None,
-        }
+        })
     elif is_pos_catalyst:
-        return {
+        return _track_and_return({
             "pass": True,
             "reason": "Unknown earnings date with positive catalyst",
             "reason_code": REASON_EARNINGS_DATE_UNKNOWN_POSITIVE,
@@ -818,11 +1217,11 @@ def earnings_risk_filter(
             "days_to_earnings": None,
             "next_earnings_date": None,
             "last_earnings_date": None,
-        }
+        })
     else:
         # No meaningful info
         if allow_unknown_date:
-            return {
+            return _track_and_return({
                 "pass": True,
                 "reason": "Unknown earnings date without negative catalyst",
                 "reason_code": REASON_EARNINGS_DATE_UNKNOWN_NO_CATALYST,
@@ -830,9 +1229,9 @@ def earnings_risk_filter(
                 "days_to_earnings": None,
                 "next_earnings_date": None,
                 "last_earnings_date": None,
-            }
+            })
         else:
-            return {
+            return _track_and_return({
                 "pass": False,
                 "reason": f"Earnings status {EarningsStatus.UNKNOWN.value} - unconfirmed earnings schedule",
                 "reason_code": "EARNINGS_UNKNOWN_FAIL_CLOSED",
@@ -840,5 +1239,5 @@ def earnings_risk_filter(
                 "days_to_earnings": None,
                 "next_earnings_date": None,
                 "last_earnings_date": None,
-            }
+            })
 

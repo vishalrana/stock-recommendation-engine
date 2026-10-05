@@ -52,8 +52,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/cache
-          key: ${{ runner.os }}-data-cache-v1-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-data-cache-v2-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-data-cache-v2-
             ${{ runner.os }}-data-cache-v1-
 
       - name: Install Dependencies

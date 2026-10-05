@@ -9,19 +9,45 @@ from src.utils.candidate_builder import build_candidate_from_row
 logger = logging.getLogger(__name__)
 
 
-def get_last_earnings_date(ticker: str, as_of_date: Optional[datetime.date] = None) -> Optional[datetime.date]:
-    """Fetch last earnings date from local cache or yfinance. Returns datetime.date or None."""
+def get_last_earnings_date(
+    ticker: str,
+    as_of_date: Optional[datetime.date] = None,
+    earnings_calendar: Optional[dict] = None,
+    supabase=None,
+) -> Optional[datetime.date]:
+    """Fetch last earnings date from shared calendar map, local cache, or yfinance. Returns datetime.date or None."""
+    ticker_upper = ticker.strip().upper()
+    if earnings_calendar and ticker_upper in earnings_calendar:
+        rec = earnings_calendar[ticker_upper]
+        last_e_str = rec.get("last_earnings_date") or rec.get("last_earnings")
+        if last_e_str:
+            try:
+                parsed = datetime.strptime(str(last_e_str)[:10], "%Y-%m-%d").date()
+                if as_of_date is None or parsed <= as_of_date:
+                    return parsed
+            except Exception:
+                pass
+
     from src.utils.earnings_cache import get_ticker_earnings
-    last_e_str, _ = get_ticker_earnings(ticker, as_of_date=as_of_date)
+    last_e_str, _ = get_ticker_earnings(ticker_upper, as_of_date=as_of_date, supabase=supabase)
     if last_e_str:
         try:
-            return datetime.strptime(last_e_str, "%Y-%m-%d").date()
+            return datetime.strptime(str(last_e_str)[:10], "%Y-%m-%d").date()
         except Exception:
             pass
     return None
 
 
 class PEADStrategy(StrategyInterface):
+    def __init__(self):
+        super().__init__()
+        self.earnings_calendar = None
+        self.supabase = None
+
+    def set_earnings_calendar(self, earnings_calendar: Optional[dict], supabase=None):
+        self.earnings_calendar = earnings_calendar
+        self.supabase = supabase
+
     @property
     def name(self) -> str:
         return "Post-Earnings Drift"
@@ -66,7 +92,12 @@ class PEADStrategy(StrategyInterface):
         ref_date = now_date if abs((now_date - bar_date).days) <= 4 else bar_date
 
         # === EARNINGS GATE ===
-        earnings_date = get_last_earnings_date(ticker, as_of_date=ref_date)
+        earnings_date = get_last_earnings_date(
+            ticker,
+            as_of_date=ref_date,
+            earnings_calendar=self.earnings_calendar,
+            supabase=self.supabase,
+        )
         if earnings_date is None:
             return None
 

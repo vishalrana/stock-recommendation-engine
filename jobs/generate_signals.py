@@ -46,7 +46,14 @@ from jobs.strategies import STRATEGIES
 from src.data.cache_manager import get_cache_manager
 from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
 from src.strategies.target_calculator import calculate_targets
-from src.filters.earnings_filter import fetch_earnings_calendar, earnings_risk_filter
+from src.filters.earnings_filter import (
+    fetch_earnings_calendar,
+    earnings_risk_filter,
+    resolve_ticker_earnings,
+    GLOBAL_EARNINGS_TRACKER,
+    reset_session_cache,
+    EarningsStatus,
+)
 from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
 from src.quant_config import (
     STRATEGY_STOP_CONFIG,
@@ -514,6 +521,8 @@ def run_scan(
 
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
+    GLOBAL_EARNINGS_TRACKER.reset()
+    reset_session_cache()
     if dry_run:
         logger.info("DRY RUN ACTIVE — database writes will be skipped")
     if is_targeted:
@@ -667,7 +676,12 @@ def run_scan(
     earnings_calendar_cache = {}
     try:
         allow_earnings_net = not (dry_run or cache_mode == "local")
-        earnings_calendar_cache = fetch_earnings_calendar(tickers, supabase=supabase, allow_network=allow_earnings_net)
+        earnings_calendar_cache = fetch_earnings_calendar(
+            tickers,
+            supabase=supabase,
+            allow_network=allow_earnings_net,
+            max_provider_fetches=50,
+        )
         logger.info(f"[EARNINGS CALENDAR] Loaded {len(earnings_calendar_cache)} ticker schedules")
     except Exception as ec_err:
         logger.warning(f"Could not load earnings calendar: {ec_err}")
@@ -734,6 +748,9 @@ def run_scan(
     evaluated_dfs: dict = {}
 
     for strategy in STRATEGIES:
+        if hasattr(strategy, "set_earnings_calendar"):
+            strategy.set_earnings_calendar(earnings_calendar_cache, supabase=supabase)
+
         if strategy.name not in allowed_strategies:
             skipped_strategies[strategy.name] = regime_str
             strategy_counts[strategy.name] = 0
@@ -1092,6 +1109,9 @@ def run_scan(
             score = float(sig.get("composite_score", sig.get("score", 0.0)))
 
             # 0. Earnings Date Risk Filter
+            if allow_earnings_net and (ticker not in earnings_calendar_cache or earnings_calendar_cache[ticker].get("status") == EarningsStatus.UNKNOWN.value):
+                resolve_ticker_earnings(ticker, earnings_calendar_cache, supabase=supabase, allow_network=allow_earnings_net)
+
             from datetime import datetime as dt_cls
             scan_dt = dt_cls.strptime(sig["scan_date"], "%Y-%m-%d").date() if isinstance(sig["scan_date"], str) else sig["scan_date"]
             er_res = earnings_risk_filter(
@@ -1582,6 +1602,8 @@ def run_scan(
 
     if status == "failed":
         sys.exit(1)
+
+    logger.info(GLOBAL_EARNINGS_TRACKER.format_summary())
 
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B signal generation complete.")

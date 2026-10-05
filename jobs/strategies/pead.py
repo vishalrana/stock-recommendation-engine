@@ -196,18 +196,74 @@ class PEADStrategy(StrategyInterface):
         # === CANONICAL COMPOSITE SCORING (SignalRanker) ===
         # Delegate scoring strictly to canonical SignalRanker
         # Canonical weights: Momentum 30%, Expectancy 25%, Win Rate 15%, Regime 10%, Context 20%
-        from src.ranker import SignalRanker, assign_tier
+        from src.utils.metrics_pipeline import build_hardened_metrics
+        from src.ranker import SignalRanker, assign_tier, compute_expectancy_score
 
         current_rsi = float(df['RSI_14'].iloc[-1]) if 'RSI_14' in df.columns else 50.0
         volume_ratio = float(earnings_volume / volume_avg) if volume_avg > 0 else 1.0
         macd_histogram = float(df['MACD_HIST'].iloc[-1]) if 'MACD_HIST' in df.columns else 0.0
         atr_14 = float(df["ATR_14"].iloc[-1]) if "ATR_14" in df.columns else (price * 0.02 if price > 0 else 1.0)
 
-        past_win_rate = metrics.get('shrunk_win_rate', metrics.get('win_rate', 50.0)) if metrics else 50.0
-        expectancy_pct = metrics.get('shrunk_expectancy', metrics.get('expectancy_pct', 1.50)) if metrics else 1.50
-        total_trades = metrics.get('completed_trades', metrics.get('total_trades', 0)) if metrics else 0
-        wins = metrics.get('wins', 0) if metrics else 0
-        losses = metrics.get('losses', 0) if metrics else 0
+        # 1. Canonical Bayesian Historical Metrics Pipeline
+        p_wr = metrics.get("past_win_rate") or metrics.get("win_rate") or metrics.get("shrunk_win_rate") if metrics else None
+        p_exp = metrics.get("expectancy_pct") or metrics.get("raw_expectancy") or metrics.get("shrunk_expectancy") if metrics else None
+        hardened_input = dict(metrics) if metrics else {}
+        if p_exp is not None and "expectancy_pct" not in hardened_input:
+            hardened_input["expectancy_pct"] = p_exp
+        hardened = build_hardened_metrics(
+            ticker=ticker,
+            raw_record=hardened_input,
+            strategy_name=self.name,
+            strategy_win_rate=metrics.get("strategy_win_rate") if metrics else None,
+            past_win_rate=p_wr,
+        )
+        past_win_rate = float(hardened["shrunk_win_rate"])
+        raw_win_rate = float(hardened["raw_win_rate"])
+        expectancy_pct = float(hardened["shrunk_expectancy"])
+        raw_expectancy = float(hardened["raw_expectancy"]) if hardened.get("raw_expectancy") is not None else None
+        total_trades = int(hardened["completed_trades"])
+        wins = int(hardened["wins"])
+        losses = int(hardened["losses"])
+        provenance = hardened["metric_source"]
+
+        # 2. Canonical Non-Earnings Context Scoring (Analyst, Fundamental, News)
+        c_score = 0.0
+        c_analyst = 0.0
+        c_fundamental = 0.0
+        c_news = 0.0
+        de_val = None
+        cr_val = None
+        finbert = None
+        target_c = None
+
+        if metrics and ("context_score" in metrics or "context_analyst" in metrics):
+            c_score = float(metrics.get("context_score", 0.0) or 0.0)
+            c_analyst = float(metrics.get("context_analyst", 0.0) or 0.0)
+            c_fundamental = float(metrics.get("context_fundamental", 0.0) or 0.0)
+            c_news = float(metrics.get("context_news", 0.0) or 0.0)
+            de_val = metrics.get("de_ratio")
+            cr_val = metrics.get("current_ratio")
+            finbert = metrics.get("finbert_sentiment")
+            target_c = metrics.get("target_consensus")
+        elif hasattr(self, "context_aggregator") and self.context_aggregator is not None:
+            try:
+                from src.scorers.context_scorer import ContextScorer
+                scorer = getattr(self, "context_scorer", None) or ContextScorer()
+                ctx = self.context_aggregator.get_aggregated(ticker, df)
+                tech_data = {
+                    'rsi': current_rsi,
+                    'adx': float(adx_value),
+                    'volume_ratio': volume_ratio,
+                }
+                c_score, c_analyst, _, c_fundamental, c_news = scorer.calculate_with_breakdown(
+                    ctx, float(entry_price), tech_data
+                )
+                de_val = ctx.fundamental.debt_to_equity if ctx.fundamental else None
+                cr_val = ctx.fundamental.current_ratio if ctx.fundamental else None
+                finbert = ctx.news.headline_sentiment if ctx.news else None
+                target_c = ctx.analyst.target_mean_price if ctx.analyst else None
+            except Exception as ctx_err:
+                logger.debug(f"PEAD Context scoring fallback: {ctx_err}")
 
         candidate_for_ranker = {
             'ticker': ticker,
@@ -220,8 +276,18 @@ class PEADStrategy(StrategyInterface):
             'macd_histogram': macd_histogram,
             'atr_14': atr_14,
             'win_rate': past_win_rate,
+            'winrate_score': past_win_rate,
             'expectancy_pct': expectancy_pct,
-            'context_score': 0.0,
+            'expectancy_score': compute_expectancy_score('pead', expectancy_pct),
+            'context_score': c_score,
+            'context_analyst': c_analyst,
+            'context_earnings': 0.0,
+            'context_fundamental': c_fundamental,
+            'context_news': c_news,
+            'de_ratio': de_val,
+            'current_ratio': cr_val,
+            'finbert_sentiment': finbert,
+            'target_consensus': target_c,
         }
 
         ranker = SignalRanker()
@@ -265,10 +331,13 @@ class PEADStrategy(StrategyInterface):
             'quality_score': round(composite_score * 0.3, 1) if is_blocked else round(composite_score, 1),
             'narrative': narrative,
             'past_win_rate': past_win_rate,
+            'raw_win_rate': raw_win_rate,
+            'win_rate_provenance': provenance,
             'total_trades': total_trades,
             'wins': wins,
             'losses': losses,
             'expectancy_pct': expectancy_pct,
+            'raw_expectancy': raw_expectancy,
             'current_rsi': round(df['RSI_14'].iloc[-1], 1),
             'adx_value': round(adx_value, 1),
             'volume_ratio': round(earnings_volume / volume_avg, 2),
@@ -278,7 +347,16 @@ class PEADStrategy(StrategyInterface):
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Post-Earnings Drift',
-            'context_score': 0.0,  # This strategy doesn't use context scoring yet
+            'context_score': round(c_score, 2),
+            'context_analyst': round(c_analyst, 2),
+            'context_earnings': 0.0,
+            'context_fundamental': round(c_fundamental, 2),
+            'context_news': round(c_news, 2),
+            'de_ratio': de_val,
+            'current_ratio': cr_val,
+            'finbert_sentiment': finbert,
+            'target_consensus': target_c,
+            'score_breakdown': score_res.get("breakdown", {}),
             'days_since_earnings': days_since_earnings,
         }
 

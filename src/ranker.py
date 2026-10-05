@@ -378,12 +378,10 @@ class SignalRanker:
         c_fundamental = float(row.get("context_fundamental", 0.0) or 0.0)
         c_news = float(row.get("context_news", 0.0) or 0.0)
 
-        has_breakdown = any([
-            row.get("context_analyst") is not None,
-            row.get("context_earnings") is not None,
-            row.get("context_fundamental") is not None,
-            row.get("context_news") is not None,
-        ])
+        has_breakdown = any(
+            float(row.get(k) or 0.0) > 0
+            for k in ("context_analyst", "context_fundamental", "context_news")
+        )
 
         if not has_breakdown and "context_score" in row and row["context_score"] is not None:
             # If only raw context_score was passed, apply veto gates directly to that base score

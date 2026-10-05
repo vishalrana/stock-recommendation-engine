@@ -193,76 +193,43 @@ class PEADStrategy(StrategyInterface):
 
         narrative = ", ".join(parts) + "."
 
-        # === COMPOSITE SCORING ===
+        # === CANONICAL COMPOSITE SCORING (SignalRanker) ===
+        # Delegate scoring strictly to canonical SignalRanker
+        # Canonical weights: Momentum 30%, Expectancy 25%, Win Rate 15%, Regime 10%, Context 20%
+        from src.ranker import SignalRanker, assign_tier
+
+        current_rsi = float(df['RSI_14'].iloc[-1]) if 'RSI_14' in df.columns else 50.0
+        volume_ratio = float(earnings_volume / volume_avg) if volume_avg > 0 else 1.0
+        macd_histogram = float(df['MACD_HIST'].iloc[-1]) if 'MACD_HIST' in df.columns else 0.0
+        atr_14 = float(df["ATR_14"].iloc[-1]) if "ATR_14" in df.columns else (price * 0.02 if price > 0 else 1.0)
+
         past_win_rate = metrics.get('shrunk_win_rate', metrics.get('win_rate', 50.0)) if metrics else 50.0
+        expectancy_pct = metrics.get('shrunk_expectancy', metrics.get('expectancy_pct', 1.50)) if metrics else 1.50
         total_trades = metrics.get('completed_trades', metrics.get('total_trades', 0)) if metrics else 0
-        expectancy_pct = metrics.get('shrunk_expectancy', metrics.get('expectancy_pct', 1.91)) if metrics else 1.91
         wins = metrics.get('wins', 0) if metrics else 0
         losses = metrics.get('losses', 0) if metrics else 0
 
+        candidate_for_ranker = {
+            'ticker': ticker,
+            'strategy': 'Post-Earnings Drift',
+            'current_rsi': current_rsi,
+            'price': price,
+            'entry_price': entry_price,
+            'dma_50': sma50,
+            'volume_ratio': volume_ratio,
+            'macd_histogram': macd_histogram,
+            'atr_14': atr_14,
+            'win_rate': past_win_rate,
+            'expectancy_pct': expectancy_pct,
+            'context_score': 0.0,
+        }
 
-        # PEAD-specific momentum: gap size + hold quality
-        momentum_score = 0
-        if gap_pct > 10: momentum_score = 30
-        elif gap_pct > 7: momentum_score = 27
-        elif gap_pct > 5: momentum_score = 24
-        else: momentum_score = 20
-
-        if hold_pct > 0.8: momentum_score += 0
-        elif hold_pct > 0.6: momentum_score -= 2
-        else: momentum_score -= 5
-
-        # Expectancy
-        exp_score = 0
-        if expectancy_pct >= 10: exp_score = 40
-        elif expectancy_pct >= 5: exp_score = 35
-        elif expectancy_pct >= 2: exp_score = 25
-        elif expectancy_pct >= 0: exp_score = 15
-        else: exp_score = 5
-
-        # Win rate
-        wr_score = 0
-        if past_win_rate >= 70: wr_score = 20
-        elif past_win_rate >= 60: wr_score = 17
-        elif past_win_rate >= 50: wr_score = 14
-        elif past_win_rate >= 40: wr_score = 10
-        else: wr_score = 5
-
-        # Regime: PEAD works in all regimes but best in bull
-        regime_score = 10 if regime == 'bull' else 8 if regime == 'sideways' else 6
-
-        composite_score = momentum_score + exp_score + wr_score + regime_score
-
-        if composite_score >= 70:
-            tier_label = 'Strong Buy'
-        elif composite_score >= 50:
-            tier_label = 'Buy'
-        elif composite_score >= 35:
-            tier_label = 'Watch'
-        else:
-            tier_label = 'Speculative'
-
-        # === GUARDRAILS ===
-        MIN_WIN_RATE = 50.0
-        MIN_EXPECTANCY = 1.0
-        MIN_SAMPLE = 5
-
+        ranker = SignalRanker()
+        score_res = ranker.compute_composite_score(candidate_for_ranker, regime)
+        composite_score = score_res["total"]
+        tier_label = assign_tier(composite_score, has_strategy_setup=True)
         is_blocked = False
         blocked_reason = None
-
-        if past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Win rate {past_win_rate:.1f}% below {MIN_WIN_RATE}%'
-        if expectancy_pct < MIN_EXPECTANCY:
-            is_blocked = True
-            blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
-
-
-        if is_blocked:
-            tier_label = 'Blocked'
 
         # Get latest scan date from DataFrame index
         latest_date = df.index[-1]
@@ -306,6 +273,7 @@ class PEADStrategy(StrategyInterface):
             'adx_value': round(adx_value, 1),
             'volume_ratio': round(earnings_volume / volume_avg, 2),
             'macd_histogram': round(df['MACD_HIST'].iloc[-1], 4),
+            'atr_14': round(atr_14, 4),
             'ema20': round(sma50, 2),
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
@@ -317,5 +285,5 @@ class PEADStrategy(StrategyInterface):
         return signal
 
     def rank_candidates(self, candidates: List[dict], regime: str) -> List[dict]:
-        # P0-1: Central SignalRanker is single source of truth.
-        return [c for c in candidates if not c.get("is_blocked")]
+        # P0-1: Canonical SignalRanker is single source of truth.
+        return list(candidates)

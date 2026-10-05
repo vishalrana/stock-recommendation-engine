@@ -353,7 +353,8 @@ class SignalRanker:
         if "expectancy_score" in row and row["expectancy_score"] is not None:
             expectancy_score = float(row["expectancy_score"])
         else:
-            expectancy_score = compute_expectancy_score(strat_key)
+            exp_val = row.get("expectancy_pct") if row.get("expectancy_pct") is not None else row.get("adjusted_expectancy_pct")
+            expectancy_score = compute_expectancy_score(strat_key, exp_val)
 
         # 3. Historical Win Rate score (P0-2: No silent 50.0 fallback)
         winrate_val = row.get("winrate_score")

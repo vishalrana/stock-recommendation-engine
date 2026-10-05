@@ -672,17 +672,16 @@ def run_scan(
         logger.error("Failed to initialize Supabase client: %s", e)
         sys.exit(1)
 
-    # ── Earnings Calendar Preload (Cached Daily) ─────────────────────
+    # ── Earnings Calendar Preload (Cached Daily - Zero Network Queries at Startup) ─
     earnings_calendar_cache = {}
+    allow_earnings_net = not (dry_run or cache_mode == "local")
     try:
-        allow_earnings_net = not (dry_run or cache_mode == "local")
         earnings_calendar_cache = fetch_earnings_calendar(
             tickers,
             supabase=supabase,
-            allow_network=allow_earnings_net,
-            max_provider_fetches=50,
+            allow_network=False,  # Startup preload from local/Supabase cache only; zero network queries across broad universe
         )
-        logger.info(f"[EARNINGS CALENDAR] Loaded {len(earnings_calendar_cache)} ticker schedules")
+        logger.info(f"[EARNINGS CALENDAR] Preloaded {len(earnings_calendar_cache)} ticker schedules from cache")
     except Exception as ec_err:
         logger.warning(f"Could not load earnings calendar: {ec_err}")
 
@@ -991,10 +990,10 @@ def run_scan(
                             save_context_to_cache(t, c_score, ctx)
                         de_val = ctx.fundamental.debt_to_equity if ctx.fundamental else None
                         cr_val = ctx.fundamental.current_ratio if ctx.fundamental else None
-                        earn_surp = ctx.earnings.surprise_percent if ctx.earnings else None
+                        earn_surp = None  # Decoupled: earnings surprise not part of initial score
                         finbert = ctx.news.headline_sentiment if ctx.news else None
                         target_c = ctx.analyst.target_mean_price if ctx.analyst else None
-                        return (t, c_score, c_analyst, c_earnings, c_fundamental, c_news, de_val, cr_val, earn_surp, finbert, target_c)
+                        return (t, c_score, c_analyst, 0.0, c_fundamental, c_news, de_val, cr_val, None, finbert, target_c)
                 except Exception as ctx_err:
                     logger.warning(f"Context scoring failed for {t}: {ctx_err}")
                 return (t, 0.0, 0.0, 0.0, 0.0, 0.0, None, None, None, None, None)
@@ -1108,7 +1107,17 @@ def run_scan(
 
             score = float(sig.get("composite_score", sig.get("score", 0.0)))
 
-            # 0. Earnings Date Risk Filter
+            # 1. Quantitative Score Threshold Gate (Canonical Buy Threshold >= 65.0)
+            # Candidates scoring < 65.0 do NOT qualify and NEVER trigger detailed earnings resolution.
+            if score < 65.0:
+                sig["tier_label"] = "Rejected"
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Composite score {score:.1f} below Buy threshold (65.0)"
+                rejected_signals_to_insert.append(sig)
+                continue
+
+            # 2. Score >= 65.0: Candidate qualifies quantitatively!
+            # Resolve earnings data strictly for score-qualified candidates before the Earnings Risk Gate.
             if allow_earnings_net and (ticker not in earnings_calendar_cache or earnings_calendar_cache[ticker].get("status") == EarningsStatus.UNKNOWN.value):
                 resolve_ticker_earnings(ticker, earnings_calendar_cache, supabase=supabase, allow_network=allow_earnings_net)
 
@@ -1135,19 +1144,12 @@ def run_scan(
                 sig["earnings_rejected"] = True
                 sig["rejection_reason"] = er_res.get("reason", "Earnings blackout")
                 earnings_rejected_count += 1
+                gate_rejections["failed_earnings_gate"] += 1
                 logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']} [{sig['earnings_reason_code']}]")
                 rejected_signals_to_insert.append(sig)
                 continue
             else:
                 sig["earnings_rejected"] = False
-
-            # Early exit for non-qualifying scores (Buy threshold is 65.0)
-            if score < 65.0:
-                sig["tier_label"] = "Rejected"
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = f"Composite score {score:.1f} below Buy threshold (65.0)"
-                rejected_signals_to_insert.append(sig)
-                continue
 
             atr = float(sig.get("atr_14", 0.0))
 

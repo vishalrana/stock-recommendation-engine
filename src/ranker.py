@@ -111,15 +111,26 @@ def compute_context_score(
     finbert_sentiment: Optional[float] = None,
     target_consensus: Optional[float] = None,
     price: Optional[float] = None,
+    base_score: Optional[float] = None,
 ) -> float:
     """
-    Master Spec v2.3+ Context Score with Veto Gates:
+    Master Spec Context Score (Earnings Decoupled):
+    Calculates context score from non-earnings factors (Analyst, Fundamental, News)
+    normalized to a 0-100 scale, with Veto Gates:
     - Balance Sheet Distress: D/E > 2.5 AND Current Ratio < 1.0 -> cap context at 30.0
     - Negative News Sentiment: FinBERT < -0.30 -> cap context at 40.0
-    - Severe Earnings Miss: Surprise < -10.0% -> penalty -20.0
     - Analyst Downside: Target < Price -> penalty -15.0
+
+    Earnings data is completely excluded from the initial score.
+    (Veto Gate 3 severe earnings miss is evaluated downstream in earnings_risk_filter).
     """
-    raw = float(analyst_pts or 0.0) + float(earnings_pts or 0.0) + float(fundamental_pts or 0.0) + float(news_pts or 0.0)
+    if base_score is not None:
+        raw = min(100.0, max(0.0, float(base_score)))
+    else:
+        raw_non_earnings = float(analyst_pts or 0.0) + float(fundamental_pts or 0.0) + float(news_pts or 0.0)
+        # Normalize non-earnings components: unscaled ceiling is 80 (Analyst 40, Fundamental 20, News 20)
+        # Scaled by 100 / 80 = 1.25 to map cleanly to [0, 100].
+        raw = min(100.0, raw_non_earnings * 1.25) if raw_non_earnings > 0 else 0.0
 
     # Veto Gate 1: Dangerous leverage + poor liquidity (D/E > 2.5 AND Current Ratio < 1.0)
     if de_ratio is not None and current_ratio is not None:
@@ -134,17 +145,6 @@ def compute_context_score(
         try:
             if float(finbert_sentiment) < -0.30:
                 raw = min(raw, 40.0)
-        except (ValueError, TypeError):
-            pass
-
-    # Veto Gate 3: Severe earnings miss (Surprise < -10.0%)
-    if earnings_surprise_pct is not None:
-        try:
-            s_val = float(earnings_surprise_pct)
-            # Handle both decimal ratio (e.g. -0.101) and percentage (e.g. -10.1)
-            pct_val = s_val * 100.0 if -1.0 <= s_val <= 1.0 and s_val != 0.0 else s_val
-            if pct_val < -10.0:
-                raw = max(0.0, raw - 20.0)
         except (ValueError, TypeError):
             pass
 
@@ -387,13 +387,9 @@ class SignalRanker:
         if not has_breakdown and "context_score" in row and row["context_score"] is not None:
             # If only raw context_score was passed, apply veto gates directly to that base score
             context_score = compute_context_score(
-                analyst_pts=0.0,
-                earnings_pts=0.0,
-                fundamental_pts=float(row["context_score"]),
-                news_pts=0.0,
+                base_score=float(row["context_score"]),
                 de_ratio=row.get("de_ratio"),
                 current_ratio=row.get("current_ratio"),
-                earnings_surprise_pct=row.get("earnings_surprise_pct"),
                 finbert_sentiment=row.get("finbert_sentiment"),
                 target_consensus=row.get("target_consensus"),
                 price=row.get("price") or row.get("entry_price"),
@@ -401,12 +397,10 @@ class SignalRanker:
         else:
             context_score = compute_context_score(
                 analyst_pts=c_analyst,
-                earnings_pts=c_earnings,
                 fundamental_pts=c_fundamental,
                 news_pts=c_news,
                 de_ratio=row.get("de_ratio"),
                 current_ratio=row.get("current_ratio"),
-                earnings_surprise_pct=row.get("earnings_surprise_pct"),
                 finbert_sentiment=row.get("finbert_sentiment"),
                 target_consensus=row.get("target_consensus"),
                 price=row.get("price") or row.get("entry_price"),

@@ -1,7 +1,13 @@
 from src.providers.context.metadata_provider import MetadataProvider
 from src.providers.context.earnings_provider import EarningsProvider
 from src.providers.context.news_provider import FinBERTNewsProvider
-from src.providers.base import AggregatedContext
+from src.providers.base import (
+    AggregatedContext,
+    AnalystContext,
+    FundamentalContext,
+    EarningsContext,
+    NewsContext,
+)
 import pandas as pd
 import logging
 
@@ -38,14 +44,12 @@ class ContextAggregator:
                     age_hours = (now - updated_at).total_seconds() / 3600.0
                     
                     if age_hours < ttl_hours:
-                        from src.providers.base import AnalystContext, FundamentalContext, EarningsContext, NewsContext
-                        
                         analyst_target = cache_row.get("analyst_target")
                         news_sentiment = cache_row.get("news_sentiment")
                         earnings_surprise = cache_row.get("earnings_surprise")
                         
                         analyst = AnalystContext(target_mean_price=analyst_target)
-                        earnings = EarningsContext(surprise_percent=earnings_surprise)
+                        earnings = EarningsContext()  # Decoupled: not required for initial context score
                         news = NewsContext(headline_sentiment=news_sentiment or 0.0)
                         fundamental = self.metadata.get_fundamentals(ticker)
                         
@@ -60,10 +64,10 @@ class ContextAggregator:
             except Exception as e:
                 logger.warning(f"Failed to query context cache for {ticker}: {e}")
 
-        # Cache miss: Run all providers
+        # Cache miss: Run non-earnings providers
         analyst = self.metadata.get_analyst_rating(ticker)
         fundamental = self.metadata.get_fundamentals(ticker)
-        earnings = self.earnings.get_surprise(ticker)
+        earnings = EarningsContext()  # Decoupled: zero network calls to earnings provider during initial scoring
         news = self.news.fetch_and_score(ticker)
         
         # Calculate Price/Volume Event Signal (Proxy for news/action)

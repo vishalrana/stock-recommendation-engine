@@ -12,9 +12,8 @@ class ContextScorer:
                 return yaml.safe_load(f)
         # Default config if file missing
         return {
-            'max_scores': {'analyst': 30, 'earnings': 30, 'fundamental': 20, 'news': 20, 'pv_signal': 15},
+            'max_scores': {'analyst': 40, 'fundamental': 20, 'news': 20, 'pv_signal': 15},
             'analyst': {'upside_threshold_bonus': 0.05, 'buy_bonus': 10},
-            'earnings': {'surprise_beat_big': 5.0, 'surprise_beat_small': 0.0, 'surprise_miss_big': -5.0},
             'fundamental': {'debt_to_equity_max': 1.0, 'current_ratio_min': 1.5},
             'news': {'sentiment_positive_threshold': 0.2, 'sentiment_negative_threshold': -0.2},
             'global_multiplier': 0.15
@@ -23,39 +22,29 @@ class ContextScorer:
     def calculate(self, ctx: AggregatedContext, current_price: float, tech_data=None) -> float:
         score = 0.0
         
-        # 1. Analyst Alignment (Max 30)
+        # 1. Analyst Alignment (Max 40)
         if ctx.analyst.target_mean_price and current_price > 0:
             upside = (ctx.analyst.target_mean_price - current_price) / current_price
-            if upside > self.config['analyst']['upside_threshold_bonus']:
+            if upside > self.config.get('analyst', {}).get('upside_threshold_bonus', 0.05):
                 score += 30
             elif upside > 0:
                 score += 15
             if ctx.analyst.recommendation in ["buy", "strong_buy"]:
-                score += self.config['analyst']['buy_bonus']
+                score += self.config.get('analyst', {}).get('buy_bonus', 10)
         
-        # 2. Earnings Momentum (Max 30)
-        if ctx.earnings.surprise_percent is not None:
-            surprise = ctx.earnings.surprise_percent
-            if surprise > self.config['earnings']['surprise_beat_big']:
-                score += 30
-            elif surprise > self.config['earnings']['surprise_beat_small']:
-                score += 15
-            elif surprise < self.config['earnings']['surprise_miss_big']:
-                score -= 15
-        
-        # 3. Fundamental Safety (Max 20)
-        if ctx.fundamental.debt_to_equity is not None and ctx.fundamental.debt_to_equity < self.config['fundamental']['debt_to_equity_max']:
+        # 2. Fundamental Safety (Max 20)
+        if ctx.fundamental.debt_to_equity is not None and ctx.fundamental.debt_to_equity < self.config.get('fundamental', {}).get('debt_to_equity_max', 1.0):
             score += 10
-        if ctx.fundamental.current_ratio is not None and ctx.fundamental.current_ratio > self.config['fundamental']['current_ratio_min']:
+        if ctx.fundamental.current_ratio is not None and ctx.fundamental.current_ratio > self.config.get('fundamental', {}).get('current_ratio_min', 1.5):
             score += 10
         
-        # 4. News Sentiment (Max 20)
-        if ctx.news.headline_sentiment > self.config['news']['sentiment_positive_threshold']:
+        # 3. News Sentiment (Max 20)
+        if ctx.news.headline_sentiment > self.config.get('news', {}).get('sentiment_positive_threshold', 0.2):
             score += min(20, ctx.news.headline_sentiment * 50)  # Scale up
-        elif ctx.news.headline_sentiment < self.config['news']['sentiment_negative_threshold']:
+        elif ctx.news.headline_sentiment < self.config.get('news', {}).get('sentiment_negative_threshold', -0.2):
             score -= 10
         
-        # 5. Price/Volume Event (Max 15)
+        # 4. Price/Volume Event (Max 15)
         if ctx.price_volume_signal > 0:
             score += min(15, ctx.price_volume_signal * 10)
         
@@ -73,53 +62,41 @@ class ContextScorer:
             )
             score = max(score, min(15, fallback))
         
-        # Clamp to [0, 100] — return raw score on same scale as other sub-scores.
-        # NOTE: The composite weight (e.g. 15% in bull) is applied downstream in
-        #   ranker.py::compute_composite_score() via `w["ctx"] * context_score`.
-        #   Do NOT pre-scale here to avoid double-discounting.
-        raw_score = max(0, min(100, score))
-        return raw_score
+        # Normalize non-earnings score to 0-100 scale:
+        # Maximum unscaled non-earnings components = 80 (excluding pv) / 95 (including pv).
+        # Normalization factor: 1.25 (scaled from 80 base ceiling)
+        normalized_score = min(100.0, max(0.0, score * 1.25))
+        return round(normalized_score, 4)
 
     def calculate_with_breakdown(self, ctx: AggregatedContext, current_price: float, tech_data=None):
         """Return (total_score, analyst_score, earnings_score, fundamental_score, news_score)."""
-        # ponytail: inline sub-score extraction mirroring calculate() logic
         analyst_score = 0.0
-        earnings_score = 0.0
+        earnings_score = 0.0  # Decoupled: earnings is not part of initial opportunity score
         fundamental_score = 0.0
         news_score = 0.0
 
-        # 1. Analyst (max 30)
+        # 1. Analyst (max 40)
         if ctx.analyst.target_mean_price and current_price > 0:
             upside = (ctx.analyst.target_mean_price - current_price) / current_price
-            if upside > self.config['analyst']['upside_threshold_bonus']:
+            if upside > self.config.get('analyst', {}).get('upside_threshold_bonus', 0.05):
                 analyst_score += 30
             elif upside > 0:
                 analyst_score += 15
             if ctx.analyst.recommendation in ["buy", "strong_buy"]:
-                analyst_score += self.config['analyst']['buy_bonus']
-        analyst_score = min(analyst_score, 40)  # cap
+                analyst_score += self.config.get('analyst', {}).get('buy_bonus', 10)
+        analyst_score = min(analyst_score, 40.0)
 
-        # 2. Earnings (max 30)
-        if ctx.earnings.surprise_percent is not None:
-            surprise = ctx.earnings.surprise_percent
-            if surprise > self.config['earnings']['surprise_beat_big']:
-                earnings_score += 30
-            elif surprise > self.config['earnings']['surprise_beat_small']:
-                earnings_score += 15
-            elif surprise < self.config['earnings']['surprise_miss_big']:
-                earnings_score -= 15
+        # 2. Fundamental (max 20)
+        if ctx.fundamental.debt_to_equity is not None and ctx.fundamental.debt_to_equity < self.config.get('fundamental', {}).get('debt_to_equity_max', 1.0):
+            fundamental_score += 10.0
+        if ctx.fundamental.current_ratio is not None and ctx.fundamental.current_ratio > self.config.get('fundamental', {}).get('current_ratio_min', 1.5):
+            fundamental_score += 10.0
 
-        # 3. Fundamental (max 20)
-        if ctx.fundamental.debt_to_equity is not None and ctx.fundamental.debt_to_equity < self.config['fundamental']['debt_to_equity_max']:
-            fundamental_score += 10
-        if ctx.fundamental.current_ratio is not None and ctx.fundamental.current_ratio > self.config['fundamental']['current_ratio_min']:
-            fundamental_score += 10
-
-        # 4. News (max 20)
-        if ctx.news.headline_sentiment > self.config['news']['sentiment_positive_threshold']:
-            news_score += min(20, ctx.news.headline_sentiment * 50)
-        elif ctx.news.headline_sentiment < self.config['news']['sentiment_negative_threshold']:
-            news_score -= 10
+        # 3. News (max 20)
+        if ctx.news.headline_sentiment > self.config.get('news', {}).get('sentiment_positive_threshold', 0.2):
+            news_score += min(20.0, ctx.news.headline_sentiment * 50)
+        elif ctx.news.headline_sentiment < self.config.get('news', {}).get('sentiment_negative_threshold', -0.2):
+            news_score -= 10.0
 
         total = self.calculate(ctx, current_price, tech_data)
         return total, analyst_score, earnings_score, fundamental_score, news_score

@@ -140,19 +140,17 @@ def test_3_expectancy_score_formula():
 def test_4_context_veto_thresholds():
     print("\n--- Test 4: Context Veto Thresholds & Penalties ---")
     base_kwargs = {
-        "analyst_pts": 25.0,
-        "earnings_pts": 25.0,
-        "fundamental_pts": 25.0,
-        "news_pts": 25.0,
+        "analyst_pts": 40.0,
+        "fundamental_pts": 20.0,
+        "news_pts": 20.0,
         "de_ratio": 1.2,
         "current_ratio": 1.5,
         "finbert_sentiment": 0.20,
-        "earnings_surprise_pct": 5.0,
         "target_consensus": 120.0,
         "price": 100.0,
     }
 
-    # Normal candidate: total raw context = 100.0, no vetoes -> 100.0
+    # Normal candidate: total raw context = 80.0 -> normalized 100.0, no vetoes -> 100.0
     c_norm = compute_context_score(**base_kwargs)
     assert c_norm == 100.0, f"Expected 100.0, got {c_norm}"
 
@@ -178,14 +176,21 @@ def test_4_context_veto_thresholds():
     c_sent_veto = compute_context_score(**dict(base_kwargs, finbert_sentiment=-0.31))
     assert c_sent_veto <= 40.0, f"Sentiment veto expected <= 40.0, got {c_sent_veto}"
 
-    # Penalty 3: Severe Earnings Miss (Surprise < -10.0%)
-    # Sub-case 3a: surprise = -9.9% -> NO -20 penalty
-    c_miss_border = compute_context_score(**dict(base_kwargs, earnings_surprise_pct=-9.9))
-    assert c_miss_border == 100.0, f"Surprise -9.9% should not trigger penalty, got {c_miss_border}"
+    # Decoupled Earnings: Score invariant to earnings surprise; downstream gate blocks severe miss
+    c_miss = compute_context_score(**dict(base_kwargs, earnings_surprise_pct=-10.1))
+    assert c_miss == 100.0, f"Initial context score must be invariant to earnings surprise, got {c_miss}"
 
-    # Sub-case 3b: surprise = -10.1% -> PENALTY -20.0
-    c_miss_penalty = compute_context_score(**dict(base_kwargs, earnings_surprise_pct=-10.1))
-    assert c_miss_penalty == 80.0, f"Surprise -10.1% expected 80.0 (100 - 20), got {c_miss_penalty}"
+    # Downstream Earnings Risk Gate blocks severe miss
+    from src.filters.earnings_filter import earnings_risk_filter
+    import datetime
+    gate_block = earnings_risk_filter(
+        ticker="TEST",
+        scan_date=datetime.date.today(),
+        strategy="Trend Following",
+        earnings_surprise_pct=-10.1,
+        earnings_calendar={"TEST": {"next_earnings_date": (datetime.date.today() + datetime.timedelta(days=20)).isoformat()}},
+    )
+    assert not gate_block["pass"], "Downstream earnings gate must block severe earnings miss"
 
     # Penalty 4: Analyst Downside (Target < Price)
     # Sub-case 4a: Target = 95.0, Price = 100.0 -> PENALTY -15.0

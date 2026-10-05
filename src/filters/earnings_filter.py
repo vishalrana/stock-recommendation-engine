@@ -242,12 +242,43 @@ def normalize_date_str(val: Any) -> Optional[str]:
     return None
 
 
-def _get_record_age_seconds(record: Dict[str, Any]) -> Optional[float]:
+def _get_record_age_seconds(
+    record: Dict[str, Any],
+    as_of: Optional[Union[str, datetime.datetime, datetime.date]] = None,
+) -> Optional[float]:
     updated_at_val = record.get("updated_at") or record.get("cached_at")
     if not updated_at_val:
         return None
     try:
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if as_of is not None:
+            if isinstance(as_of, str):
+                s = as_of.replace("Z", "+00:00")
+                if len(s) == 10:
+                    if s == now_utc.date().isoformat():
+                        ref_dt = now_utc
+                    else:
+                        ref_dt = datetime.datetime.combine(
+                            datetime.date.fromisoformat(s),
+                            datetime.time(23, 59, 59),
+                            tzinfo=datetime.timezone.utc,
+                        )
+                else:
+                    ref_dt = datetime.datetime.fromisoformat(s)
+            elif isinstance(as_of, datetime.datetime):
+                ref_dt = as_of
+            elif isinstance(as_of, datetime.date):
+                if as_of == now_utc.date():
+                    ref_dt = now_utc
+                else:
+                    ref_dt = datetime.datetime.combine(as_of, datetime.time(23, 59, 59), tzinfo=datetime.timezone.utc)
+            else:
+                ref_dt = now_utc
+            if ref_dt.tzinfo is None:
+                ref_dt = ref_dt.replace(tzinfo=datetime.timezone.utc)
+        else:
+            ref_dt = now_utc
+
         if isinstance(updated_at_val, (int, float)):
             dt = datetime.datetime.fromtimestamp(updated_at_val, tz=datetime.timezone.utc)
         elif isinstance(updated_at_val, str):
@@ -261,7 +292,11 @@ def _get_record_age_seconds(record: Dict[str, Any]) -> Optional[float]:
             return None
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return (now - dt).total_seconds()
+
+        diff = (ref_dt - dt).total_seconds()
+        if -60.0 <= diff < 0.0:
+            return 0.0
+        return diff
     except Exception:
         return None
 
@@ -272,11 +307,12 @@ def is_earnings_record_fresh(
     today_iso: Optional[str] = None,
 ) -> bool:
     """
-    Evaluates freshness of an earnings record based on event lifecycle:
-    1. Future upcoming date (next_earnings_date >= today): Fresh unless older than 14 days.
+    Evaluates freshness of an earnings record based on event lifecycle and strict age limits:
+    1. Future upcoming date (next_earnings_date >= today): Fresh ONLY if record age is known
+       and strictly < 14 days (14 * 86400s). Stale if older or age is unknown.
     2. Past upcoming date (next_earnings_date < today): Stale (earnings occurred, needs update).
-    3. Known clear (no earnings scheduled): Fresh for 7 days.
-    4. General record without date: Fresh for max_age_seconds (default 24h).
+    3. Known clear (no earnings scheduled): Fresh if record age is known and < 7 days (7 * 86400s).
+    4. General record without date / UNKNOWN: Fresh only if age <= max_age_seconds (default 24h).
     """
     if not record or not isinstance(record, dict):
         return False
@@ -285,30 +321,30 @@ def is_earnings_record_fresh(
         today_iso = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
     next_d = normalize_date_str(record.get("next_earnings_date") or record.get("next_earnings"))
+    age_seconds = _get_record_age_seconds(record, as_of=today_iso)
 
-    # 1. If next_earnings_date is in the future, it is valid and fresh unless older than 14 days
-    if next_d and next_d >= today_iso:
-        age_seconds = _get_record_age_seconds(record)
-        if age_seconds is None or age_seconds < (14 * 86400):
-            return True
-
-    # 2. If next_earnings_date has passed, the company has reported; record is genuinely stale
+    # 1. If next_earnings_date has passed, company has reported; record is genuinely stale
     if next_d and next_d < today_iso:
         return False
 
-    # 3. If known clear (no earnings upcoming), fresh for 7 days
+    # 2. If next_earnings_date is in the future, fresh only if confirmed within the last 14 days
+    if next_d and next_d >= today_iso:
+        if age_seconds is not None:
+            return 0 <= age_seconds < (14 * 86400)
+        return False
+
+    # 3. If known clear (no earnings scheduled), fresh for up to 7 days
     status = record.get("status")
     if status == EarningsStatus.KNOWN_CLEAR.value:
-        age_seconds = _get_record_age_seconds(record)
-        if age_seconds is not None and age_seconds < (7 * 86400):
-            return True
+        if age_seconds is not None:
+            return 0 <= age_seconds < (7 * 86400)
+        return False
 
     # 4. Fallback age check for UNKNOWN or unspecified status
-    age_seconds = _get_record_age_seconds(record)
     if age_seconds is not None:
         return 0 <= age_seconds <= max_age_seconds
 
-    return bool(next_d and next_d >= today_iso)
+    return False
 
 
 def load_local_cache(cache_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -418,6 +454,7 @@ def fetch_single_ticker_provider(
     Returns: (ticker, next_earnings_date, last_earnings_date, fiscal_period, status)
     """
     sym_upper = ticker_sym.strip().upper()
+    _SESSION_FETCHED_TICKERS.add(sym_upper)
 
     # Circuit breaker check: fail early if provider is currently open
     if not GLOBAL_CIRCUIT_BREAKER.can_request():
@@ -545,8 +582,8 @@ def fetch_earnings_calendar(
             entry = local_cache[t]
             next_d = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
             last_d = normalize_date_str(entry.get("last_earnings_date") or entry.get("last_earnings"))
-            fresh = is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS)
-            if fresh or (next_d and next_d >= today_iso):
+            fresh = is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS, today_iso)
+            if fresh:
                 st = entry.get("status")
                 if not st or st in (EarningsStatus.STALE.value, EarningsStatus.UNKNOWN.value):
                     st = EarningsStatus.KNOWN_UPCOMING.value if next_d else EarningsStatus.KNOWN_CLEAR.value
@@ -568,8 +605,8 @@ def fetch_earnings_calendar(
         for sym, row in sb_results.items():
             next_d = normalize_date_str(row.get("next_earnings_date"))
             last_d = normalize_date_str(row.get("last_earnings_date"))
-            fresh = is_earnings_record_fresh(row, EARNINGS_CACHE_TTL_SECONDS)
-            if fresh or (next_d and next_d >= today_iso):
+            fresh = is_earnings_record_fresh(row, EARNINGS_CACHE_TTL_SECONDS, today_iso)
+            if fresh:
                 st = row.get("status") or (
                     EarningsStatus.KNOWN_UPCOMING.value if next_d else EarningsStatus.KNOWN_CLEAR.value
                 )
@@ -787,13 +824,14 @@ def resolve_ticker_earnings(
     now_ts = now_dt.timestamp()
     today_iso = now_dt.date().isoformat()
 
-    # 1. Already resolved and confirmed in calendar_map?
+    # 1. Already resolved and confirmed in calendar_map or already fetched in session?
     existing = calendar_map.get(sym)
-    if existing and existing.get("status") in (
-        EarningsStatus.KNOWN_UPCOMING.value,
-        EarningsStatus.KNOWN_CLEAR.value,
-    ):
-        return existing
+    if existing:
+        if existing.get("status") in (
+            EarningsStatus.KNOWN_UPCOMING.value,
+            EarningsStatus.KNOWN_CLEAR.value,
+        ) or sym in _SESSION_FETCHED_TICKERS:
+            return existing
 
     # 2. Check local JSON cache
     local_cache = load_local_cache(cache_path)
@@ -801,7 +839,7 @@ def resolve_ticker_earnings(
         entry = local_cache[sym]
         next_d = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
         last_d = normalize_date_str(entry.get("last_earnings_date") or entry.get("last_earnings"))
-        if is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS):
+        if is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS, today_iso):
             st = entry.get("status") or (
                 EarningsStatus.KNOWN_UPCOMING.value if next_d else EarningsStatus.KNOWN_CLEAR.value
             )
@@ -826,7 +864,7 @@ def resolve_ticker_earnings(
                 row = res.data[0]
                 next_d = normalize_date_str(row.get("next_earnings_date"))
                 last_d = normalize_date_str(row.get("last_earnings_date"))
-                if is_earnings_record_fresh(row, EARNINGS_CACHE_TTL_SECONDS) or (next_d and next_d >= today_iso):
+                if is_earnings_record_fresh(row, EARNINGS_CACHE_TTL_SECONDS, today_iso):
                     st = row.get("status") or (
                         EarningsStatus.KNOWN_UPCOMING.value if next_d else EarningsStatus.KNOWN_CLEAR.value
                     )
@@ -857,8 +895,8 @@ def resolve_ticker_earnings(
         except Exception as e:
             logger.debug("Supabase lookup error for %s in resolve_ticker_earnings: %s", sym, e)
 
-    # 4. Fetch from provider if allowed and circuit breaker is healthy
-    if allow_network and GLOBAL_CIRCUIT_BREAKER.can_request():
+    # 4. Fetch from provider if allowed, circuit breaker is healthy, and not already fetched this session
+    if allow_network and GLOBAL_CIRCUIT_BREAKER.can_request() and sym not in _SESSION_FETCHED_TICKERS:
         sym_res, next_d, last_d, fiscal_p, fetch_status = fetch_single_ticker_provider(sym)
         if fetch_status in (EarningsStatus.KNOWN_UPCOMING.value, EarningsStatus.KNOWN_CLEAR.value):
             rec = {
@@ -1084,10 +1122,16 @@ def earnings_risk_filter(
         })
 
     # 4. Check status and freshness
+    scan_date_iso = scan_date.isoformat() if hasattr(scan_date, "isoformat") else str(scan_date)[:10]
     status = entry.get("status")
     if not status:
-        if is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS):
+        if is_earnings_record_fresh(entry, EARNINGS_CACHE_TTL_SECONDS, today_iso=scan_date_iso):
             status = EarningsStatus.KNOWN_UPCOMING.value if next_dt else EarningsStatus.KNOWN_CLEAR.value
+        elif next_dt is not None:
+            if next_dt >= scan_date:
+                status = EarningsStatus.KNOWN_UPCOMING.value
+            else:
+                status = EarningsStatus.STALE.value
         else:
             status = EarningsStatus.STALE.value if entry else EarningsStatus.UNKNOWN.value
 

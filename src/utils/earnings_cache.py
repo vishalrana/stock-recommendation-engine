@@ -53,6 +53,7 @@ def get_ticker_earnings(
     cache = _load_cache()
     now = time.time()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    today_iso = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
     # 1. Check local cache
     if ticker in cache:
@@ -62,7 +63,7 @@ def get_ticker_earnings(
         all_dates = [normalize_date_str(d) for d in entry.get("all_earnings", []) if normalize_date_str(d)]
 
         # Freshness check using canonical freshness policy
-        is_fresh = is_earnings_record_fresh(entry, TTL_SECONDS)
+        is_fresh = is_earnings_record_fresh(entry, TTL_SECONDS, today_iso)
 
         if as_of_date is not None:
             as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)[:10]
@@ -92,8 +93,7 @@ def get_ticker_earnings(
                 row = res.data[0]
                 sb_next = normalize_date_str(row.get("next_earnings_date"))
                 sb_last = normalize_date_str(row.get("last_earnings_date"))
-                today_iso = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-                is_row_fresh = is_earnings_record_fresh(row, TTL_SECONDS) or (sb_next and sb_next >= today_iso)
+                is_row_fresh = is_earnings_record_fresh(row, TTL_SECONDS, today_iso)
                 if is_row_fresh:
                     cache[ticker] = {
                         "ticker": ticker,

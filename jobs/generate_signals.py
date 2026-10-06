@@ -51,6 +51,7 @@ from src.filters.earnings_filter import (
     earnings_risk_filter,
     resolve_ticker_earnings,
     GLOBAL_EARNINGS_TRACKER,
+    GLOBAL_PROVIDER_BUDGET,
     reset_session_cache,
     EarningsStatus,
 )
@@ -505,6 +506,7 @@ def run_scan(
     target_tickers: Optional[List[str]] = None,
     verbose: bool = False,
     universe_source: Optional[str] = None,
+    max_provider_fetches: Optional[int] = None,
 ) -> dict:
     start_time = time.time()
 
@@ -519,15 +521,32 @@ def run_scan(
     elif force_refresh:
         cache_mode = "force"
 
-    logger.info("=" * 60)
-    logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
+    # Enforce request budget for external earnings provider
+    if max_provider_fetches is None:
+        env_budget = os.environ.get("MAX_PROVIDER_EARNINGS_FETCHES")
+        if env_budget is not None:
+            try:
+                max_provider_fetches = int(env_budget)
+            except ValueError:
+                max_provider_fetches = 0
+        else:
+            max_provider_fetches = 0
+
+    GLOBAL_PROVIDER_BUDGET.set_budget(max_provider_fetches)
     GLOBAL_EARNINGS_TRACKER.reset()
     reset_session_cache()
+
+    allow_earnings_net = (max_provider_fetches > 0) and not (dry_run or cache_mode == "local")
+    GLOBAL_EARNINGS_TRACKER.provider_fetching_disabled = not allow_earnings_net
+
+    logger.info("=" * 60)
+    logger.info("Strategy 1.3 Rev B — Regime-Aware Signal Generator")
     if dry_run:
         logger.info("DRY RUN ACTIVE — database writes will be skipped")
     if is_targeted:
         logger.info(f"TARGETED REFRESH ACTIVE — evaluating current ideas: {target_tickers}")
     logger.info("Cache mode: %s", cache_mode.upper())
+    logger.info("Earnings provider budget: %d requests (network fetching %s)", max_provider_fetches, "ENABLED" if allow_earnings_net else "DISABLED")
     logger.info("=" * 60)
 
     from src.utils.market_date import get_market_date, get_execution_timestamp_utc
@@ -674,12 +693,12 @@ def run_scan(
 
     # ── Earnings Calendar Preload (Cached Daily - Zero Network Queries at Startup) ─
     earnings_calendar_cache = {}
-    allow_earnings_net = not (dry_run or cache_mode == "local")
     try:
         earnings_calendar_cache = fetch_earnings_calendar(
             tickers,
             supabase=supabase,
             allow_network=False,  # Startup preload from local/Supabase cache only; zero network queries across broad universe
+            max_provider_fetches=0,
         )
         logger.info(f"[EARNINGS CALENDAR] Preloaded {len(earnings_calendar_cache)} ticker schedules from cache")
     except Exception as ec_err:
@@ -1118,7 +1137,7 @@ def run_scan(
 
             # 2. Score >= 65.0: Candidate qualifies quantitatively!
             # Resolve earnings data strictly for score-qualified candidates before the Earnings Risk Gate.
-            if allow_earnings_net and (ticker not in earnings_calendar_cache or earnings_calendar_cache[ticker].get("status") == EarningsStatus.UNKNOWN.value):
+            if ticker not in earnings_calendar_cache or earnings_calendar_cache[ticker].get("status") == EarningsStatus.UNKNOWN.value:
                 resolve_ticker_earnings(ticker, earnings_calendar_cache, supabase=supabase, allow_network=allow_earnings_net)
 
             from datetime import datetime as dt_cls
@@ -1649,6 +1668,12 @@ def main():
         default=None,
         help="Universe source ('expanded' for broad US common equities, 'benchmark' for S&P 500 + Nasdaq-100)",
     )
+    parser.add_argument(
+        "--max-provider-fetches",
+        type=int,
+        default=None,
+        help="Maximum external earnings provider network requests allowed (default 0 for normal market scan; unbounded provider fetching is prohibited)",
+    )
     args = parser.parse_args()
 
     run_scan(
@@ -1658,6 +1683,7 @@ def main():
         target_tickers=getattr(args, "tickers", None),
         verbose=getattr(args, "verbose", False),
         universe_source=getattr(args, "universe", None),
+        max_provider_fetches=getattr(args, "max_provider_fetches", None),
     )
 
 

@@ -2,7 +2,6 @@ import logging
 from datetime import datetime
 from typing import Optional, List
 import pandas as pd
-import yfinance as yf
 from jobs.strategies.base import StrategyInterface
 from src.utils.candidate_builder import build_candidate_from_row
 
@@ -14,8 +13,9 @@ def get_last_earnings_date(
     as_of_date: Optional[datetime.date] = None,
     earnings_calendar: Optional[dict] = None,
     supabase=None,
+    allow_network: bool = False,
 ) -> Optional[datetime.date]:
-    """Fetch last earnings date from shared calendar map, local cache, or yfinance. Returns datetime.date or None."""
+    """Fetch last earnings date from shared calendar map, local cache, or Supabase. Returns datetime.date or None."""
     ticker_upper = ticker.strip().upper()
     if earnings_calendar and ticker_upper in earnings_calendar:
         rec = earnings_calendar[ticker_upper]
@@ -29,7 +29,7 @@ def get_last_earnings_date(
                 pass
 
     from src.utils.earnings_cache import get_ticker_earnings
-    last_e_str, _ = get_ticker_earnings(ticker_upper, as_of_date=as_of_date, supabase=supabase)
+    last_e_str, _ = get_ticker_earnings(ticker_upper, as_of_date=as_of_date, supabase=supabase, allow_network=allow_network)
     if last_e_str:
         try:
             return datetime.strptime(str(last_e_str)[:10], "%Y-%m-%d").date()
@@ -43,10 +43,12 @@ class PEADStrategy(StrategyInterface):
         super().__init__()
         self.earnings_calendar = None
         self.supabase = None
+        self.allow_network = False
 
-    def set_earnings_calendar(self, earnings_calendar: Optional[dict], supabase=None):
+    def set_earnings_calendar(self, earnings_calendar: Optional[dict], supabase=None, allow_network: bool = False):
         self.earnings_calendar = earnings_calendar
         self.supabase = supabase
+        self.allow_network = allow_network
 
     @property
     def name(self) -> str:
@@ -97,6 +99,7 @@ class PEADStrategy(StrategyInterface):
             as_of_date=ref_date,
             earnings_calendar=self.earnings_calendar,
             supabase=self.supabase,
+            allow_network=self.allow_network,
         )
         if earnings_date is None:
             return None

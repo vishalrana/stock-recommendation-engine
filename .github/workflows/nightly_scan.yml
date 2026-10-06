@@ -76,6 +76,7 @@ jobs:
           GITHUB_ACTIONS: 'true'
           CACHE_MODE: incremental
           PYTHONPATH: .
+          MAX_PROVIDER_EARNINGS_FETCHES: '0'
         run: |
           echo "Starting signal generation..."
           START_EPOCH=$(date +%s)

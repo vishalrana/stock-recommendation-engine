@@ -69,10 +69,22 @@ def find_swing_low(df_slice: pd.DataFrame) -> float:
     return None
 
 
-def get_earnings_date(ticker: str) -> str | None:
-    """Fetch next earnings date from local cache or yfinance for a ticker, returning ISO string or None."""
+def get_earnings_date(
+    ticker: str,
+    earnings_calendar: Optional[dict] = None,
+    supabase=None,
+    allow_network: bool = False,
+) -> str | None:
+    """Fetch next earnings date from calendar map, local cache, or Supabase, returning ISO string or None."""
+    ticker_upper = ticker.strip().upper()
+    if earnings_calendar and ticker_upper in earnings_calendar:
+        rec = earnings_calendar[ticker_upper]
+        next_e_str = rec.get("next_earnings_date") or rec.get("next_earnings")
+        if next_e_str:
+            return str(next_e_str)[:10]
+
     from src.utils.earnings_cache import get_ticker_earnings
-    _, next_e_str = get_ticker_earnings(ticker)
+    _, next_e_str = get_ticker_earnings(ticker_upper, supabase=supabase, allow_network=allow_network)
     return next_e_str
 
 
@@ -192,6 +204,12 @@ class PullbackRecoveryStrategy(StrategyInterface):
         self.signals_speculative = 0
         self.signals_blocked = 0
         self._last_failed_gate: str | None = None
+        self.earnings_calendar = None
+        self.supabase = None
+
+    def set_earnings_calendar(self, earnings_calendar: Optional[dict], supabase=None):
+        self.earnings_calendar = earnings_calendar
+        self.supabase = supabase
 
     @property
     def name(self) -> str:
@@ -398,7 +416,12 @@ class PullbackRecoveryStrategy(StrategyInterface):
             return None, "failed_trades_gate"
 
         earnings_buffer_days = 7
-        earnings_date = get_earnings_date(ticker)
+        earnings_date = get_earnings_date(
+            ticker,
+            earnings_calendar=self.earnings_calendar,
+            supabase=self.supabase,
+            allow_network=False,
+        )
         if earnings_date:
             ts_earnings = pd.Timestamp(earnings_date).normalize()
             ts_now = pd.Timestamp.now().normalize()

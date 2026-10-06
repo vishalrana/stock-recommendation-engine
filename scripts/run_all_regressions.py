@@ -36,6 +36,7 @@ TEST_SUITES = [
     "scripts/test_production_hardening_pass.py",
     "scripts/test_final_production_baseline.py",
     "scripts/test_quant_hardening_final.py",
+    "scripts/test_earnings_provider_isolation.py",
 ]
 
 

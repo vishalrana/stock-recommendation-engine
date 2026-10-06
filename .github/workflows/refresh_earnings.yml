@@ -1,0 +1,64 @@
+name: Refresh Earnings Calendar
+
+on:
+  schedule:
+    # Run weekly on Sunday at 12:00 UTC before market week starts
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: 'Universe to scan (benchmark or expanded)'
+        required: true
+        default: 'benchmark'
+        type: choice
+        options:
+          - benchmark
+          - expanded
+      max_fetches:
+        description: 'Maximum external provider fetches allowed'
+        required: true
+        default: '50'
+        type: string
+
+jobs:
+  refresh-earnings:
+    name: Refresh Earnings
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache Data Files
+        uses: actions/cache@v4
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-data-cache-v2-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-data-cache-v2-
+            ${{ runner.os }}-data-cache-v1-
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r jobs/requirements.txt
+
+      - name: Run Dedicated Earnings Refresh
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PYTHONPATH: .
+        run: |
+          UNIVERSE="${{ github.event.inputs.universe || 'benchmark' }}"
+          MAX_FETCHES="${{ github.event.inputs.max_fetches || '50' }}"
+          python jobs/refresh_earnings.py --universe "$UNIVERSE" --max-fetches "$MAX_FETCHES"

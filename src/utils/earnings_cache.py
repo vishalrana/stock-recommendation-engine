@@ -22,6 +22,7 @@ from src.filters.earnings_filter import (
     DEFAULT_EARNINGS_CACHE_FILE,
     EARNINGS_CACHE_TTL_SECONDS,
     EarningsStatus,
+    GLOBAL_PROVIDER_BUDGET,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ def get_ticker_earnings(
     ticker: str,
     as_of_date: Optional[datetime.date] = None,
     supabase=None,
+    allow_network: bool = False,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Get (last_earnings_date, next_earnings_date) for a ticker.
@@ -115,7 +117,25 @@ def get_ticker_earnings(
         except Exception as e:
             logger.warning("Supabase lookup failed for %s: %s", ticker, e)
 
-    # 3. Provider fetch with retry and backoff (guarded by circuit breaker)
+    # 3. Provider fetch with retry and backoff (guarded by circuit breaker and budget)
+    if not (allow_network and GLOBAL_PROVIDER_BUDGET.can_request()):
+        logger.debug(
+            "Provider fetch disabled or budget exhausted for %s (allow_network=%s). Returning cached/fallback.",
+            ticker,
+            allow_network,
+        )
+        if ticker in cache:
+            entry = cache[ticker]
+            next_e = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
+            last_e = normalize_date_str(entry.get("last_earnings_date") or entry.get("last_earnings"))
+            if as_of_date is not None:
+                as_of_str = as_of_date.isoformat() if hasattr(as_of_date, "isoformat") else str(as_of_date)[:10]
+                if last_e and last_e <= as_of_str:
+                    return last_e, next_e
+                return None, next_e
+            return last_e, next_e
+        return None, None
+
     logger.info("Earnings cache MISS for %s, fetching from provider...", ticker)
     sym, next_earnings, last_earnings, fiscal_p, fetch_status = fetch_single_ticker_provider(ticker)
 

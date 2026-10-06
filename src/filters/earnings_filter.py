@@ -115,6 +115,70 @@ class ProviderCircuitBreaker:
 GLOBAL_CIRCUIT_BREAKER = ProviderCircuitBreaker()
 
 
+class ProviderBudget:
+    """
+    Process-wide central request budget for external earnings provider.
+    Enforces a strict upper bound across startup preload, PEAD strategy,
+    candidate evaluation, and retries.
+    """
+    def __init__(self, initial_budget: Optional[int] = None, max_requests: Optional[int] = None):
+        budget_val = max_requests if max_requests is not None else initial_budget
+        self._budget: Optional[int] = budget_val
+        self._total_allocated: Optional[int] = budget_val
+        self._total_consumed: int = 0
+        self._lock = threading.Lock()
+
+    def set_budget(self, budget: Optional[int]):
+        with self._lock:
+            if budget is None:
+                self._budget = None
+                self._total_allocated = None
+            else:
+                self._budget = max(0, int(budget))
+                self._total_allocated = self._budget
+            self._total_consumed = 0
+
+    def can_request(self) -> bool:
+        with self._lock:
+            if self._budget is None:
+                return True
+            return self._budget > 0
+
+    def consume(self) -> bool:
+        """Atomically consume one request from the budget. Returns True if granted, False if exhausted."""
+        with self._lock:
+            if self._budget is None:
+                self._total_consumed += 1
+                return True
+            if self._budget > 0:
+                self._budget -= 1
+                self._total_consumed += 1
+                return True
+            return False
+
+    def record_request(self) -> bool:
+        """Alias for consume() for recording a request against the budget."""
+        return self.consume()
+
+    def get_remaining(self) -> Optional[int]:
+        with self._lock:
+            return self._budget
+
+    def get_allocated(self) -> Optional[int]:
+        with self._lock:
+            return self._total_allocated
+
+    def get_consumed(self) -> int:
+        with self._lock:
+            return self._total_consumed
+
+    def reset(self, budget: Optional[int] = None):
+        self.set_budget(budget)
+
+
+GLOBAL_PROVIDER_BUDGET = ProviderBudget(None)
+
+
 @dataclass
 class EarningsTracker:
     universe_size: int = 0
@@ -134,6 +198,7 @@ class EarningsTracker:
     blackout_blocks: int = 0
     positive_overrides: int = 0
     unknown_proceeds: int = 0
+    provider_fetching_disabled: bool = True
 
     def reset(self):
         self.universe_size = 0
@@ -152,8 +217,14 @@ class EarningsTracker:
         self.blackout_blocks = 0
         self.positive_overrides = 0
         self.unknown_proceeds = 0
+        self.provider_fetching_disabled = True
 
     def format_summary(self) -> str:
+        budget_alloc = GLOBAL_PROVIDER_BUDGET.get_allocated()
+        budget_alloc_str = str(budget_alloc) if budget_alloc is not None else "unlimited"
+        budget_rem = GLOBAL_PROVIDER_BUDGET.get_remaining()
+        budget_rem_str = str(budget_rem) if budget_rem is not None else "unlimited"
+        budget_consumed = GLOBAL_PROVIDER_BUDGET.get_consumed()
         return f"""
 ============================================================
 EARNINGS DATA SUMMARY
@@ -161,7 +232,9 @@ EARNINGS DATA SUMMARY
 Universe: {self.universe_size}
 Local cache hits: {self.local_cache_hits}
 Supabase cache hits: {self.supabase_cache_hits}
-Provider requests: {self.provider_requests}
+Provider fetching disabled: {self.provider_fetching_disabled}
+Provider request budget: {budget_alloc_str} (remaining: {budget_rem_str})
+Provider requests made: {self.provider_requests} (consumed: {budget_consumed})
 Provider successful: {self.provider_successful}
 Provider rate limited: {self.provider_rate_limited}
 Provider failed: {self.provider_failed}
@@ -462,9 +535,24 @@ def fetch_single_ticker_provider(
         GLOBAL_EARNINGS_TRACKER.provider_failed += 1
         return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
 
-    GLOBAL_EARNINGS_TRACKER.provider_requests += 1
+    # Provider budget check: fail early if budget is exhausted
+    if not GLOBAL_PROVIDER_BUDGET.can_request():
+        logger.debug("[BUDGET EXHAUSTED] Provider request budget reached limit for %s; returning UNKNOWN.", sym_upper)
+        GLOBAL_EARNINGS_TRACKER.provider_failed += 1
+        return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
 
     for attempt in range(max_retries + 1):
+        if not GLOBAL_PROVIDER_BUDGET.consume():
+            logger.debug(
+                "[BUDGET EXHAUSTED] Provider request budget reached limit for %s at attempt %d; returning UNKNOWN.",
+                sym_upper,
+                attempt + 1,
+            )
+            GLOBAL_EARNINGS_TRACKER.provider_failed += 1
+            return sym_upper, None, None, None, EarningsStatus.UNKNOWN.value
+
+        GLOBAL_EARNINGS_TRACKER.provider_requests += 1
+
         try:
             import yfinance as yf
 
@@ -636,14 +724,20 @@ def fetch_earnings_calendar(
 
     # 3. Layer 3: External Provider for remaining missing tickers
     tickers_to_fetch = [t for t in normalized_tickers if t not in calendar_map]
-    if max_provider_fetches is not None and len(tickers_to_fetch) > max_provider_fetches:
-        logger.info(
-            "[EARNINGS CALENDAR] Bounding startup provider queries to %d (out of %d uncached tickers); "
-            "remaining tickers will be resolved on-demand for setups.",
-            max_provider_fetches,
-            len(tickers_to_fetch),
-        )
-        tickers_to_fetch = tickers_to_fetch[:max_provider_fetches]
+    if max_provider_fetches is not None:
+        GLOBAL_PROVIDER_BUDGET.set_budget(max_provider_fetches)
+
+    if not allow_network or not GLOBAL_PROVIDER_BUDGET.can_request():
+        tickers_to_fetch = []
+    else:
+        rem = GLOBAL_PROVIDER_BUDGET.get_remaining()
+        if rem is not None and len(tickers_to_fetch) > rem:
+            logger.info(
+                "[EARNINGS CALENDAR] Bounding provider queries to %d (out of %d uncached tickers) based on request budget.",
+                rem,
+                len(tickers_to_fetch),
+            )
+            tickers_to_fetch = tickers_to_fetch[:rem]
 
     newly_fetched_records: List[Dict[str, Any]] = []
 
@@ -805,7 +899,7 @@ def resolve_ticker_earnings(
     calendar_map: Dict[str, Dict[str, Any]],
     supabase=None,
     cache_path: Optional[Union[str, Path]] = None,
-    allow_network: bool = True,
+    allow_network: bool = False,
 ) -> Dict[str, Any]:
     """
     On-demand single-ticker earnings resolver.
@@ -814,7 +908,7 @@ def resolve_ticker_earnings(
     1. If ticker is in calendar_map and status != UNKNOWN: return cached record.
     2. Check local JSON cache (data/cache/earnings_dates_cache.json).
     3. Check Supabase table ('earnings_calendar').
-    4. If allow_network and circuit breaker allows: fetch from provider (yfinance) via fetch_single_ticker_provider.
+    4. If allow_network and provider budget allows and circuit breaker allows: fetch from provider (yfinance) via fetch_single_ticker_provider.
     5. Persist to local JSON cache and Supabase.
     6. Update calendar_map and return record.
     """
@@ -895,8 +989,13 @@ def resolve_ticker_earnings(
         except Exception as e:
             logger.debug("Supabase lookup error for %s in resolve_ticker_earnings: %s", sym, e)
 
-    # 4. Fetch from provider if allowed, circuit breaker is healthy, and not already fetched this session
-    if allow_network and GLOBAL_CIRCUIT_BREAKER.can_request() and sym not in _SESSION_FETCHED_TICKERS:
+    # 4. Fetch from provider if allowed, budget allows, circuit breaker is healthy, and not already fetched this session
+    if (
+        allow_network
+        and GLOBAL_PROVIDER_BUDGET.can_request()
+        and GLOBAL_CIRCUIT_BREAKER.can_request()
+        and sym not in _SESSION_FETCHED_TICKERS
+    ):
         sym_res, next_d, last_d, fiscal_p, fetch_status = fetch_single_ticker_provider(sym)
         if fetch_status in (EarningsStatus.KNOWN_UPCOMING.value, EarningsStatus.KNOWN_CLEAR.value):
             rec = {

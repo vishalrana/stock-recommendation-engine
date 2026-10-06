@@ -419,7 +419,7 @@ class SignalRanker:
             + w["ctx"] * context_score
         )
 
-        honest_rr = float(row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
+        honest_rr = float(row.get("weighted_scaleout_rr") or row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
         tier_label = assign_tier(total, honest_rr)
 
         return {
@@ -642,7 +642,7 @@ class SignalRanker:
         tiers = []
         for _, row in df_filtered.iterrows():
             score = float(row["composite_score"])
-            rr = float(row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
+            rr = float(row.get("weighted_scaleout_rr") or row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
             t_label = assign_tier(score, rr)
             if t_label == "Strong Buy":
                 tiers.append(1)

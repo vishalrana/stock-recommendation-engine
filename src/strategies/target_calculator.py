@@ -238,20 +238,17 @@ def get_reach_prob_target_before_stop(
     high_col = "HIGH" if "HIGH" in price_df.columns else ("High" if "High" in price_df.columns else close_col)
     low_col = "LOW" if "LOW" in price_df.columns else ("Low" if "Low" in price_df.columns else close_col)
 
-    closes = price_df[close_col].dropna().to_numpy(dtype=float)
-    opens = price_df[open_col].dropna().to_numpy(dtype=float)
-    highs = price_df[high_col].dropna().to_numpy(dtype=float)
-    lows = price_df[low_col].dropna().to_numpy(dtype=float)
-
-    min_len = min(len(closes), len(opens), len(highs), len(lows))
-    if min_len <= h + 5:
+    # Use joint DataFrame dropna() across all 4 OHLC columns to guarantee row-by-row temporal alignment
+    cols_to_check = list(dict.fromkeys([open_col, high_col, low_col, close_col]))
+    clean_ohlc = price_df[cols_to_check].dropna()
+    n = len(clean_ohlc)
+    if n <= h + 5:
         return 0.0
 
-    closes = closes[-min_len:]
-    opens = opens[-min_len:]
-    highs = highs[-min_len:]
-    lows = lows[-min_len:]
-    n = min_len
+    closes = clean_ohlc[close_col].to_numpy(dtype=float)
+    opens = clean_ohlc[open_col].to_numpy(dtype=float)
+    highs = clean_ohlc[high_col].to_numpy(dtype=float)
+    lows = clean_ohlc[low_col].to_numpy(dtype=float)
 
     total_possible_windows = n - h
     num_windows = min(lookback_days, total_possible_windows)

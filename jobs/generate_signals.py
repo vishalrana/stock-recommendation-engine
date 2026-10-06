@@ -1025,15 +1025,23 @@ def run_scan(
                 if t not in unique_cands_by_ticker:
                     unique_cands_by_ticker[t] = c
 
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            executor = ThreadPoolExecutor(max_workers=10)
+            ctx_map = {}
+            try:
                 futures = {executor.submit(_score_ctx, c): c["ticker"] for c in unique_cands_by_ticker.values()}
-                ctx_map = {}
-                try:
-                    for future in as_completed(futures, timeout=60.0):
+                for future in as_completed(futures, timeout=60.0):
+                    try:
                         res_data = future.result(timeout=10.0)
                         ctx_map[res_data[0]] = res_data[1:]
-                except Exception as batch_err:
-                    logger.warning(f"Parallel context batch timeout: {batch_err}")
+                    except Exception as res_err:
+                        logger.warning(f"Error reading context result: {res_err}")
+            except Exception as batch_err:
+                logger.warning(f"Parallel context batch timeout: {batch_err}")
+            finally:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
 
             for c in candidates:
                 t = c["ticker"]
@@ -1211,10 +1219,18 @@ def run_scan(
             # Targets & Stop Loss are indicative suggestions (NOT execution levels or rejection gates)
             if not calc_res.is_valid:
                 logger.warning(f"[INDICATIVE TARGETS] Fallback targets applied for {ticker} ({strategy_name}): {calc_res.rejection_reason}")
+                strat_k = normalize_strategy_key(strategy_name)
+                stop_cfg = STRATEGY_STOP_CONFIG.get(strat_k, {})
+                s_floor_pct = float(stop_cfg.get("stop_floor", 0.04))
+                if stop_loss >= entry_price:
+                    stop_loss = round(entry_price * (1.0 - s_floor_pct), 2)
+                    sig["stop_loss"] = stop_loss
+                fallback_risk = max(entry_price * s_floor_pct, entry_price - stop_loss)
                 calc_res.target_1 = round(entry_price * 1.05, 2)
                 calc_res.target_1_pct = 5.0
                 calc_res.scale_out_weights = "100/0/0"
-                calc_res.weighted_rr_honest = round((calc_res.target_1 - entry_price) / max(0.01, entry_price - stop_loss), 2)
+                calc_res.weighted_scaleout_rr = round((calc_res.target_1 - entry_price) / fallback_risk, 2) if fallback_risk > 0 else 0.0
+                calc_res.weighted_rr_honest = calc_res.weighted_scaleout_rr
 
             sig["target_1"] = calc_res.target_1
             sig["target_2"] = calc_res.target_2
@@ -1231,16 +1247,17 @@ def run_scan(
             sig["reach_prob_raw"] = calc_res.reach_prob_raw
             sig["reach_prob_adjusted"] = calc_res.reach_prob_adjusted
             sig["scale_out_weights"] = calc_res.scale_out_weights
-            sig["weighted_rr"] = calc_res.weighted_rr_honest
-            sig["weighted_rr_honest"] = calc_res.weighted_rr_honest
+            sig["weighted_scaleout_rr"] = calc_res.weighted_scaleout_rr
+            sig["weighted_rr"] = calc_res.weighted_scaleout_rr
+            sig["weighted_rr_honest"] = calc_res.weighted_scaleout_rr
 
-            # Assign tier based on composite score & honest R:R
+            # Assign tier based on composite score & honest scale-out R:R
             from src.ranker import assign_tier
-            sig["tier_label"] = assign_tier(score, calc_res.weighted_rr_honest)
+            sig["tier_label"] = assign_tier(score, calc_res.weighted_scaleout_rr)
             if sig["tier_label"] not in ("Strong Buy", "Buy"):
-                logger.info(f"[TIER FILTER] Candidate {ticker} ({strategy_name}) not in buy tier: {sig['tier_label']} (Score={score:.2f}, Honest R:R={calc_res.weighted_rr_honest:.2f})")
+                logger.info(f"[TIER FILTER] Candidate {ticker} ({strategy_name}) not in buy tier: {sig['tier_label']} (Score={score:.2f}, Scale-Out R:R={calc_res.weighted_scaleout_rr:.2f})")
                 sig["status"] = "rejected"
-                sig["rejection_reason"] = f"Tier {sig['tier_label']} (Score {score:.1f}, R:R {calc_res.weighted_rr_honest:.2f})"
+                sig["rejection_reason"] = f"Tier {sig['tier_label']} (Score {score:.1f}, R:R {calc_res.weighted_scaleout_rr:.2f})"
                 rejected_signals_to_insert.append(sig)
                 continue
 

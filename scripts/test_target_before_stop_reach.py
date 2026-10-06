@@ -238,6 +238,72 @@ class TestTargetBeforeStopReach(unittest.TestCase):
         self.assertAlmostEqual(res.target_2_return_decimal * 100.0, res.target_2_pct, places=1)
         self.assertAlmostEqual(res.target_3_return_decimal * 100.0, res.target_3_pct, places=1)
 
+    def test_10_joint_ohlc_nan_row_alignment(self):
+        """Verify joint dropna across all OHLC columns prevents column-to-column index shifts when a single column has NaN."""
+        bars = []
+        for i in range(40):
+            bars.append((100.0, 102.0, 99.0, 100.0))
+        # Insert a NaN specifically in HIGH at index 10
+        bars[10] = (100.0, np.nan, 99.0, 100.0)
+        # Bar 26 has high 108 (Target 106)
+        bars[26] = (100.0, 108.0, 99.0, 107.0)
+        df = create_synthetic_ohlc(bars)
+
+        # Should drop row 10 cleanly without shifting HIGH relative to LOW/CLOSE
+        prob = get_reach_prob_target_before_stop(
+            ticker="SYNTH_NAN_ALIGNMENT",
+            target_pct=0.06,
+            stop_pct=0.05,
+            holding_days=5,
+            price_df=df,
+            lookback_days=30,
+        )
+        self.assertGreater(prob, 0.0)
+
+    def test_11_stop_equal_entry_and_non_positive_entry(self):
+        """Verify upstream stop validation handles stop == entry and non-positive entry safely."""
+        # 1. Stop == Entry
+        res_eq = calculate_targets(
+            ticker="STOP_EQ_TEST",
+            entry_price=100.0,
+            atr_14=2.0,
+            stop_loss=100.0,
+            strategy_name="Trend Following",
+            mock_reach_probs=(0.40, 0.25, 0.18),
+        )
+        self.assertTrue(res_eq.is_valid)
+        self.assertGreater(res_eq.weighted_scaleout_rr, 0.0)
+        # Should not produce astronomical R:R (> 100)
+        self.assertLess(res_eq.weighted_scaleout_rr, 20.0)
+
+        # 2. Non-positive entry
+        res_zero = calculate_targets(
+            ticker="ZERO_ENTRY_TEST",
+            entry_price=0.0,
+            atr_14=2.0,
+            stop_loss=0.0,
+            strategy_name="Trend Following",
+            mock_reach_probs=(0.40, 0.25, 0.18),
+        )
+        self.assertFalse(res_zero.is_valid)
+        self.assertEqual(res_zero.weighted_scaleout_rr, 0.0)
+
+    def test_12_canonical_weighted_scaleout_rr_field_parity(self):
+        """Verify weighted_scaleout_rr matches weighted_rr_honest across all target survival branches."""
+        for mock_probs in [(0.5, 0.3, 0.2), (0.5, 0.3, 0.05), (0.5, 0.05, 0.05), (0.05, 0.05, 0.05)]:
+            res = calculate_targets(
+                ticker="PARITY_TEST",
+                entry_price=100.0,
+                atr_14=2.0,
+                stop_loss=94.0,
+                strategy_name="Trend Following",
+                mock_reach_probs=mock_probs,
+            )
+            self.assertTrue(res.is_valid)
+            self.assertEqual(res.weighted_scaleout_rr, res.weighted_rr_honest)
+            self.assertGreater(res.weighted_scaleout_rr, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

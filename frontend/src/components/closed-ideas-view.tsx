@@ -98,6 +98,15 @@ export default function ClosedIdeasView({ closedIdeas }: ClosedIdeasViewProps) {
         {closedIdeas.map((rec, index) => {
           const ticker = rec.ticker?.toUpperCase() || 'UNKNOWN';
           const company = rec.company_name || '';
+          const entryPriceVal = rec.reference_entry_price ?? rec.entry_price;
+          const entryPrice = (entryPriceVal !== undefined && entryPriceVal !== null && !isNaN(Number(entryPriceVal)))
+            ? Number(entryPriceVal).toFixed(2)
+            : '—';
+          const exitPriceVal = rec.exit_price ?? rec.price;
+          const exitPrice = (exitPriceVal !== undefined && exitPriceVal !== null && !isNaN(Number(exitPriceVal)))
+            ? Number(exitPriceVal).toFixed(2)
+            : '—';
+
           const t1 = rec.target_1 ? Number(rec.target_1).toFixed(2) : null;
           const t2 = rec.target_2 ? Number(rec.target_2).toFixed(2) : null;
           const t3 = rec.target_3 ? Number(rec.target_3).toFixed(2) : null;
@@ -163,8 +172,15 @@ export default function ClosedIdeasView({ closedIdeas }: ClosedIdeasViewProps) {
                   )}
                 </div>
 
-                {/* Targets & Stop Info */}
+                {/* Entry & Exit Prices, Targets & Stop Info */}
                 <div className="mt-3.5 pt-3 border-t border-slate-800/60 flex flex-col gap-1.5 text-xs">
+                  <div className="flex items-baseline justify-between text-slate-300">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Price Location</span>
+                    <span className="font-mono text-[11px] text-slate-300">
+                      Entry <span className="font-semibold text-slate-200">${entryPrice}</span> <span className="text-slate-600">·</span> Exit <span className="font-semibold text-white">${exitPrice}</span>
+                    </span>
+                  </div>
+
                   <div className="flex items-baseline justify-between text-slate-300">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Targets</span>
                     <span className="font-mono font-medium text-slate-300">{targetsDisplay}</span>

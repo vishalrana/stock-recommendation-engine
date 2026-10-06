@@ -15,7 +15,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Canonical Single Source of Truth
-from src.quant_config import SURVIVORSHIP_BIAS_HAIRCUT
+from src.quant_config import SURVIVORSHIP_BIAS_HAIRCUT, REACH_PROB_FALLBACK_HAIRCUT
 
 
 # In-memory cache for static delisted tickers
@@ -63,10 +63,11 @@ def compute_reach_prob_with_survivorship(
     price_df: Optional[Any] = None,
     sector: Optional[str] = None,
     delisted_reach_override: Optional[float] = None,
+    stop_pct: Optional[float] = None,
 ) -> Tuple[float, float]:
     """
     Computes reach probability incorporating survivorship bias mitigation.
-    # ponytail: 70/30 blend with sector proxy when available, or flat 8% haircut (0.92x).
+    # ponytail: 70/30 blend with sector proxy when available, or flat haircut (REACH_PROB_FALLBACK_HAIRCUT).
     
     Returns:
         (adjusted_reach_prob, raw_reach_prob)
@@ -74,7 +75,7 @@ def compute_reach_prob_with_survivorship(
     from src.strategies.target_calculator import get_reach_prob
 
     # 1. Compute raw reach probability on the current active ticker
-    raw_reach = get_reach_prob(ticker, target_pct, holding_days, price_df)
+    raw_reach = get_reach_prob(ticker, target_pct, holding_days, price_df, stop_pct=stop_pct)
 
     # 2. Blend with delisted proxy if delisted sector history is available
     if delisted_reach_override is not None:
@@ -88,7 +89,7 @@ def compute_reach_prob_with_survivorship(
         delisted_reaches = []
         for dt in delisted_same_sector[:3]:
             try:
-                rp = get_reach_prob(dt, target_pct, holding_days)
+                rp = get_reach_prob(dt, target_pct, holding_days, stop_pct=stop_pct)
                 if rp > 0:
                     delisted_reaches.append(rp)
             except Exception:
@@ -99,8 +100,8 @@ def compute_reach_prob_with_survivorship(
             blended = (0.70 * raw_reach) + (0.30 * avg_delisted)
             return round(blended, 4), round(raw_reach, 4)
 
-    # 3. Graceful fallback: flat 8% haircut (0.92 multiplier)
-    blended = raw_reach * 0.92
+    # 3. Graceful fallback: flat haircut from canonical quant_config
+    blended = raw_reach * REACH_PROB_FALLBACK_HAIRCUT
     return round(blended, 4), round(raw_reach, 4)
 
 

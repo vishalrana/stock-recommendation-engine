@@ -257,6 +257,58 @@ class TestEntryLocationEngine(unittest.TestCase):
 
         res = evaluate_entry_location({"ticker": "TEST"}, df, "Mean Reversion")
         self.assertEqual(res.state, "REJECT")
+        self.assertEqual(res.zone, "NO_SETUP")
+
+    def test_case_14_entry_zones_classification(self):
+        """Verifies canonical zone classification across all 5 zones."""
+        # 1. NO_SETUP on falling knife / reject
+        df_reject = create_base_df(100, base_price=100.0)
+        df_reject.iloc[-18, df_reject.columns.get_loc("LOW")] = 95.0
+        df_reject.iloc[-1, df_reject.columns.get_loc("OPEN")] = 92.0
+        df_reject.iloc[-1, df_reject.columns.get_loc("HIGH")] = 92.5
+        df_reject.iloc[-1, df_reject.columns.get_loc("LOW")] = 90.5
+        df_reject.iloc[-1, df_reject.columns.get_loc("CLOSE")] = 91.0
+        res_reject = evaluate_entry_location({"ticker": "T1"}, df_reject, "Mean Reversion")
+        self.assertEqual(res_reject.state, "REJECT")
+        self.assertEqual(res_reject.zone, "NO_SETUP")
+
+        # 2. EXTENDED_ZONE on over-extended move
+        df_ext = create_base_df(100, base_price=100.0)
+        df_ext.iloc[-1, df_ext.columns.get_loc("CLOSE")] = 115.0
+        df_ext.iloc[-1, df_ext.columns.get_loc("EMA_20")] = 100.0
+        res_ext = evaluate_entry_location({"ticker": "T2"}, df_ext, "Trend Following")
+        self.assertEqual(res_ext.zone, "EXTENDED_ZONE")
+
+        # 3. BREAKOUT_ZONE on 52-week high breakout
+        df_bo = create_base_df(100, base_price=100.0)
+        df_bo.iloc[-1, df_bo.columns.get_loc("CLOSE")] = 105.0
+        df_bo.iloc[-1, df_bo.columns.get_loc("HIGH")] = 106.0
+        df_bo.iloc[-1, df_bo.columns.get_loc("OPEN")] = 104.0
+        res_bo = evaluate_entry_location({"ticker": "T3"}, df_bo, "52w_high_breakout")
+        self.assertEqual(res_bo.zone, "BREAKOUT_ZONE")
+
+        # 4. WAIT_ZONE on unconfirmed approach to resistance
+        df_wait = create_base_df(100, base_price=95.0)
+        df_wait.iloc[-25, df_wait.columns.get_loc("HIGH")] = 100.0
+        df_wait.iloc[-1, df_wait.columns.get_loc("CLOSE")] = 98.50
+        df_wait.iloc[-1, df_wait.columns.get_loc("HIGH")] = 99.0
+        res_wait = evaluate_entry_location({"ticker": "T4"}, df_wait, "Trend Following")
+        self.assertEqual(res_wait.zone, "WAIT_ZONE")
+
+        # 5. BUY_ZONE on stabilized pullback support
+        df_buy = create_base_df(100, base_price=100.0)
+        df_buy.iloc[-40, df_buy.columns.get_loc("LOW")] = 90.0
+        df_buy.iloc[-40, df_buy.columns.get_loc("CLOSE")] = 91.0
+        df_buy.iloc[-20, df_buy.columns.get_loc("LOW")] = 90.5
+        df_buy.iloc[-20, df_buy.columns.get_loc("CLOSE")] = 91.5
+        df_buy.iloc[-30, df_buy.columns.get_loc("HIGH")] = 100.0
+        df_buy.iloc[-1, df_buy.columns.get_loc("LOW")] = 90.5
+        df_buy.iloc[-1, df_buy.columns.get_loc("OPEN")] = 91.0
+        df_buy.iloc[-1, df_buy.columns.get_loc("HIGH")] = 92.5
+        df_buy.iloc[-1, df_buy.columns.get_loc("CLOSE")] = 92.0
+        res_buy = evaluate_entry_location({"ticker": "T5"}, df_buy, "Pullback Recovery")
+        self.assertEqual(res_buy.state, "BUY")
+        self.assertEqual(res_buy.zone, "BUY_ZONE")
 
 
 if __name__ == "__main__":

@@ -182,46 +182,56 @@ export async function fetchLiveQuotesAction(
         diag.finnhub = { attempted: false, failure: 'missing_finnhub_api_key' };
       }
 
-      // 3. Yahoo Finance v8 chart fallback (strictly regularMarketPrice only)
+      // 3. Yahoo Finance v8 chart fallback (resilient query1/query2 with origin/referer headers, strictly regularMarketPrice only)
       diag.yahoo = { attempted: true };
-      try {
-        const res = await fetch(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`,
-          {
-            cache: 'no-store',
-            signal: AbortSignal.timeout(6000),
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              Accept: 'application/json',
-            },
-          }
-        );
-        diag.yahoo.status = res.status;
-        if (res.status === 200) {
-          const data = await res.json();
-          const meta = data?.chart?.result?.[0]?.meta;
-          // NEVER accept previousClose or chartPreviousClose as live quotes
-          const rawPrice = meta?.regularMarketPrice;
-          if (typeof rawPrice === 'number' && !isNaN(rawPrice) && rawPrice > 0) {
-            const finalPrice = Math.round(rawPrice * 100) / 100;
-            diag.yahoo.price = finalPrice;
-            console.info(`[Live Quote] ${symbol} retrieved via Yahoo: $${finalPrice}`);
-            results[symbol] = { price: finalPrice };
-            return;
+      const yahooHosts = [
+        'https://query1.finance.yahoo.com',
+        'https://query2.finance.yahoo.com',
+      ];
+      const yahooHeaders = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Origin': 'https://finance.yahoo.com',
+        'Referer': 'https://finance.yahoo.com/',
+        'Accept': 'application/json',
+      };
+
+      for (const host of yahooHosts) {
+        try {
+          const res = await fetch(
+            `${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`,
+            {
+              cache: 'no-store',
+              signal: AbortSignal.timeout(6000),
+              headers: yahooHeaders,
+            }
+          );
+          diag.yahoo.status = res.status;
+          if (res.status === 200) {
+            const data = await res.json();
+            const meta = data?.chart?.result?.[0]?.meta;
+            // NEVER accept previousClose or chartPreviousClose as live quotes
+            const rawPrice = meta?.regularMarketPrice;
+            if (typeof rawPrice === 'number' && !isNaN(rawPrice) && rawPrice > 0) {
+              const finalPrice = Math.round(rawPrice * 100) / 100;
+              diag.yahoo.price = finalPrice;
+              console.info(`[Live Quote] ${symbol} retrieved via Yahoo (${host}): $${finalPrice}`);
+              results[symbol] = { price: finalPrice };
+              return;
+            } else {
+              diag.yahoo.failure = 'regularMarketPrice_missing_or_invalid';
+            }
+          } else if (res.status === 403) {
+            diag.yahoo.failure = 'forbidden_403_ip_blocked';
+          } else if (res.status === 429) {
+            diag.yahoo.failure = 'rate_limit_429';
           } else {
-            diag.yahoo.failure = 'regularMarketPrice_missing_or_invalid';
+            diag.yahoo.failure = `http_${res.status}`;
           }
-        } else if (res.status === 403) {
-          diag.yahoo.failure = 'forbidden_403_ip_blocked';
-        } else if (res.status === 429) {
-          diag.yahoo.failure = 'rate_limit_429';
-        } else {
-          diag.yahoo.failure = `http_${res.status}`;
+        } catch (err: any) {
+          diag.yahoo.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+          console.warn(`[Live Quote] Yahoo error for ${symbol} via ${host}: ${diag.yahoo.failure}`);
         }
-      } catch (err: any) {
-        diag.yahoo.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
-        console.warn(`[Live Quote] Yahoo fallback error for ${symbol}: ${diag.yahoo.failure}`);
       }
 
       // All providers failed: log complete diagnostic breakdown safely

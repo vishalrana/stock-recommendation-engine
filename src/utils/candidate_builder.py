@@ -18,6 +18,7 @@ def build_candidate_from_row(row: pd.Series) -> dict:
         "industry": str(row.get("industry", "")),
         "price": float(row.get("price", 0.0)),
         "entry_price": float(row.get("entry_price", 0.0)),
+        "reference_entry_price": float(row.get("reference_entry_price", row.get("entry_price", 0.0))),
         "stop_loss": float(row.get("stop_loss", 0.0)),
         "exit_price": float(row.get("exit_price", 0.0)),
         "upside_pct": float(row.get("upside_pct", 0.0)),
@@ -59,6 +60,7 @@ def build_candidate_from_row(row: pd.Series) -> dict:
         "scale_out_weights": str(row.get("scale_out_weights", "50/30/20")),
         "weighted_rr": float(row.get("weighted_rr", row.get("weighted_rr_honest", 0.0))),
         "weighted_rr_honest": float(row.get("weighted_rr_honest", row.get("weighted_rr", 0.0))),
+        "weighted_scaleout_rr": float(row.get("weighted_scaleout_rr", row.get("weighted_rr_honest", 0.0))),
         "position_sizing": str(row.get("position_sizing", "50/30/20")),
         # --- The critical fix: context_score & breakdown ---
         "context_score": context,

@@ -1248,6 +1248,7 @@ def run_scan(
             loc_res = evaluate_entry_location(sig, ticker_df, strategy_name)
             sig["entry_state"] = loc_res.state
             sig["entry_location_reason"] = loc_res.reason
+            sig["entry_location_zone"] = loc_res.zone
             sig["support_level"] = loc_res.support_level
             sig["resistance_level"] = loc_res.resistance_level
             sig["range_position_pct"] = loc_res.range_position_pct
@@ -1325,6 +1326,7 @@ def run_scan(
                     "industry": sig["industry"],
                     "price": sig["price"],
                     "entry_price": sig["entry_price"],
+                    "reference_entry_price": sig.get("reference_entry_price") or sig["entry_price"],
                     "stop_loss": sig["stop_loss"],
                     "exit_price": sig.get("exit_price"),
                     "upside_pct": sig.get("upside_pct"),
@@ -1357,6 +1359,8 @@ def run_scan(
                     "scale_out_weights": sig.get("scale_out_weights", "50/30/20"),
                     "weighted_rr": sig.get("weighted_rr"),
                     "weighted_rr_honest": sig.get("weighted_rr_honest"),
+                    "weighted_scaleout_rr": sig.get("weighted_scaleout_rr", sig.get("weighted_rr_honest")),
+                    "entry_location_zone": sig.get("entry_location_zone"),
                     "position_sizing": None,
                     "narrative": sig.get("narrative"),
                     "strategy_name": sig["strategy"],
@@ -1491,6 +1495,7 @@ def run_scan(
                         "industry": sig.get("industry"),
                         "price": sig.get("price"),
                         "entry_price": sig.get("entry_price"),
+                        "reference_entry_price": sig.get("reference_entry_price") or sig.get("entry_price"),
                         "stop_loss": sig.get("stop_loss"),
                         "exit_price": sig.get("exit_price"),
                         "upside_pct": sig.get("upside_pct"),
@@ -1528,6 +1533,8 @@ def run_scan(
                         "scale_out_weights": sig.get("scale_out_weights", "50/30/20"),
                         "weighted_rr": sig.get("weighted_rr"),
                         "weighted_rr_honest": sig.get("weighted_rr_honest"),
+                        "weighted_scaleout_rr": sig.get("weighted_scaleout_rr", sig.get("weighted_rr_honest")),
+                        "entry_location_zone": sig.get("entry_location_zone"),
                         "position_sizing": None,
                         "narrative": sig.get("narrative"),
                         "strategy_name": sig.get("strategy_name"),
@@ -1554,11 +1561,38 @@ def run_scan(
                     })
                 
                 # Direct persistence with full schema parity and exact instance identity
-                supabase.table("signals").insert(ranked_signals).execute()
+                try:
+                    supabase.table("signals").insert(ranked_signals).execute()
+                except Exception as sig_err:
+                    err_str = str(sig_err)
+                    if any(c in err_str for c in ["reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "42703"]):
+                        logger.warning("Unmigrated column in signals table (42703). Retrying insert without new optional columns.")
+                        for s in ranked_signals:
+                            s.pop("reference_entry_price", None)
+                            s.pop("weighted_scaleout_rr", None)
+                            s.pop("entry_location_zone", None)
+                        supabase.table("signals").insert(ranked_signals).execute()
+                    else:
+                        raise sig_err
+
                 try:
                     supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
                 except Exception as hist_err:
-                    if "42P10" in str(hist_err):
+                    hist_err_str = str(hist_err)
+                    if any(c in hist_err_str for c in ["reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "42703"]):
+                        logger.warning("Unmigrated column in signals_history table (42703). Retrying history upsert without new optional columns.")
+                        for h in history_rows:
+                            h.pop("reference_entry_price", None)
+                            h.pop("weighted_scaleout_rr", None)
+                            h.pop("entry_location_zone", None)
+                        try:
+                            supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
+                        except Exception as h_retry_err:
+                            if "42P10" in str(h_retry_err):
+                                supabase.table("signals_history").insert(history_rows).execute()
+                            else:
+                                raise h_retry_err
+                    elif "42P10" in hist_err_str:
                         logger.warning("PostgREST 42P10 detected (partial index requires predicate). Inserting history records directly.")
                         supabase.table("signals_history").insert(history_rows).execute()
                     else:

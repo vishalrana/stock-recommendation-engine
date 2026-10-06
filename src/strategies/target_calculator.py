@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Canonical Quantitative Configuration (Single Source of Truth)
 from src.quant_config import (
     STRATEGY_TARGET_CONFIG,
+    STRATEGY_STOP_CONFIG,
     T3_REACH_PROB_SURVIVAL_THRESHOLD,
     SCALE_OUT_WEIGHTS,
     MIN_REACH_PROB_WINDOWS,
@@ -67,11 +68,15 @@ class TargetCalculationResult:
     reach_prob_t2: float
     reach_prob_t3: float
     scale_out_weights: str
+    weighted_scaleout_rr: float
     weighted_rr_honest: float
     is_valid: bool
     rejection_reason: Optional[str] = None
     reach_prob_raw: Optional[float] = None
     reach_prob_adjusted: Optional[float] = None
+    target_1_return_decimal: Optional[float] = None
+    target_2_return_decimal: Optional[float] = None
+    target_3_return_decimal: Optional[float] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -79,6 +84,8 @@ class TargetCalculationResult:
 
 # Global in-memory cache for reach distributions: (ticker, holding_days) -> np.ndarray
 _REACH_DIST_CACHE: Dict[Tuple[str, int], np.ndarray] = {}
+# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days) -> float
+_TARGET_STOP_REACH_CACHE: Dict[Tuple[str, float, float, int], float] = {}
 
 
 def get_reach_prob_distribution(
@@ -173,17 +180,159 @@ def get_reach_prob_distribution(
     return arr
 
 
+def get_reach_prob_target_before_stop(
+    ticker: str,
+    target_pct: float,
+    stop_pct: float,
+    holding_days: int,
+    price_df: Optional[pd.DataFrame] = None,
+    lookback_days: int = 504,
+) -> float:
+    """
+    Calculate empirical reach probability where Target is reached BEFORE Stop is hit
+    within the forward holding period H (in trading days).
+
+    Zero lookahead: Evaluates historical sliding windows up to lookback_days.
+    Conservative intra-day execution rules:
+      1. Gap at Open:
+         - Open <= Stop => STOP_HIT (stopped out at open)
+         - Open >= Target => TARGET_REACHED (target hit at open)
+      2. Intra-day Bar:
+         - Low <= Stop AND High >= Target => STOP_HIT (conservative same-day ambiguity policy)
+         - Low <= Stop => STOP_HIT
+         - High >= Target => TARGET_REACHED
+      3. Neither touched within H days => NEITHER_HIT (counted as failure).
+    """
+    t_up = ticker.upper()
+    h = int(holding_days)
+    t_pct = float(target_pct)
+    s_pct = float(stop_pct)
+
+    if t_pct <= 0 or s_pct <= 0 or h <= 0:
+        return 0.0
+
+    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h)
+    if cache_key in _TARGET_STOP_REACH_CACHE:
+        return _TARGET_STOP_REACH_CACHE[cache_key]
+
+    # Fetch price history if needed
+    if price_df is None or price_df.empty:
+        try:
+            from src.data.cache_manager import get_cache_manager
+            import datetime
+            cm = get_cache_manager()
+            end_date = datetime.date.today().isoformat()
+            start_date = (datetime.date.today() - datetime.timedelta(days=int(lookback_days * 1.6) + h + 30)).isoformat()
+            price_df = cm.get_ticker_history(ticker, start_date, end_date)
+        except Exception as e:
+            logger.debug("Could not load price history for target-before-stop %s: %s", ticker, e)
+
+    if price_df is None or price_df.empty:
+        return 0.0
+
+    close_col = "CLOSE" if "CLOSE" in price_df.columns else ("Close" if "Close" in price_df.columns else None)
+    if close_col is None:
+        return 0.0
+
+    open_col = "OPEN" if "OPEN" in price_df.columns else ("Open" if "Open" in price_df.columns else close_col)
+    high_col = "HIGH" if "HIGH" in price_df.columns else ("High" if "High" in price_df.columns else close_col)
+    low_col = "LOW" if "LOW" in price_df.columns else ("Low" if "Low" in price_df.columns else close_col)
+
+    closes = price_df[close_col].dropna().to_numpy(dtype=float)
+    opens = price_df[open_col].dropna().to_numpy(dtype=float)
+    highs = price_df[high_col].dropna().to_numpy(dtype=float)
+    lows = price_df[low_col].dropna().to_numpy(dtype=float)
+
+    min_len = min(len(closes), len(opens), len(highs), len(lows))
+    if min_len <= h + 5:
+        return 0.0
+
+    closes = closes[-min_len:]
+    opens = opens[-min_len:]
+    highs = highs[-min_len:]
+    lows = lows[-min_len:]
+    n = min_len
+
+    total_possible_windows = n - h
+    num_windows = min(lookback_days, total_possible_windows)
+    if num_windows < MIN_REACH_PROB_WINDOWS:
+        return 0.0
+
+    start_idx = total_possible_windows - num_windows
+
+    success_count = 0
+    valid_windows = 0
+
+    for d in range(start_idx, total_possible_windows):
+        p0 = closes[d]
+        if p0 <= 0:
+            continue
+
+        valid_windows += 1
+        target_price = p0 * (1.0 + t_pct)
+        stop_price = p0 * (1.0 - s_pct)
+        target_reached = False
+
+        for t in range(d + 1, min(d + h + 1, n)):
+            o_t = opens[t]
+            h_t = highs[t]
+            l_t = lows[t]
+
+            # 1. Open Gap Check
+            if o_t <= stop_price:
+                target_reached = False
+                break
+            if o_t >= target_price:
+                target_reached = True
+                break
+
+            # 2. Intra-day Bar Check
+            if l_t <= stop_price and h_t >= target_price:
+                # Same-day ambiguity: conservative STOP_FIRST policy
+                target_reached = False
+                break
+            if l_t <= stop_price:
+                target_reached = False
+                break
+            if h_t >= target_price:
+                target_reached = True
+                break
+
+        if target_reached:
+            success_count += 1
+
+    if valid_windows < MIN_REACH_PROB_WINDOWS:
+        return 0.0
+
+    prob = float(success_count / valid_windows)
+    _TARGET_STOP_REACH_CACHE[cache_key] = prob
+    return prob
+
+
 def get_reach_prob(
     ticker: str,
     target_pct: float,
     holding_days: int,
     price_df: Optional[pd.DataFrame] = None,
     lookback_days: int = 504,
+    stop_pct: Optional[float] = None,
 ) -> float:
     """
-    Calculate empirical reach probability: count(max_gain_d >= target_pct) / total_windows.
-    If insufficient historical gain evidence exists, returns 0.0 (does not manufacture 35%).
+    Calculate empirical reach probability.
+    If stop_pct is provided (> 0), computes target-before-stop reach probability.
+    Otherwise, computes empirical gain reach probability: count(max_gain_d >= target_pct) / total_windows.
+    If insufficient historical evidence exists, returns 0.0 (does not manufacture 35%).
     """
+    if stop_pct is not None and float(stop_pct) > 0:
+        return get_reach_prob_target_before_stop(
+            ticker=ticker,
+            target_pct=target_pct,
+            stop_pct=float(stop_pct),
+            holding_days=holding_days,
+            price_df=price_df,
+            lookback_days=lookback_days,
+        )
+
     gains = get_reach_prob_distribution(ticker, holding_days, price_df, lookback_days)
     if len(gains) < MIN_REACH_PROB_WINDOWS:
         logger.debug(
@@ -209,8 +358,8 @@ def calculate_targets(
     Full 3-layer target calculation and reach-probability filtering engine.
 
     Layer 1: Computes ATR targets and fixed-floor targets per strategy, selecting max().
-    Layer 2: Applies reach-probability decision tree with survivorship bias mitigation.
-    Layer 3: Computes honest weighted risk-to-reward ratio for Half-Kelly sizing.
+    Layer 2: Applies reach-probability decision tree with target-before-stop and survivorship bias mitigation.
+    Layer 3: Computes honest weighted scale-out risk-to-reward ratio.
     """
     strat_key = normalize_strategy_name(strategy_name)
     cfg = STRATEGY_TARGET_CONFIG[strat_key]
@@ -218,40 +367,87 @@ def calculate_targets(
     entry = float(entry_price)
     atr = max(0.0, float(atr_14))
     stop = float(stop_loss)
-    risk = max(0.01, entry - stop)
+
+    # Upstream Stop-Loss Validation (stop < entry)
+    # Check stop < entry. If stop >= entry, repair using strategy stop floor or mark invalid;
+    # do NOT mask with max(0.01, entry - stop).
+    stop_cfg = STRATEGY_STOP_CONFIG.get(strat_key, {})
+    stop_floor_pct = stop_cfg.get("stop_floor", 0.05)
+
+    if entry <= 0:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Non-positive entry price: {entry}",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
+
+    if stop >= entry:
+        repaired_stop = round(entry * (1.0 - stop_floor_pct), 2)
+        logger.warning(
+            "Invalid stop loss for %s: stop $%.2f >= entry $%.2f. Repaired to strategy stop floor $%.2f (%.1f%%).",
+            ticker, stop, entry, repaired_stop, stop_floor_pct * 100.0
+        )
+        stop = repaired_stop
+
+    risk = entry - stop
+    if risk <= 0:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Invalid risk: entry ${entry:.2f} - stop ${stop:.2f} <= 0",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
+
+    stop_pct = risk / entry
 
     # Layer 1 — Candidate Targets (max of fixed percentage floor and ATR multiple)
-    t1_atr = round(entry + (cfg["atr_k1"] * atr), 2)
-    t2_atr = round(entry + (cfg["atr_k2"] * atr), 2)
-    t3_atr = round(entry + (cfg["atr_k3"] * atr), 2)
+    # Use full float precision for internal math; round only at output boundary
+    t1_atr = entry + (cfg["atr_k1"] * atr)
+    t2_atr = entry + (cfg["atr_k2"] * atr)
+    t3_atr = entry + (cfg["atr_k3"] * atr)
 
     if override_targets is not None:
         cand_t1, cand_t2, cand_t3 = override_targets
     else:
-        cand_t1 = round(max(entry * (1.0 + cfg["fixed_t1"]), t1_atr), 2)
-        cand_t2 = round(max(entry * (1.0 + cfg["fixed_t2"]), t2_atr), 2)
-        cand_t3 = round(max(entry * (1.0 + cfg["fixed_t3"]), t3_atr), 2)
+        cand_t1 = max(entry * (1.0 + cfg["fixed_t1"]), t1_atr)
+        cand_t2 = max(entry * (1.0 + cfg["fixed_t2"]), t2_atr)
+        cand_t3 = max(entry * (1.0 + cfg["fixed_t3"]), t3_atr)
 
         # Ensure strict target ordering: entry < cand_t1 < cand_t2 < cand_t3
         if not (entry < cand_t1 < cand_t2 < cand_t3):
-            cand_t1 = max(cand_t1, round(entry * 1.01, 2))
-            cand_t2 = max(cand_t2, round(cand_t1 * 1.01, 2))
-            cand_t3 = max(cand_t3, round(cand_t2 * 1.01, 2))
+            cand_t1 = max(cand_t1, entry * 1.01)
+            cand_t2 = max(cand_t2, cand_t1 * 1.01)
+            cand_t3 = max(cand_t3, cand_t2 * 1.01)
 
-    t1_pct = (cand_t1 - entry) / entry if entry > 0 else 0.0
-    t2_pct = (cand_t2 - entry) / entry if entry > 0 else 0.0
-    t3_pct = (cand_t3 - entry) / entry if entry > 0 else 0.0
+    t1_ret_dec = (cand_t1 - entry) / entry
+    t2_ret_dec = (cand_t2 - entry) / entry
+    t3_ret_dec = (cand_t3 - entry) / entry
 
-    # Layer 2 — Reach Probabilities with Survivorship Bias Adjustment
+    # Layer 2 — Reach Probabilities with Target-Before-Stop & Survivorship Bias Adjustment
     if mock_reach_probs is not None:
         rp_t1, rp_t2, rp_t3 = mock_reach_probs
         raw_t1 = rp_t1
     else:
         hold = cfg["hold_days"]
         from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
-        rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_pct, hold, price_df, sector=sector)
-        rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_pct, hold, price_df, sector=sector)
-        rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_pct, hold, price_df, sector=sector)
+        rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct)
+        rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct)
+        rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct)
 
     # Monotonic reach probability enforcement: farther targets cannot have higher reach prob over same holding period
     rp_t2 = min(rp_t2, rp_t1)
@@ -271,55 +467,75 @@ def calculate_targets(
     rejection_reason = None
     if t1_survives and t2_survives and t3_survives:
         # All three survive: 50% at T1, 30% at T2, 20% at T3
-        t1, t2, t3 = cand_t1, cand_t2, cand_t3
+        t1, t2, t3 = round(cand_t1, 2), round(cand_t2, 2), round(cand_t3, 2)
         weights_label = "50/30/20"
-        weighted_reward = 0.50 * (t1 - entry) + 0.30 * (t2 - entry) + 0.20 * (t3 - entry)
-        t2_pct = round((t2 / entry - 1.0) * 100.0, 1)
-        t3_pct = round((t3 / entry - 1.0) * 100.0, 1)
+        weighted_reward = 0.50 * (cand_t1 - entry) + 0.30 * (cand_t2 - entry) + 0.20 * (cand_t3 - entry)
+        t1_pct = round(t1_ret_dec * 100.0, 1)
+        t2_pct = round(t2_ret_dec * 100.0, 1)
+        t3_pct = round(t3_ret_dec * 100.0, 1)
+        t1_dec = round(t1_ret_dec, 4)
+        t2_dec = round(t2_ret_dec, 4)
+        t3_dec = round(t3_ret_dec, 4)
     elif t1_survives and t2_survives and not t3_survives:
         # T1 and T2 survive, T3 pruned: 60% at T1, 40% at T2, 0% at T3
-        t1, t2, t3 = cand_t1, cand_t2, None
+        t1, t2, t3 = round(cand_t1, 2), round(cand_t2, 2), None
         weights_label = "60/40/0"
-        weighted_reward = 0.60 * (t1 - entry) + 0.40 * (t2 - entry)
-        t2_pct = round((t2 / entry - 1.0) * 100.0, 1)
+        weighted_reward = 0.60 * (cand_t1 - entry) + 0.40 * (cand_t2 - entry)
+        t1_pct = round(t1_ret_dec * 100.0, 1)
+        t2_pct = round(t2_ret_dec * 100.0, 1)
         t3_pct = None
+        t1_dec = round(t1_ret_dec, 4)
+        t2_dec = round(t2_ret_dec, 4)
+        t3_dec = None
         rejection_reason = f"T3 pruned (reach prob {rp_t3:.1%} < threshold {t3_min:.1%})"
     elif t1_survives and not t2_survives:
         # Only T1 survives: 70% at T1, 30% runner to breakeven
-        t1, t2, t3 = cand_t1, None, None
+        t1, t2, t3 = round(cand_t1, 2), None, None
         weights_label = "70/30/0"
-        weighted_reward = 0.70 * (t1 - entry)
+        weighted_reward = 0.70 * (cand_t1 - entry)
+        t1_pct = round(t1_ret_dec * 100.0, 1)
         t2_pct = None
         t3_pct = None
+        t1_dec = round(t1_ret_dec, 4)
+        t2_dec = None
+        t3_dec = None
         rejection_reason = f"T2/T3 pruned (T2 reach prob {rp_t2:.1%} < min {t2_min:.1%})"
     else:
         # T1 did not survive its minimum: T1 kept as sole indicative target; T2 & T3 pruned
-        t1, t2, t3 = cand_t1, None, None
+        t1, t2, t3 = round(cand_t1, 2), None, None
         weights_label = "70/30/0"
-        weighted_reward = 0.70 * (t1 - entry)
+        weighted_reward = 0.70 * (cand_t1 - entry)
+        t1_pct = round(t1_ret_dec * 100.0, 1)
         t2_pct = None
         t3_pct = None
+        t1_dec = round(t1_ret_dec, 4)
+        t2_dec = None
+        t3_dec = None
         rejection_reason = f"T1 reach prob {rp_t1:.1%} below minimum {t1_min:.1%}"
 
-    weighted_rr = round(weighted_reward / risk, 2)
+    weighted_scaleout_rr = round(weighted_reward / risk, 2)
 
     return TargetCalculationResult(
         target_1=t1,
         target_2=t2,
         target_3=t3,
-        target_1_atr=t1_atr,
-        target_2_atr=t2_atr,
-        target_3_atr=t3_atr,
-        target_1_pct=round((t1 / entry - 1.0) * 100.0, 1),
+        target_1_atr=round(t1_atr, 2),
+        target_2_atr=round(t2_atr, 2),
+        target_3_atr=round(t3_atr, 2),
+        target_1_pct=t1_pct,
         target_2_pct=t2_pct,
         target_3_pct=t3_pct,
         reach_prob_t1=round(rp_t1, 4),
         reach_prob_t2=round(rp_t2, 4),
         reach_prob_t3=round(rp_t3, 4),
         scale_out_weights=weights_label,
-        weighted_rr_honest=weighted_rr,
+        weighted_scaleout_rr=weighted_scaleout_rr,
+        weighted_rr_honest=weighted_scaleout_rr,
         is_valid=True,
         rejection_reason=rejection_reason,
         reach_prob_raw=round(raw_t1, 4),
         reach_prob_adjusted=round(rp_t1, 4),
+        target_1_return_decimal=t1_dec,
+        target_2_return_decimal=t2_dec,
+        target_3_return_decimal=t3_dec,
     )

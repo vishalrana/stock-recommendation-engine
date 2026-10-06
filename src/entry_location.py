@@ -51,6 +51,7 @@ class EntryLocationResult:
     state: str  # "BUY", "WAIT", "REJECT"
     reason: str
     structure: MarketStructure
+    zone: str = "BUY_ZONE"  # "BUY_ZONE", "BREAKOUT_ZONE", "WAIT_ZONE", "EXTENDED_ZONE", "NO_SETUP"
 
     @property
     def support_level(self) -> float:
@@ -329,6 +330,42 @@ def analyze_market_structure(
     )
 
 
+def determine_entry_zone(
+    state: str,
+    reason: str,
+    structure: MarketStructure,
+    strategy_name: str,
+) -> str:
+    """
+    Classify market structure and entry evaluation into one of 5 canonical zones:
+      - BUY_ZONE: Defensive, confirmed entry location (pullback support, bounce, steady trend).
+      - BREAKOUT_ZONE: Confirmed breakout above resistance or 52-week high.
+      - WAIT_ZONE: Unconfirmed setup, approaching resistance, or consolidation needed.
+      - EXTENDED_ZONE: Price extended excessively beyond moving averages/ATR.
+      - NO_SETUP: Broken support or falling knife.
+    """
+    if state == "REJECT":
+        return "NO_SETUP"
+
+    r_lower = (reason or "").lower()
+    if state == "WAIT":
+        if (
+            structure.is_extended
+            or "extended" in r_lower
+            or structure.extension_ema20_atr > 3.5
+            or structure.extension_dma50_pct > 28.0
+        ):
+            return "EXTENDED_ZONE"
+        return "WAIT_ZONE"
+
+    if state == "BUY":
+        if structure.is_confirmed_breakout or "breakout" in r_lower or "52" in str(strategy_name).lower():
+            return "BREAKOUT_ZONE"
+        return "BUY_ZONE"
+
+    return "WAIT_ZONE"
+
+
 def evaluate_entry_location(
     candidate: dict,
     df: Optional[pd.DataFrame],
@@ -340,7 +377,18 @@ def evaluate_entry_location(
       - BUY: Defensible entry location right now.
       - WAIT: Valid underlying setup, but location is currently unconfirmed, approaching resistance, or extended.
       - REJECT: Invalid location (falling knife, broken support).
+    Also attaches canonical entry location zone (BUY_ZONE, BREAKOUT_ZONE, WAIT_ZONE, EXTENDED_ZONE, NO_SETUP).
     """
+    res = _evaluate_entry_location_raw(candidate, df, strategy_name)
+    res.zone = determine_entry_zone(res.state, res.reason, res.structure, strategy_name)
+    return res
+
+
+def _evaluate_entry_location_raw(
+    candidate: dict,
+    df: Optional[pd.DataFrame],
+    strategy_name: str,
+) -> EntryLocationResult:
     if df is None or len(df) < 20:
         # If price history dataframe is unavailable, allow candidate without location gate
         structure = analyze_market_structure(df)

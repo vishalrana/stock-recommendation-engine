@@ -7,10 +7,13 @@ export interface Recommendation {
   industry: string | null;
   price: number | null;
   entry_price: number | null;
+  reference_entry_price?: number | null;
   stop_loss: number | null;
   exit_price: number | null;
   upside_pct: number | null;
   risk_reward: number | null;
+  weighted_scaleout_rr?: number | null;
+  entry_location_zone?: string | null;
   current_rsi: number | null;
   volume_ratio: number | null;
   score: number | null;

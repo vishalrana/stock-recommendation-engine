@@ -80,10 +80,12 @@ REGIME_SCORE_MATRIX: Dict[str, Dict[str, float]] = {
 
 # ==============================================================================
 # 3. HISTORICAL STRATEGY EXPECTANCY & HAIRCUTS (Section 9.2 & 10.3)
-# Survivorship bias haircut: 15% reduction (0.85 multiplier)
+# Survivorship bias haircut: 15% reduction (0.85 multiplier) for strategy historical expectancy
+# Reach probability fallback haircut: 8% reduction (0.92 multiplier) when delisted sector proxies are unavailable
 # Formula: S_exp = 30.0 + 20.0 * E_adjusted (E_adjusted in percentage points)
 # ==============================================================================
 SURVIVORSHIP_BIAS_HAIRCUT: float = 0.85
+REACH_PROB_FALLBACK_HAIRCUT: float = 0.92
 
 STRATEGY_HISTORICAL_EXPECTANCY: Dict[str, float] = {
     "trend_following":          0.0169 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.4365% -> 1.44%

@@ -209,22 +209,11 @@ export default function StockCard({
           <span className="font-mono text-xl font-bold text-white tracking-tight">
             ${price}
           </span>
-          <div className="flex items-center gap-1 mt-0.5" title="Reference price when this recommendation was generated">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Entry Ref</span>
-            <span className="font-mono text-xs font-semibold text-slate-300">${entryPrice}</span>
-          </div>
         </div>
       </div>
 
-      {/* Main information: Entry & Current, Targets, Stop & Active */}
+      {/* Main information: Targets, Risk & Time */}
       <div className="mt-3.5 pt-3 border-t border-slate-800/60 flex flex-col gap-1.5 text-xs">
-        <div className="flex items-baseline justify-between text-slate-300">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Price Location</span>
-          <span className="font-mono text-[11px] text-slate-300">
-            Entry <span className="font-semibold text-slate-200">${entryPrice}</span> <span className="text-slate-600">·</span> Current <span className="font-semibold text-white">${price}</span>
-          </span>
-        </div>
-
         <div className="flex items-baseline justify-between text-slate-300">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Targets</span>
           <span className="font-mono font-medium text-emerald-400">

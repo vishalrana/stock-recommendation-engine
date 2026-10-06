@@ -84,8 +84,13 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
 
   // Add historical outcomes first
   for (const h of (closedHistory || [])) {
-    const key = `${h.scan_date}_${h.ticker?.toUpperCase()}`;
+    const key = h.signal_id
+      ? `sig_${h.signal_id}`
+      : (h.id ? `hist_${h.id}` : `${h.scan_date}_${h.ticker?.toUpperCase()}_${h.strategy || ''}`);
     seenKeys.add(key);
+    if (h.signal_id) {
+      seenKeys.add(`sig_${h.signal_id}`);
+    }
 
     const m = metricsMap.get(h.ticker?.replace(' (P)', '').toUpperCase()) || {};
     const outcome = h.outcome || 'closed';
@@ -122,9 +127,9 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
 
   // Add scan rejections and lifecycle transitions from signals
   for (const s of (scanLogSignals || [])) {
-    const key = `${s.scan_date}_${s.ticker?.toUpperCase()}`;
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
+    const sigKey = s.id ? `sig_${s.id}` : `${s.scan_date}_${s.ticker?.toUpperCase()}_${s.strategy || ''}`;
+    if (seenKeys.has(sigKey)) continue;
+    seenKeys.add(sigKey);
 
     const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
     combined.push({

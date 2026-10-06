@@ -1216,21 +1216,13 @@ def run_scan(
                 sector=sig.get("sector") or sig.get("industry"),
             )
 
-            # Targets & Stop Loss are indicative suggestions (NOT execution levels or rejection gates)
+            # If target calculation is invalid (e.g. invalid setup or mathematical impossibility), reject setup safely
             if not calc_res.is_valid:
-                logger.warning(f"[INDICATIVE TARGETS] Fallback targets applied for {ticker} ({strategy_name}): {calc_res.rejection_reason}")
-                strat_k = normalize_strategy_key(strategy_name)
-                stop_cfg = STRATEGY_STOP_CONFIG.get(strat_k, {})
-                s_floor_pct = float(stop_cfg.get("stop_floor", 0.04))
-                if stop_loss >= entry_price:
-                    stop_loss = round(entry_price * (1.0 - s_floor_pct), 2)
-                    sig["stop_loss"] = stop_loss
-                fallback_risk = max(entry_price * s_floor_pct, entry_price - stop_loss)
-                calc_res.target_1 = round(entry_price * 1.05, 2)
-                calc_res.target_1_pct = 5.0
-                calc_res.scale_out_weights = "100/0/0"
-                calc_res.weighted_scaleout_rr = round((calc_res.target_1 - entry_price) / fallback_risk, 2) if fallback_risk > 0 else 0.0
-                calc_res.weighted_rr_honest = calc_res.weighted_scaleout_rr
+                logger.warning(f"[TARGET CALCULATION INVALID] Rejecting candidate {ticker} ({strategy_name}): {calc_res.rejection_reason}")
+                sig["status"] = "rejected"
+                sig["rejection_reason"] = f"Target calculation invalid: {calc_res.rejection_reason}"
+                rejected_signals_to_insert.append(sig)
+                continue
 
             sig["target_1"] = calc_res.target_1
             sig["target_2"] = calc_res.target_2
@@ -1726,12 +1718,24 @@ def main():
         help="Maximum external earnings provider network requests allowed (default 0 for normal market scan; unbounded provider fetching is prohibited)",
     )
     args = parser.parse_args()
+    sanitized_tickers = None
+    if getattr(args, "tickers", None):
+        import re
+        raw_list = args.tickers
+        flat_tickers = []
+        for item in raw_list:
+            for t in re.split(r"[,\s]+", str(item).strip()):
+                t_clean = t.strip().upper()
+                if t_clean and re.match(r"^[A-Z0-9.\-]{1,10}$", t_clean):
+                    flat_tickers.append(t_clean)
+        if flat_tickers:
+            sanitized_tickers = sorted(list(set(flat_tickers)))
 
     run_scan(
         dry_run=getattr(args, "dry_run", False),
         cache_mode=getattr(args, "cache_mode", "auto"),
         force_refresh=getattr(args, "force_refresh", False),
-        target_tickers=getattr(args, "tickers", None),
+        target_tickers=sanitized_tickers,
         verbose=getattr(args, "verbose", False),
         universe_source=getattr(args, "universe", None),
         max_provider_fetches=getattr(args, "max_provider_fetches", None),

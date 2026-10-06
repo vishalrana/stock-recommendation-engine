@@ -8,6 +8,10 @@ name: Refresh Current Ideas
         required: true
         type: string
 
+concurrency:
+  group: refresh-current-ideas
+  cancel-in-progress: false
+
 jobs:
   refresh-ideas:
     name: Evaluate Current Ideas
@@ -16,12 +20,14 @@ jobs:
 
     steps:
       - name: Log Start Time
+        env:
+          INPUT_TICKERS: ${{ github.event.inputs.tickers }}
         run: |
           echo "=========================================="
           echo "  REFRESH CURRENT IDEAS — STARTED"
           echo "=========================================="
           echo "Trigger:    ${{ github.event_name }}"
-          echo "Tickers:    ${{ github.event.inputs.tickers }}"
+          echo "Tickers:    $INPUT_TICKERS"
           echo "UTC Time:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "Runner:     $(uname -a)"
           echo "=========================================="
@@ -73,11 +79,12 @@ jobs:
           GITHUB_ACTIONS: 'true'
           CACHE_MODE: incremental
           PYTHONPATH: .
+          INPUT_TICKERS: ${{ github.event.inputs.tickers }}
         run: |
-          echo "Starting targeted evaluation for current ideas: ${{ github.event.inputs.tickers }}"
+          echo "Starting targeted evaluation for current ideas: $INPUT_TICKERS"
           START_EPOCH=$(date +%s)
 
-          python jobs/generate_signals.py --tickers "${{ github.event.inputs.tickers }}"
+          python jobs/generate_signals.py --tickers "$INPUT_TICKERS"
           EXIT_CODE=$?
 
           END_EPOCH=$(date +%s)

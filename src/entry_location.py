@@ -401,6 +401,15 @@ def _evaluate_entry_location_raw(
     structure = analyze_market_structure(df)
     strat = strategy_name.lower().replace("-", "_").replace(" ", "_")
 
+    # 0. Universal Falling Knife Gate
+    # Any stock breaking down below structural support with heavy selling is a falling knife across ALL strategies
+    if structure.is_falling_knife:
+        return EntryLocationResult(
+            state="REJECT",
+            reason=f"Support breakdown / falling knife below ${structure.support_level:.2f}. Await stabilization.",
+            structure=structure,
+        )
+
     # 1. Universal Over-extension Gate
     # A stock that is wildly extended (> 3.5 ATR above EMA20 or > 28% above DMA50) suffers asymmetric downside
     if structure.extension_ema20_atr > 3.5 or structure.extension_dma50_pct > 28.0:

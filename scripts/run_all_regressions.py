@@ -38,6 +38,7 @@ TEST_SUITES = [
     "scripts/test_quant_hardening_final.py",
     "scripts/test_earnings_provider_isolation.py",
     "scripts/test_target_before_stop_reach.py",
+    "scripts/test_production_canonical_hardening.py",
 ]
 
 

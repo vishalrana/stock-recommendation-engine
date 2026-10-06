@@ -82,10 +82,16 @@ class TargetCalculationResult:
         return asdict(self)
 
 
-# Global in-memory cache for reach distributions: (ticker, holding_days) -> np.ndarray
-_REACH_DIST_CACHE: Dict[Tuple[str, int], np.ndarray] = {}
-# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days) -> float
-_TARGET_STOP_REACH_CACHE: Dict[Tuple[str, float, float, int], float] = {}
+# Global in-memory cache for reach distributions: (ticker, holding_days) or (ticker, holding_days, as_of_date) -> np.ndarray
+_REACH_DIST_CACHE: Dict[Any, np.ndarray] = {}
+# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days) or with as_of -> float
+_TARGET_STOP_REACH_CACHE: Dict[Any, float] = {}
+
+
+def reset_reach_prob_cache() -> None:
+    """Clear all in-memory reach probability caches."""
+    _REACH_DIST_CACHE.clear()
+    _TARGET_STOP_REACH_CACHE.clear()
 
 
 def get_reach_prob_distribution(
@@ -100,9 +106,14 @@ def get_reach_prob_distribution(
         max_gain_d = (max(Close[d : d + H + 1]) - Close[d]) / Close[d]
     """
     t_up = ticker.upper()
-    cache_key = (t_up, int(holding_days))
+    h = int(holding_days)
+    as_of = str(price_df.index[-1])[:10] if (price_df is not None and len(price_df) > 0) else ""
+    cache_key = (t_up, h, as_of)
+    cache_key_compat = (t_up, h)
     if cache_key in _REACH_DIST_CACHE:
         return _REACH_DIST_CACHE[cache_key]
+    if not as_of and cache_key_compat in _REACH_DIST_CACHE:
+        return _REACH_DIST_CACHE[cache_key_compat]
 
     cache_dir = os.path.join("data", "cache", "reach_dists")
     cache_file = os.path.join(cache_dir, f"{t_up}.parquet")
@@ -116,6 +127,7 @@ def get_reach_prob_distribution(
                 vals = cached_df[col_name].dropna().to_numpy(dtype=float)
                 if len(vals) > 0:
                     _REACH_DIST_CACHE[cache_key] = vals
+                    _REACH_DIST_CACHE[cache_key_compat] = vals
                     return vals
         except Exception as e:
             logger.debug("Failed reading reach_dist cache for %s: %s", ticker, e)
@@ -177,6 +189,7 @@ def get_reach_prob_distribution(
         logger.debug("Failed saving reach_dist cache for %s: %s", ticker, e)
 
     _REACH_DIST_CACHE[cache_key] = arr
+    _REACH_DIST_CACHE[cache_key_compat] = arr
     return arr
 
 
@@ -211,9 +224,13 @@ def get_reach_prob_target_before_stop(
     if t_pct <= 0 or s_pct <= 0 or h <= 0:
         return 0.0
 
-    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h)
+    as_of = str(price_df.index[-1])[:10] if (price_df is not None and len(price_df) > 0) else ""
+    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h, as_of)
+    cache_key_compat = (t_up, round(t_pct, 4), round(s_pct, 4), h)
     if cache_key in _TARGET_STOP_REACH_CACHE:
         return _TARGET_STOP_REACH_CACHE[cache_key]
+    if not as_of and cache_key_compat in _TARGET_STOP_REACH_CACHE:
+        return _TARGET_STOP_REACH_CACHE[cache_key_compat]
 
     # Fetch price history if needed
     if price_df is None or price_df.empty:
@@ -303,6 +320,7 @@ def get_reach_prob_target_before_stop(
 
     prob = float(success_count / valid_windows)
     _TARGET_STOP_REACH_CACHE[cache_key] = prob
+    _TARGET_STOP_REACH_CACHE[cache_key_compat] = prob
     return prob
 
 

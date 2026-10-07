@@ -94,42 +94,54 @@ def build_hardened_metrics(
     completed_trades = wins + losses
     total_signals = int(raw_m.get("total_signals") or raw_m.get("total_trades") or completed_trades)
 
-    # Determine raw win rate
+    # Determine prior and provenance
     if strategy_win_rate is not None:
-        raw_win_rate = float(strategy_win_rate)
-        provenance = "strategy_prior" if completed_trades == 0 else "strategy_specific"
-        metric_source = "strategy_backtest"
+        eff_prior = float(strategy_win_rate)
+        if completed_trades > 0:
+            provenance = "ticker_observed"
+            metric_source = "ticker_observed_with_strategy_prior"
+        else:
+            provenance = "strategy_prior"
+            metric_source = "strategy_backtest"
     elif past_win_rate is not None:
-        raw_win_rate = float(past_win_rate)
-        provenance = "candidate_prior" if completed_trades == 0 else "candidate_provided"
-        metric_source = "candidate_payload"
+        eff_prior = float(past_win_rate)
+        if completed_trades > 0:
+            provenance = "ticker_observed"
+            metric_source = "ticker_observed_with_candidate_prior"
+        else:
+            provenance = "candidate_provided"
+            metric_source = "candidate_payload"
     elif completed_trades > 0:
-        raw_win_rate = round((wins / completed_trades) * 100.0, 2)
-        provenance = "ticker_historical"
-        metric_source = "historical_trades"
+        eff_prior = DEFAULT_PRIOR_WIN_RATE
+        provenance = "ticker_observed"
+        metric_source = "ticker_historical_trades"
     elif "win_rate" in raw_m and raw_m["win_rate"] is not None and float(raw_m["win_rate"]) > 0:
-        raw_win_rate = float(raw_m["win_rate"])
-        provenance = "generic_ticker_prior"
+        eff_prior = float(raw_m["win_rate"])
+        provenance = "ticker_prior"
         metric_source = "ticker_metrics"
     else:
-        raw_win_rate = DEFAULT_PRIOR_WIN_RATE
+        eff_prior = DEFAULT_PRIOR_WIN_RATE
         provenance = "unavailable"
         metric_source = "unseeded_prior"
 
-    # Compute Bayesian shrunk win rate
+    # Compute raw win rate (empirical observations only)
+    if completed_trades > 0:
+        raw_win_rate = round((wins / completed_trades) * 100.0, 2)
+    else:
+        raw_win_rate = round(eff_prior, 2)
+
+    # Compute Bayesian shrunk win rate (posterior)
     if completed_trades > 0:
         shrunk_wr = calculate_shrunk_win_rate(
             wins=wins,
             losses=losses,
             alpha=DEFAULT_SHRINKAGE_ALPHA,
-            prior_win_rate=DEFAULT_PRIOR_WIN_RATE,
+            prior_win_rate=eff_prior,
         )
-        if provenance == "unavailable":
-            provenance = "shrunk"
     else:
         # Zero trade observations: sample_size=0, no synthetic pseudo-counts;
-        # shrunk win rate reflects the authoritative prior directly.
-        shrunk_wr = round(float(raw_win_rate), 2)
+        # posterior equals authoritative prior directly.
+        shrunk_wr = round(float(eff_prior), 2)
 
     # Raw vs shrunk expectancy
     raw_exp = raw_m.get("expectancy_pct")
@@ -154,6 +166,12 @@ def build_hardened_metrics(
         "expectancy_pct": shrunk_exp,  # Consumed downstream
         "wins": wins,
         "losses": losses,
+        "sample_size": completed_trades,
+        "prior": round(float(eff_prior), 2),
+        "posterior": round(float(shrunk_wr), 2),
+        "confidence": confidence,
+        "source": metric_source,
+        "provenance": provenance,
         "completed_trades": completed_trades,
         "total_trades": total_signals,
         "metric_source": metric_source,

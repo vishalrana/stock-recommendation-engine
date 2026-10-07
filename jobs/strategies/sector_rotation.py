@@ -50,6 +50,14 @@ class SectorRotationStrategy(StrategyInterface):
         volume_avg = df['VOLUME'].rolling(20).mean().iloc[-1]
         volume_today = df['VOLUME'].iloc[-1]
 
+        if 'EMA_20' in df.columns and not pd.isna(df['EMA_20'].iloc[-1]):
+            ema_20 = float(df['EMA_20'].iloc[-1])
+        elif len(df) >= 20 and 'CLOSE' in df.columns:
+            ema_20 = float(df['CLOSE'].ewm(span=20, adjust=False).mean().iloc[-1])
+        else:
+            logger.warning(f"[GATE SECTOR] {ticker}: Missing EMA_20. Rejecting candidate.")
+            return None
+
         # Extract indicators already pre-calculated by calculate_indicators
         current_rsi = df['RSI_14'].iloc[-1]
         adx_value = df['ADX_14'].iloc[-1]
@@ -256,7 +264,8 @@ class SectorRotationStrategy(StrategyInterface):
             'adx_value': round(adx_value, 1),
             'volume_ratio': round(volume_ratio, 2),
             'macd_histogram': round(macd_histogram, 4),
-            'ema20': round(float(df['EMA_20'].iloc[-1]), 2) if 'EMA_20' in df.columns else round(sma50, 2),
+            'ema20': round(ema_20, 2),
+            'dma_50': round(sma50, 2),
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Sector Rotation',

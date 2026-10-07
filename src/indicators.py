@@ -7,16 +7,24 @@ Single Responsibility: Technical indicator calculations only.
 """
 
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 import pandas as pd
 import numpy as np
 
-from config import (
-    SHORT_MA_PERIOD,
-    LONG_MA_PERIOD,
-    RSI_PERIOD,
-    VOLUME_MA_PERIOD,
-)
+try:
+    from src.config import (
+        SHORT_MA_PERIOD,
+        LONG_MA_PERIOD,
+        RSI_PERIOD,
+        VOLUME_MA_PERIOD,
+    )
+except ImportError:
+    from config import (
+        SHORT_MA_PERIOD,
+        LONG_MA_PERIOD,
+        RSI_PERIOD,
+        VOLUME_MA_PERIOD,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -110,39 +118,96 @@ def calculate_volume_ma(volume: pd.Series, period: int = VOLUME_MA_PERIOD) -> pd
 
 def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     """
-    Wilder's ADX. Returns a Series of ADX values (0–100).
-    Values >= 20 indicate a trending market; >= 25 is a strong trend.
+    Wilder's canonical Average Directional Index (ADX).
+    
+    Formula:
+        TR_t = max(High_t - Low_t, |High_t - Close_{t-1}|, |Low_t - Close_{t-1}|)
+        +DM_t = up_move if (up_move > down_move and up_move > 0) else 0.0
+        -DM_t = down_move if (down_move > up_move and down_move > 0) else 0.0
+        
+        Wilder's smoothing over period N:
+        First smoothed TR, +DM, -DM at index N is the sum of changes over bars 1..N.
+        Subsequent: Smooth_t = Smooth_{t-1} - (Smooth_{t-1} / N) + Change_t.
+        
+        +DI_t = 100 * (+DM_smooth / TR_smooth)
+        -DI_t = 100 * (-DM_smooth / TR_smooth)
+        DX_t = 100 * (|+DI - -DI| / (+DI + -DI))
+        
+        Initial ADX at index 2*N - 1 is the simple mean of the first N values of DX (indices N..2*N-1).
+        Subsequent: ADX_t = (ADX_{t-1} * (N - 1) + DX_t) / N.
+        
+        Indices prior to 2*N - 1 are NaN.
     """
-    tr = pd.concat([
-        high - low,
-        (high - close.shift(1)).abs(),
-        (low - close.shift(1)).abs()
-    ], axis=1).max(axis=1)
+    n = len(close)
+    if n < 2 * period:
+        return pd.Series(np.nan, index=close.index, dtype=float)
 
-    dm_plus = high.diff()
-    dm_minus = -low.diff()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0.0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0.0)
+    highs = high.to_numpy(dtype=float)
+    lows = low.to_numpy(dtype=float)
+    closes = close.to_numpy(dtype=float)
 
-    def wilder_smooth(series, n):
-        result = series.copy().astype(float)
-        result.iloc[:n] = series.iloc[:n].sum()
-        for i in range(n, len(series)):
-            result.iloc[i] = result.iloc[i - 1] - (result.iloc[i - 1] / n) + series.iloc[i]
-        return result
+    tr = np.zeros(n, dtype=float)
+    dm_plus = np.zeros(n, dtype=float)
+    dm_minus = np.zeros(n, dtype=float)
 
-    tr_smooth = wilder_smooth(tr, period)
-    dm_plus_smooth = wilder_smooth(dm_plus, period)
-    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    for t in range(1, n):
+        tr[t] = max(
+            highs[t] - lows[t],
+            abs(highs[t] - closes[t - 1]),
+            abs(lows[t] - closes[t - 1]),
+        )
+        up_move = highs[t] - highs[t - 1]
+        down_move = lows[t - 1] - lows[t]
 
-    # Guard: avoid division by zero when tr_smooth or (DI+ + DI-) is zero
-    tr_smooth_safe = tr_smooth.replace(0, np.nan)
-    di_plus = 100 * dm_plus_smooth / tr_smooth_safe
-    di_minus = 100 * dm_minus_smooth / tr_smooth_safe
-    di_sum = (di_plus + di_minus).replace(0, np.nan)
-    dx = (100 * (di_plus - di_minus).abs() / di_sum).fillna(0)
-    adx = wilder_smooth(dx, period) / period
-    return adx
+        if up_move > down_move and up_move > 0.0:
+            dm_plus[t] = up_move
+        else:
+            dm_plus[t] = 0.0
+
+        if down_move > up_move and down_move > 0.0:
+            dm_minus[t] = down_move
+        else:
+            dm_minus[t] = 0.0
+
+    tr_smooth = np.full(n, np.nan, dtype=float)
+    dm_plus_smooth = np.full(n, np.nan, dtype=float)
+    dm_minus_smooth = np.full(n, np.nan, dtype=float)
+
+    # First N changes are at indices 1 .. period
+    tr_smooth[period] = np.sum(tr[1:period + 1])
+    dm_plus_smooth[period] = np.sum(dm_plus[1:period + 1])
+    dm_minus_smooth[period] = np.sum(dm_minus[1:period + 1])
+
+    for t in range(period + 1, n):
+        tr_smooth[t] = tr_smooth[t - 1] - (tr_smooth[t - 1] / period) + tr[t]
+        dm_plus_smooth[t] = dm_plus_smooth[t - 1] - (dm_plus_smooth[t - 1] / period) + dm_plus[t]
+        dm_minus_smooth[t] = dm_minus_smooth[t - 1] - (dm_minus_smooth[t - 1] / period) + dm_minus[t]
+
+    dx = np.full(n, np.nan, dtype=float)
+    for t in range(period, n):
+        trs = tr_smooth[t]
+        if trs == 0.0 or np.isnan(trs):
+            di_p = 0.0
+            di_m = 0.0
+        else:
+            di_p = 100.0 * (dm_plus_smooth[t] / trs)
+            di_m = 100.0 * (dm_minus_smooth[t] / trs)
+
+        di_sum = di_p + di_m
+        if di_sum == 0.0:
+            dx[t] = 0.0
+        else:
+            dx[t] = 100.0 * (abs(di_p - di_m) / di_sum)
+
+    adx = np.full(n, np.nan, dtype=float)
+    seed_adx_idx = 2 * period - 1
+    adx[seed_adx_idx] = np.mean(dx[period:seed_adx_idx + 1])
+
+    for t in range(seed_adx_idx + 1, n):
+        adx[t] = (adx[t - 1] * (period - 1) + dx[t]) / period
+
+    return pd.Series(adx, index=close.index, dtype=float)
+
 
 
 def compute_macd(close: pd.Series,
@@ -194,9 +259,15 @@ def check_rsi_pullback_recovery(rsi_series: pd.Series,
     }
 
 
-def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+def calculate_atr(
+    high: Union[pd.Series, pd.DataFrame],
+    low: Optional[pd.Series] = None,
+    close: Optional[pd.Series] = None,
+    period: int = 14
+) -> pd.Series:
     """
     Calculate Average True Range (ATR) using canonical Wilder's RMA smoothing.
+    Accepts either separate (high, low, close) Series or a single OHLC DataFrame.
     
     Formula:
         TR_0 = High_0 - Low_0
@@ -205,8 +276,16 @@ def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int
         Subsequent: ATR_t = ((period - 1) * ATR_{t-1} + TR_t) / period
         First (period - 1) values are NaN.
     """
-    if len(close) < period:
-        return pd.Series(np.nan, index=close.index, dtype=float)
+    if isinstance(high, pd.DataFrame):
+        df = high
+        h_col = "HIGH" if "HIGH" in df.columns else "High" if "High" in df.columns else "high"
+        l_col = "LOW" if "LOW" in df.columns else "Low" if "Low" in df.columns else "low"
+        c_col = "CLOSE" if "CLOSE" in df.columns else "Close" if "Close" in df.columns else "close"
+        actual_period = low if isinstance(low, int) else period
+        return calculate_atr(df[h_col], df[l_col], df[c_col], period=actual_period)
+
+    if close is None or low is None or len(close) < period:
+        return pd.Series(np.nan, index=close.index if close is not None else None, dtype=float)
 
     tr = pd.concat([
         high - low,

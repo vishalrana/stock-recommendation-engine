@@ -34,6 +34,14 @@ class TrendFollowingStrategy(StrategyInterface):
         volume_avg = df['VOLUME'].rolling(20).mean().iloc[-1]
         volume_today = df['VOLUME'].iloc[-1]
 
+        if 'EMA_20' in df.columns and not pd.isna(df['EMA_20'].iloc[-1]):
+            ema_20 = float(df['EMA_20'].iloc[-1])
+        elif len(df) >= 20 and 'CLOSE' in df.columns:
+            ema_20 = float(df['CLOSE'].ewm(span=20, adjust=False).mean().iloc[-1])
+        else:
+            logger.warning(f"[GATE TREND] {ticker}: Missing EMA_20. Rejecting candidate.")
+            return None
+
         current_rsi = df['RSI_14'].iloc[-1]
         adx_value = df['ADX_14'].iloc[-1]
         macd_histogram = df['MACD_HIST'].iloc[-1]
@@ -65,12 +73,19 @@ class TrendFollowingStrategy(StrategyInterface):
         entry_price = price
         
         # ATR-Based Stop Loss (Task 6.3)
-        atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else 0.0
-        atr_mult = STRATEGY_STOP_CONFIG.get("trend_following", {}).get("atr_multiplier", 2.5)
-        if atr > 0:
-            stop_loss = min(low_10, entry_price - atr_mult * atr)
+        if 'ATR_14' in df.columns and not pd.isna(df['ATR_14'].iloc[-1]) and float(df['ATR_14'].iloc[-1]) > 0:
+            atr = float(df['ATR_14'].iloc[-1])
+        elif len(df) >= 15 and all(c in df.columns for c in ['HIGH', 'LOW', 'CLOSE']):
+            from src.indicators import calculate_atr
+            computed_atr = calculate_atr(df, 14)
+            atr = float(computed_atr.iloc[-1]) if not pd.isna(computed_atr.iloc[-1]) and float(computed_atr.iloc[-1]) > 0 else None
+            if atr is None:
+                return None
         else:
-            stop_loss = min(low_10, sma200 * 0.98)
+            logger.warning(f"[GATE TREND] {ticker}: Missing or non-positive ATR_14. Rejecting candidate.")
+            return None
+        atr_mult = STRATEGY_STOP_CONFIG.get("trend_following", {}).get("atr_multiplier", 2.5)
+        stop_loss = min(low_10, entry_price - atr_mult * atr)
             
         risk = entry_price - stop_loss
         risk_pct = (risk / entry_price) * 100 if entry_price > 0 else 0
@@ -236,7 +251,8 @@ class TrendFollowingStrategy(StrategyInterface):
             'adx_value': round(adx_value, 1),
             'volume_ratio': round(volume_ratio, 2),
             'macd_histogram': round(macd_histogram, 4),
-            'ema20': round(float(df['EMA_20'].iloc[-1]), 2) if 'EMA_20' in df.columns else round(sma50, 2),
+            'ema20': round(ema_20, 2),
+            'dma_50': round(sma50, 2),
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Trend Following',

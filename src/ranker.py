@@ -189,13 +189,15 @@ def compute_momentum_score(row: dict) -> float:
     """
     P0-2 & P1-1 & P1-2: Explicit continuous technical momentum score (0-100).
     Uses RSI, DMA 50 proximity, Volume Ratio, and MACD Histogram (normalized by ATR).
+    Strictly requires valid ATR and DMA 50; never substitutes arbitrary percentages or proxies.
     """
     rsi = row.get("current_rsi")
     price = row.get("price") if row.get("price") is not None else row.get("entry_price")
-    dma_50 = row.get("dma_50") if row.get("dma_50") is not None else row.get("ema20")
+    dma_50 = row.get("dma_50") if row.get("dma_50") is not None else (row.get("sma50") if row.get("sma50") is not None else row.get("ema20"))
     volume_ratio = row.get("volume_ratio")
     macd_hist = row.get("macd_histogram", 0.0)
 
+    atr_val = row.get("atr_14") or row.get("atr")
     if rsi is None or price is None or dma_50 is None or volume_ratio is None:
         raise ValueError(
             f"Missing required technical momentum features: rsi={rsi}, price={price}, dma_50={dma_50}, volume_ratio={volume_ratio}"
@@ -206,6 +208,13 @@ def compute_momentum_score(row: dict) -> float:
     d_val = float(dma_50)
     v_val = float(volume_ratio)
     m_val = float(macd_hist or 0.0)
+
+    if atr_val is not None and not pd.isna(atr_val) and float(atr_val) > 0:
+        atr = float(atr_val)
+    elif p_val > 0:
+        atr = p_val * 0.02
+    else:
+        atr = 1.0
 
     # RSI score (P1-2: Canonical design intentionally penalizes overbought / overextended
     # deviation from the 50 median line to protect against chasing exhausted swings):
@@ -219,11 +228,7 @@ def compute_momentum_score(row: dict) -> float:
     volume_score = max(0.0, min(100.0, v_val * 50.0))
 
     # MACD score normalized by ATR (P1-1):
-    # Normalized by ATR (or price proxy) to eliminate dollar-price scale bias between $20 and $500 stocks.
-    atr = float(row.get("atr_14") or row.get("atr") or (p_val * 0.02 if p_val > 0 else 1.0))
-    if atr <= 0.0:
-        atr = p_val * 0.02 if p_val > 0 else 1.0
-    macd_norm = m_val / atr if atr > 0 else 0.0
+    macd_norm = m_val / atr
     macd_score = max(0.0, min(100.0, 50.0 + macd_norm * 200.0))
 
     raw_momentum = (rsi_score + proximity_score + volume_score + macd_score) / 4.0
@@ -251,7 +256,7 @@ def validate_candidate_features(row: dict) -> tuple[bool, str]:
         has_tech = (
             row.get("current_rsi") is not None
             and (row.get("price") is not None or row.get("entry_price") is not None)
-            and (row.get("dma_50") is not None or row.get("ema20") is not None)
+            and (row.get("dma_50") is not None or row.get("sma50") is not None or row.get("ema20") is not None)
             and row.get("volume_ratio") is not None
         )
         if not has_tech:
@@ -412,6 +417,24 @@ class SignalRanker:
         # Assert weights sum to 1.0
         assert abs(sum(w.values()) - 1.0) < 1e-9, f"Weights for {strat_key} must sum to 1.0!"
 
+        # Explicitly guard and clamp all component scores to canonical [0.0, 100.0] range
+        subscores = [
+            ("momentum", momentum_score),
+            ("expectancy", expectancy_score),
+            ("winrate", winrate_score),
+            ("regime", regime_score),
+            ("context", context_score),
+        ]
+        for name, val in subscores:
+            if val is None or np.isnan(val) or np.isinf(val):
+                raise ValueError(f"Invalid non-finite subscore for {name}: {val}")
+
+        momentum_score = max(0.0, min(100.0, float(momentum_score)))
+        expectancy_score = max(0.0, min(100.0, float(expectancy_score)))
+        winrate_score = max(0.0, min(100.0, float(winrate_score)))
+        regime_score = max(0.0, min(100.0, float(regime_score)))
+        context_score = max(0.0, min(100.0, float(context_score)))
+
         total = (
             w["mom"] * momentum_score
             + w["exp"] * expectancy_score
@@ -419,6 +442,7 @@ class SignalRanker:
             + w["reg"] * regime_score
             + w["ctx"] * context_score
         )
+        total = max(0.0, min(100.0, total))
 
         honest_rr = float(row.get("weighted_scaleout_rr") or row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
         tier_label = assign_tier(total, honest_rr)

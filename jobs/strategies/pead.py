@@ -202,10 +202,29 @@ class PEADStrategy(StrategyInterface):
         from src.utils.metrics_pipeline import build_hardened_metrics
         from src.ranker import SignalRanker, assign_tier, compute_expectancy_score
 
+        if 'ATR_14' in df.columns and not pd.isna(df['ATR_14'].iloc[-1]) and float(df['ATR_14'].iloc[-1]) > 0:
+            atr_14 = float(df['ATR_14'].iloc[-1])
+        elif len(df) >= 15 and all(c in df.columns for c in ['HIGH', 'LOW', 'CLOSE']):
+            from src.indicators import calculate_atr
+            computed_atr = calculate_atr(df, 14)
+            atr_14 = float(computed_atr.iloc[-1]) if not pd.isna(computed_atr.iloc[-1]) and float(computed_atr.iloc[-1]) > 0 else None
+            if atr_14 is None:
+                return None
+        else:
+            logger.warning(f"[GATE PEAD] {ticker}: Missing or non-positive ATR_14. Rejecting candidate.")
+            return None
+
+        if 'EMA_20' in df.columns and not pd.isna(df['EMA_20'].iloc[-1]):
+            ema_20 = float(df['EMA_20'].iloc[-1])
+        elif len(df) >= 20 and 'CLOSE' in df.columns:
+            ema_20 = float(df['CLOSE'].ewm(span=20, adjust=False).mean().iloc[-1])
+        else:
+            logger.warning(f"[GATE PEAD] {ticker}: Missing EMA_20. Rejecting candidate.")
+            return None
+
         current_rsi = float(df['RSI_14'].iloc[-1]) if 'RSI_14' in df.columns else 50.0
         volume_ratio = float(earnings_volume / volume_avg) if volume_avg > 0 else 1.0
         macd_histogram = float(df['MACD_HIST'].iloc[-1]) if 'MACD_HIST' in df.columns else 0.0
-        atr_14 = float(df["ATR_14"].iloc[-1]) if "ATR_14" in df.columns else (price * 0.02 if price > 0 else 1.0)
 
         # 1. Canonical Bayesian Historical Metrics Pipeline
         p_wr = metrics.get("past_win_rate") or metrics.get("win_rate") or metrics.get("shrunk_win_rate") if metrics else None
@@ -347,7 +366,7 @@ class PEADStrategy(StrategyInterface):
             'macd_histogram': round(df['MACD_HIST'].iloc[-1], 4),
             'atr_14': round(atr_14, 4),
             'dma_50': round(sma50, 2),
-            'ema20': round(float(df['EMA_20'].iloc[-1]), 2) if 'EMA_20' in df.columns else round(sma50, 2),
+            'ema20': round(ema_20, 2),
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Post-Earnings Drift',

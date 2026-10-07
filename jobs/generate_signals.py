@@ -842,6 +842,15 @@ def run_scan(
                         evaluated_dfs[ticker] = None
                         continue
 
+                    # Canonical OHLCV Mathematical & Financial Invariant Validation
+                    from src.data_validation import validate_ohlcv
+                    is_valid_ohlcv, ohlcv_reason, _ = validate_ohlcv(raw, min_lookback=60, check_open=False)
+                    if not is_valid_ohlcv:
+                        logger.warning("%s: OHLCV invariant validation failed: %s. Skipping.", ticker, ohlcv_reason)
+                        gate_rejections["failed_liquidity_gate"] += 1
+                        evaluated_dfs[ticker] = None
+                        continue
+
                     # Point-in-time liquidity & data integrity filter for common equities
                     if strategy.name != 'Sector Rotation':
                         is_liquid, liq_reason, _ = evaluate_point_in_time_liquidity(

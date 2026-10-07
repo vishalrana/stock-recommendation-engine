@@ -404,6 +404,21 @@ def calculate_targets(
             target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
         )
 
+    if stop <= 0:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Invalid stop loss: stop ${stop:.2f} must be positive",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
+
     if stop >= entry:
         repaired_stop = round(entry * (1.0 - stop_floor_pct), 2)
         logger.warning(
@@ -458,10 +473,21 @@ def calculate_targets(
         cand_t3 = max(entry * (1.0 + cfg["fixed_t3"]), t3_atr)
 
         # Ensure strict target ordering: entry < cand_t1 < cand_t2 < cand_t3
+        # In accordance with quantitative principles: do not manufacture arbitrary +1% targets; reject if non-monotonic
         if not (entry < cand_t1 < cand_t2 < cand_t3):
-            cand_t1 = max(cand_t1, entry * 1.01)
-            cand_t2 = max(cand_t2, cand_t1 * 1.01)
-            cand_t3 = max(cand_t3, cand_t2 * 1.01)
+            return TargetCalculationResult(
+                target_1=None, target_2=None, target_3=None,
+                target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+                target_1_pct=None, target_2_pct=None, target_3_pct=None,
+                reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+                scale_out_weights="0/0/0",
+                weighted_scaleout_rr=0.0,
+                weighted_rr_honest=0.0,
+                is_valid=False,
+                rejection_reason=f"Invalid target model ordering: entry={entry:.2f}, t1={cand_t1:.2f}, t2={cand_t2:.2f}, t3={cand_t3:.2f}",
+                reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+                target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+            )
 
     t1_ret_dec = (cand_t1 - entry) / entry
     t2_ret_dec = (cand_t2 - entry) / entry

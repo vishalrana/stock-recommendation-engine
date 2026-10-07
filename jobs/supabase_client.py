@@ -244,22 +244,27 @@ def get_latest_bar(ticker):
             h = float(df[high_col].iloc[-1]) if high_col in df.columns else c
             l = float(df[low_col].iloc[-1]) if low_col in df.columns else c
             
-            atr = c * 0.02
+            atr = None
             if len(df) >= 14 and high_col in df.columns and low_col in df.columns:
-                tr = (df[high_col] - df[low_col]).tail(14).mean()
-                if tr > 0:
-                    atr = float(tr)
+                from src.indicators import calculate_atr
+                atr_series = calculate_atr(df[high_col], df[low_col], df[close_col], 14)
+                if not atr_series.empty and not pd.isna(atr_series.iloc[-1]):
+                    atr = float(atr_series.iloc[-1])
             return {"close": c, "high": h, "low": l, "atr": atr}
 
         import yfinance as yf
         ticker_obj = yf.Ticker(ticker)
-        history = ticker_obj.history(period="14d")
+        history = ticker_obj.history(period="30d")
         if not history.empty:
             c = float(history['Close'].iloc[-1])
             h = float(history['High'].iloc[-1])
             l = float(history['Low'].iloc[-1])
-            tr = (history['High'] - history['Low']).mean()
-            atr = float(tr) if tr > 0 else c * 0.02
+            atr = None
+            if len(history) >= 14:
+                from src.indicators import calculate_atr
+                atr_series = calculate_atr(history['High'], history['Low'], history['Close'], 14)
+                if not atr_series.empty and not pd.isna(atr_series.iloc[-1]):
+                    atr = float(atr_series.iloc[-1])
             return {"close": c, "high": h, "low": l, "atr": atr}
     except Exception as e:
         print(f"Error fetching latest bar for {ticker}: {e}")

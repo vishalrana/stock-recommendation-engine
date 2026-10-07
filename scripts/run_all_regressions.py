@@ -40,6 +40,9 @@ TEST_SUITES = [
     "scripts/test_target_before_stop_reach.py",
     "scripts/test_production_canonical_hardening.py",
     "scripts/test_canonical_quant_golden.py",
+    "tests/quant_reference/test_quant_reference_suite.py",
+    "tests/quant_reference/test_property_invariants.py",
+    "tests/test_end_to_end_pipeline.py",
 ]
 
 

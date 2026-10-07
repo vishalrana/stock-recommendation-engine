@@ -28,7 +28,7 @@ SAME_DAY_AMBIGUITY_POLICY: str = "STOP_FIRST"
 DEFAULT_SCALE_OUT_WEIGHTS = {
     "all_three": {"t1": 0.50, "t2": 0.30, "t3": 0.20},
     "t1_t2_only": {"t1": 0.60, "t2": 0.40, "t3": 0.0},
-    "t1_only": {"t1": 1.00, "t2": 0.0, "t3": 0.0},
+    "t1_only": {"t1": 0.70, "t2": 0.0, "t3": 0.0},
 }
 
 
@@ -39,14 +39,18 @@ def get_effective_scale_out_weights(
 ) -> Tuple[float, float, float]:
     """
     Determine normalized scale-out weights based on available target levels.
+    Canonical mapping:
+    - All 3 targets: 50% T1, 30% T2, 20% T3
+    - T1 and T2: 60% T1, 40% T2
+    - T1 only: 70% T1, 30% runner to breakeven
     """
     if target_1 and target_2 and target_3:
         return 0.50, 0.30, 0.20
     elif target_1 and target_2:
         return 0.60, 0.40, 0.0
     elif target_1:
-        return 1.00, 0.0, 0.0
-    return 1.00, 0.0, 0.0
+        return 0.70, 0.0, 0.0
+    return 0.70, 0.0, 0.0
 
 
 def calculate_static_scale_out_return(

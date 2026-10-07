@@ -198,9 +198,17 @@ def compute_momentum_score(row: dict) -> float:
     macd_hist = row.get("macd_histogram", 0.0)
 
     atr_val = row.get("atr_14") or row.get("atr")
-    if rsi is None or price is None or dma_50 is None or volume_ratio is None:
+    if (
+        rsi is None
+        or price is None
+        or dma_50 is None
+        or volume_ratio is None
+        or atr_val is None
+        or pd.isna(atr_val)
+        or float(atr_val) <= 0
+    ):
         raise ValueError(
-            f"Missing required technical momentum features: rsi={rsi}, price={price}, dma_50={dma_50}, volume_ratio={volume_ratio}"
+            f"Missing or invalid required technical momentum features: rsi={rsi}, price={price}, dma_50={dma_50}, volume_ratio={volume_ratio}, atr={atr_val}"
         )
 
     rsi_val = float(rsi)
@@ -208,13 +216,7 @@ def compute_momentum_score(row: dict) -> float:
     d_val = float(dma_50)
     v_val = float(volume_ratio)
     m_val = float(macd_hist or 0.0)
-
-    if atr_val is not None and not pd.isna(atr_val) and float(atr_val) > 0:
-        atr = float(atr_val)
-    elif p_val > 0:
-        atr = p_val * 0.02
-    else:
-        atr = 1.0
+    atr = float(atr_val)
 
     # RSI score (P1-2: Canonical design intentionally penalizes overbought / overextended
     # deviation from the 50 median line to protect against chasing exhausted swings):
@@ -253,14 +255,17 @@ def validate_candidate_features(row: dict) -> tuple[bool, str]:
 
     # Momentum check: must either have momentum_score or technical inputs to compute it
     if row.get("momentum_score") is None:
+        atr_raw = row.get("atr_14") if row.get("atr_14") is not None else row.get("atr")
+        atr_ok = atr_raw is not None and not pd.isna(atr_raw) and float(atr_raw) > 0
         has_tech = (
             row.get("current_rsi") is not None
             and (row.get("price") is not None or row.get("entry_price") is not None)
-            and (row.get("dma_50") is not None or row.get("sma50") is not None or row.get("ema20") is not None)
+            and (row.get("dma_50") is not None or row.get("sma50") is not None)
             and row.get("volume_ratio") is not None
+            and atr_ok
         )
         if not has_tech:
-            return False, "Missing momentum_score and required technical momentum features"
+            return False, "Missing momentum_score and required technical momentum features (rsi, price, dma_50, volume_ratio, atr_14)"
 
     # Win rate check: must have winrate_score or win_rate or past_win_rate
     if row.get("winrate_score") is None and row.get("win_rate") is None and row.get("past_win_rate") is None:

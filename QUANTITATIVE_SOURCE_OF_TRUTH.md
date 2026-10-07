@@ -12,7 +12,15 @@
 This document defines the single authoritative source of truth for all quantitative calculations, indicators, metrics, risk definitions, lifecycle models, and scoring mechanics across the stock recommendation engine.
 
 ### Core Product Boundary
-The engine produces **analytical stock ideas** with indicative reference levels, historical statistics, and risk-to-reward ratios. It is **NOT** a brokerage execution system, portfolio optimizer, or automated trading bot. Under no circumstances are position sizing gates, capital constraints, Kelly sizing, or portfolio management concepts to be re-introduced.
+The engine produces **analytical stock ideas** with indicative reference levels, historical statistics, reach probabilities, and risk-to-reward ratios. It is **NOT** a brokerage execution system, portfolio manager, capital allocator, or automated trading bot. Under no circumstances are position sizing gates, capital constraints, Kelly sizing, or portfolio management concepts to be re-introduced.
+
+### Non-Negotiable Quantitative Principles
+1. **No Look-Ahead Bias:** Every calculation at bar $T$ strictly consumes information available at or before bar $T$.
+2. **Fail-Closed Missing Data:** When critical indicators (ATR, DMA50, volume ratio) are absent or non-positive, candidates fail validation. No synthetic fallbacks (e.g. `price * 0.02` or `atr = 1.0`).
+3. **Fail-Closed Financial Invariants:** Stop losses must satisfy $0 < stop < entry$. Invalid stops are never silently repaired to strategy floors; they immediately fail with `is_valid=False`.
+4. **Statistical Honesty:** Unobserved empirical metrics report `sample_size = 0` and explicit provenance (`strategy_prior` or `generic_prior`). Never fabricate synthetic pseudo-counts.
+5. **Conservative Execution Ambiguity Policy:** When both target and stop are breached within the same bar or date, the canonical policy resolves as `STOP_FIRST`.
+6. **Separation of Raw vs Modeled Backtest Expectancy:** Empirical backtest statistics are explicitly stored as `STRATEGY_HISTORICAL_EXPECTANCY_RAW`. The modeled survivorship bias adjustment ($0.85\times$) is isolated and maintained as `STRATEGY_HISTORICAL_EXPECTANCY_ADJUSTED`.
 
 ---
 
@@ -36,10 +44,10 @@ The engine produces **analytical stock ideas** with indicative reference levels,
 | **Composite Score** | [`src/ranker.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/ranker.py) (`compute_composite_score`) | Bounded $[0.0, 100.0]$ | $\sum (w_i \times \text{score}_i)$ across Momentum, Expectancy, Win Rate, Regime, and Context. Weights sum strictly to $1.0$. Output clamped to $[0.0, 100.0]$. | Recommendation Ranker, Tier Classifier |
 | **Stop Loss** | [`src/strategies/target_calculator.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/strategies/target_calculator.py) & [`src/quant_config.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/quant_config.py) | Price currency (\$) | Canonical strategy ATR multiplier with noise floor ($\ge 4\% - 6\%$) and hard risk ceiling ($7\%$). Strict invariant: $0 < stop < entry$. Invalid stop is hard-rejected. | Recommendation Output, Lifecycle Monitor |
 | **Target Hierarchy (T1, T2, T3)** | [`src/strategies/target_calculator.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/strategies/target_calculator.py) (`calculate_targets`) | Price currency (\$) | $T_k = \max(Entry + M_k \times \text{ATR}_{14}, Entry \times (1 + F_k))$. Enforces strict monotonic ordering: $Entry < T_1 < T_2 < T_3$. Non-monotonic levels are rejected. | Recommendation Output, Reach Evaluator |
-| **Reach Probability**| [`src/strategies/target_calculator.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/strategies/target_calculator.py) (`get_reach_prob`) | Probability $[0.0, 1.0]$ | Joint OHLC target-before-stop reach probability over 504 lookback days ($P = \frac{\text{successes}}{\text{valid windows}}$). Conservative same-bar STOP_FIRST policy. | Scale-Out Truning, Honest R:R |
+| **Reach Probability**| [`src/strategies/target_calculator.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/strategies/target_calculator.py) (`get_reach_prob`) | Probability $[0.0, 1.0]$ | Joint OHLC target-before-stop reach probability over 504 lookback days ($P = \frac{\text{successes}}{\text{valid windows}}$). Conservative same-bar STOP_FIRST policy. | Scale-Out Pruning, Honest R:R |
 | **Scale-Out Weights**| [`src/strategies/target_calculator.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/strategies/target_calculator.py) & [`src/quant_config.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/quant_config.py) | Categorical string | '50/30/20' (all 3 survive reach threshold), '60/40/0' (T3 pruned), '70/30/0' (T1 only survives, 30% runner to breakeven). | Weighted R:R, Analytical Sizing |
 | **Weighted Honest R:R**| [`src/strategies/target_calculator.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/src/strategies/target_calculator.py) | Ratio $\ge 0.0$ | $\frac{\sum (w_k \times (T_k - Entry))}{Entry - Stop}$. Uses scale-out weights and unmasked positive risk. | Recommendation Output, Tier Assignment |
-| **Recommendation Lifecycle** | [`jobs/generate_signals.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/jobs/generate_signals.py) (`reconcile_recommendation_lifecycle`)| Lifecycle Status | Day $D$ generation activates on $D+1$. Evaluates 'stopped' (Low $\le$ Stop), 'hit_t3' (High $\ge$ T3), 'invalidated' (no longer qualified), or 'open'. Keyed by exact `signal_id`. | Database State, Portfolio Audit |
+| **Recommendation Lifecycle** | [`jobs/generate_signals.py`](file:///c:/Users/acer/Documents/stock-recommendation-engine/jobs/generate_signals.py) (`reconcile_recommendation_lifecycle`)| Lifecycle Status | Day $D$ generation activates on $D+1$. Evaluates 'stopped' (Low $\le$ Stop with STOP_FIRST priority), 'hit_t3', 'hit_t2', 'hit_t1', 'invalidated', or 'open'. Keyed by exact `signal_id`. | Database State, Historical Outcome Tracking |
 
 ---
 
@@ -57,10 +65,12 @@ Before any calculation or strategy evaluation, data MUST satisfy these non-negot
    - Index must be strictly monotonic increasing without duplicates.
    - Zero look-ahead: As-of date $D$ includes only bars $\le D$.
 3. **Indicator Availability (No Silent Substitutes):**
-   - Missing ATR: Candidate REJECTED. Never substituted with $Price \times 2\%$.
+   - Missing or non-positive ATR: Candidate REJECTED. Never substituted with $Price \times 2\%$.
    - Missing EMA20: Candidate REJECTED. Never substituted with SMA50.
    - Missing DMA50 or DMA200: Candidate REJECTED.
    - Insufficient History ($< 60$ bars for daily indicators, $< 200$ bars for DMA200): Candidate REJECTED.
+4. **Stop-Loss Invariant:**
+   - Stop must satisfy $0 < stop < entry$. If $stop \ge entry$, candidate is hard-rejected with `is_valid=False` and `rejection_reason="Invalid stop loss: stop must satisfy 0 < stop < entry"`.
 
 ---
 
@@ -78,12 +88,20 @@ Synthetic pseudo-count trade inflation (e.g. `round(win_rate / 20)`) is strictly
 
 ---
 
-## 5. Survivorship Bias Mitigation & Limitations
+## 5. Survivorship Bias Architecture & Empirical Modeling
 
-1. **Methodology:**
-   - Historical universe statistics reflect surviving common equities from standard data feeds.
-   - Strategy historical expectancies incorporate a canonical $15\%$ haircut ($0.85\times$) to account for historical constituent attrition.
-   - Reach probabilities incorporate an $8\%$ fallback haircut ($0.92\times$) when delisted sector proxies are unavailable.
-2. **Known Limitations:**
-   - Tick-level simulation of historical survivorship cannot be fully eliminated without commercial survivorship-free point-in-time constituent databases (e.g. CRSP / Compustat).
-   - The engine transparently documents this limitation and discounts backtested expectancies accordingly.
+Historical backtests without survivorship-free databases suffer ~1-2% annualized or ~15% relative upward bias (Brown, Goetzmann, Ibbotson, Ross 1992; Elton, Gruber, Blake 1996).
+
+To preserve complete econometric honesty:
+1. **Raw Backtest Expectancy:** Sourced directly from historical simulations without modifications (`STRATEGY_HISTORICAL_EXPECTANCY_RAW`).
+2. **Modeled Survivorship Haircut:** A documented $15\%$ reduction ($0.85\times$) is applied to model survivorship effects (`STRATEGY_HISTORICAL_EXPECTANCY_ADJUSTED`).
+3. **Reach Probability Fallback Haircut:** An $8\%$ reduction ($0.92\times$) is applied when delisted constituent sector proxies are unavailable.
+4. Both quantities are explicitly accessible in configuration and auditable.
+
+---
+
+## 6. Clean-Room Reference Testing
+
+All core mathematical functions are validated against independent, clean-room reference models implemented from textbook definitions in `tests/quant_reference/`:
+- **12 Golden Datasets:** Uptrend, downtrend, flat, alternating, volatile, gap market, invalid data, realistic multi-regime, seeded pseudo-random GBM, insufficient history, sporadic NaNs, and extreme penny/mega price scales.
+- **Reference Models:** `ref_rsi`, `ref_atr`, `ref_adx`, `ref_ema`, `ref_sma`, `ref_macd`, `ref_bayesian_win_rate`, `ref_expectancy`, `ref_reach_target_before_stop`, `ref_composite_score`, `ref_target_hierarchy`.

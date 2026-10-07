@@ -151,6 +151,7 @@ class TestContextVetoes(unittest.TestCase):
             "price": 100.0,
             "dma_50": 95.0,
             "volume_ratio": 1.2,
+            "atr_14": 2.0,
             "macd_histogram": 0.5,
             "winrate_score": 60.0,
             "context_score": 70.0,  # Uncapped pre-veto score

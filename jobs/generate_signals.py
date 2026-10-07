@@ -418,9 +418,12 @@ def reconcile_recommendation_lifecycle(
             high_price = float(bar.get("high", close_price))
             
             stop_loss = float(existing.get("stop_loss") or 0.0)
+            target_1 = float(existing.get("target_1") or 0.0)
+            target_2 = float(existing.get("target_2") or 0.0)
             target_3 = float(existing.get("target_3") or 0.0)
             
-            # 1. Stop Loss Hit
+            # 1. Stop Loss Hit (Conservative STOP_FIRST Ambiguity Policy)
+            # If low breached stop on the same bar as any target, execute stop first.
             if stop_loss > 0 and low_price <= stop_loss:
                 exit_p = min(close_price, stop_loss)
                 logger.info(f"[LIFECYCLE STOP LOSS HIT] {ticker}: low ${low_price:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
@@ -428,11 +431,24 @@ def reconcile_recommendation_lifecycle(
                 update_history_outcome(ticker, "stopped", exit_p, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Stop loss hit")
                 continue
                 
-            # 2. Target 3 Hit (Full Exit)
+            # 2. Target Hierarchy Progression (Terminal Targets)
+            # Full 50/30/20 setup terminal target is T3
             if target_3 > 0 and high_price >= target_3:
                 logger.info(f"[LIFECYCLE TARGET HIT] {ticker}: high ${high_price:.2f} >= T3 ${target_3:.2f}. Transitioning to hit_t3.")
                 update_signals_status(ticker, "hit_t3", target_3, True, "Target 3 hit", signal_id=signal_id)
                 update_history_outcome(ticker, "hit_t3", target_3, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Target 3 hit")
+                continue
+            # Pruned 60/40/0 setup terminal target is T2
+            elif target_2 > 0 and target_3 <= 0 and high_price >= target_2:
+                logger.info(f"[LIFECYCLE TARGET HIT] {ticker}: high ${high_price:.2f} >= T2 ${target_2:.2f}. Transitioning to hit_t2.")
+                update_signals_status(ticker, "hit_t2", target_2, True, "Target 2 hit", signal_id=signal_id)
+                update_history_outcome(ticker, "hit_t2", target_2, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Target 2 hit")
+                continue
+            # Pruned 70/30/0 setup terminal target is T1
+            elif target_1 > 0 and target_2 <= 0 and target_3 <= 0 and high_price >= target_1:
+                logger.info(f"[LIFECYCLE TARGET HIT] {ticker}: high ${high_price:.2f} >= T1 ${target_1:.2f}. Transitioning to hit_t1.")
+                update_signals_status(ticker, "hit_t1", target_1, True, "Target 1 hit", signal_id=signal_id)
+                update_history_outcome(ticker, "hit_t1", target_1, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Target 1 hit")
                 continue
                 
             # 3. Subsequent Scan Invalidation

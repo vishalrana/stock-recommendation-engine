@@ -246,3 +246,70 @@ def ref_reach_target_before_stop(
             successes += 1
 
     return float(successes / valid_count) if valid_count > 0 else 0.0
+
+
+def ref_sma(closes: List[float], period: int) -> List[Optional[float]]:
+    """Textbook Simple Moving Average: arithmetic mean over rolling window."""
+    n = len(closes)
+    result: List[Optional[float]] = [None] * n
+    if n < period:
+        return result
+    for t in range(period - 1, n):
+        result[t] = float(sum(closes[t - period + 1 : t + 1]) / period)
+    return result
+
+
+def ref_macd(
+    closes: List[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> Tuple[List[float], List[float], List[float]]:
+    """
+    Textbook Moving Average Convergence Divergence (MACD).
+    Fast EMA (12), Slow EMA (26), Signal EMA (9), Histogram = MACD - Signal.
+    """
+    n = len(closes)
+    if n == 0:
+        return [], [], []
+    fast_ema = ref_ema(closes, fast)
+    slow_ema = ref_ema(closes, slow)
+    macd_line = [f - s for f, s in zip(fast_ema, slow_ema)]
+    signal_line = ref_ema(macd_line, signal)
+    histogram = [m - s for m, s in zip(macd_line, signal_line)]
+    return macd_line, signal_line, histogram
+
+
+def ref_composite_score(sub_scores: dict, weights: dict) -> float:
+    """Textbook linear composite scoring: weighted dot product clamped to [0, 100]."""
+    total = sum(weights[k] * sub_scores[k] for k in weights)
+    return float(round(max(0.0, min(100.0, total)), 2))
+
+
+def ref_target_hierarchy(
+    cand_targets: Tuple[float, float, float],
+    reach_probs: Tuple[float, float, float],
+    min_thresholds: Tuple[float, float, float] = (0.35, 0.20, 0.15),
+) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
+    """
+    Textbook 3-layer Target Hierarchy and Scale-Out Weight Decision Tree.
+    T1 must meet t1_min; no T2 without T1; no T3 without T1 and T2.
+    """
+    t1_c, t2_c, t3_c = cand_targets
+    rp1, rp2, rp3 = reach_probs
+    m1, m2, m3 = min_thresholds
+
+    # Monotonic reach prob enforcement
+    rp2 = min(rp2, rp1)
+    rp3 = min(rp3, rp2)
+
+    t1_survives = (rp1 >= m1)
+    t2_survives = t1_survives and (rp2 >= m2)
+    t3_survives = t2_survives and (rp3 >= m3)
+
+    if t1_survives and t2_survives and t3_survives:
+        return t1_c, t2_c, t3_c, "50/30/20"
+    elif t1_survives and t2_survives:
+        return t1_c, t2_c, None, "60/40/0"
+    else:
+        return t1_c, None, None, "70/30/0"

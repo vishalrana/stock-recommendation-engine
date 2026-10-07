@@ -206,7 +206,7 @@ class TestTargetBeforeStopReach(unittest.TestCase):
         self.assertGreaterEqual(rp2, rp3, f"Monotonicity failed: T2 ({rp2}) < T3 ({rp3})")
 
     def test_8_upstream_stop_validation_and_repair(self):
-        """If stop >= entry, calculate_targets repairs stop to strategy floor without crashing."""
+        """If stop >= entry, calculate_targets rejects invalid stop strictly without silent repair."""
         res = calculate_targets(
             ticker="REPAIR_TEST",
             entry_price=100.0,
@@ -215,12 +215,9 @@ class TestTargetBeforeStopReach(unittest.TestCase):
             strategy_name="Trend Following",
             mock_reach_probs=(0.40, 0.25, 0.18),
         )
-        self.assertTrue(res.is_valid)
-        self.assertGreater(res.weighted_scaleout_rr, 0.0)
-        self.assertEqual(res.weighted_scaleout_rr, res.weighted_rr_honest)
-        # Trend following stop floor is 6%, repaired stop should be 94.00, risk 6.00
-        self.assertIsNotNone(res.target_1)
-        self.assertIsNotNone(res.target_1_return_decimal)
+        self.assertFalse(res.is_valid)
+        self.assertEqual(res.weighted_scaleout_rr, 0.0)
+        self.assertIn("Invalid stop loss", res.rejection_reason)
 
     def test_9_target_return_decimal_vs_pct(self):
         """Verify explicit target return decimal vs percentage properties."""
@@ -262,7 +259,7 @@ class TestTargetBeforeStopReach(unittest.TestCase):
 
     def test_11_stop_equal_entry_and_non_positive_entry(self):
         """Verify upstream stop validation handles stop == entry and non-positive entry safely."""
-        # 1. Stop == Entry
+        # 1. Stop == Entry: must be rejected
         res_eq = calculate_targets(
             ticker="STOP_EQ_TEST",
             entry_price=100.0,
@@ -271,10 +268,9 @@ class TestTargetBeforeStopReach(unittest.TestCase):
             strategy_name="Trend Following",
             mock_reach_probs=(0.40, 0.25, 0.18),
         )
-        self.assertTrue(res_eq.is_valid)
-        self.assertGreater(res_eq.weighted_scaleout_rr, 0.0)
-        # Should not produce astronomical R:R (> 100)
-        self.assertLess(res_eq.weighted_scaleout_rr, 20.0)
+        self.assertFalse(res_eq.is_valid)
+        self.assertEqual(res_eq.weighted_scaleout_rr, 0.0)
+        self.assertIn("Invalid stop loss", res_eq.rejection_reason)
 
         # 2. Non-positive entry
         res_zero = calculate_targets(

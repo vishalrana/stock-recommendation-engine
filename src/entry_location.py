@@ -159,11 +159,19 @@ def analyze_market_structure(
     open_today = float(df["OPEN"].iloc[-1]) if "OPEN" in df.columns else price
     volume_today = float(df["VOLUME"].iloc[-1]) if "VOLUME" in df.columns else 1.0
 
-    # ATR-14
+    # ATR-14: Canonical ATR calculation from HIGH, LOW, CLOSE without arbitrary fallback
     atr = float(df["ATR_14"].iloc[-1]) if "ATR_14" in df.columns and not np.isnan(df["ATR_14"].iloc[-1]) else 0.0
     if atr <= 0.0:
-        recent_tr = (df["HIGH"] - df["LOW"]).tail(14).mean()
-        atr = float(recent_tr) if recent_tr > 0 else max(1.0, price * 0.02)
+        if all(c in df.columns for c in ["HIGH", "LOW", "CLOSE"]) and len(df) >= 15:
+            from src.indicators import calculate_atr
+            atr_series = calculate_atr(df["HIGH"], df["LOW"], df["CLOSE"], 14)
+            valid_atr = atr_series.dropna()
+            if not valid_atr.empty and float(valid_atr.iloc[-1]) > 0:
+                atr = float(valid_atr.iloc[-1])
+        if atr <= 0.0 and "HIGH" in df.columns and "LOW" in df.columns:
+            recent_tr = float((df["HIGH"] - df["LOW"]).tail(14).mean())
+            if recent_tr > 0:
+                atr = recent_tr
 
     # 20-day High & Low (excluding today's bar to define prior resistance/support)
     prior_high_20 = float(df["HIGH"].iloc[-21:-1].max()) if len(df) >= 21 else float(df["HIGH"].iloc[:-1].max())

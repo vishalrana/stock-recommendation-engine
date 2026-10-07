@@ -21,8 +21,10 @@ import pandas as pd
 from src.indicators import (
     calculate_rsi,
     calculate_atr,
+    calculate_dma,
     compute_adx,
     compute_ema,
+    compute_macd,
 )
 from src.utils.metrics_pipeline import (
     calculate_shrunk_win_rate,
@@ -45,12 +47,20 @@ from tests.quant_reference.golden_datasets import (
     dataset_5_volatile_market,
     dataset_6_gap_market,
     dataset_8_realistic_multi_regime,
+    dataset_9_pseudorandom_seeded,
+    dataset_10_insufficient_history,
+    dataset_11_sporadic_nans,
+    dataset_12_extreme_pathological,
 )
 from tests.quant_reference.reference_models import (
     ref_rsi,
     ref_atr,
     ref_adx,
     ref_ema,
+    ref_sma,
+    ref_macd,
+    ref_composite_score,
+    ref_target_hierarchy,
     ref_bayesian_win_rate,
     ref_expectancy,
     ref_reach_target_before_stop,
@@ -237,6 +247,117 @@ class TestQuantReferenceSuite(unittest.TestCase):
         self.assertEqual(m_e["source"], "ticker_observed_with_strategy_prior")
         # Prior is 40.0: (2*100 + 5*40) / 7 = 400 / 7 = 57.14
         self.assertAlmostEqual(m_e["shrunk_win_rate"], 57.14, places=1)
+
+    def test_14_sma_production_vs_reference(self):
+        """Verify production calculate_dma matches textbook ref_sma across golden dataset 8."""
+        df = dataset_8_realistic_multi_regime(200)
+        prod_sma = calculate_dma(df["CLOSE"], period=50).dropna()
+        ref_vals = [v for v in ref_sma(df["CLOSE"].tolist(), period=50) if v is not None]
+
+        self.assertEqual(len(prod_sma), len(ref_vals))
+        np.testing.assert_allclose(prod_sma.values, ref_vals, atol=1e-5)
+
+    def test_15_macd_production_vs_reference(self):
+        """Verify production compute_macd matches textbook ref_macd on seeded dataset 9."""
+        df = dataset_9_pseudorandom_seeded(150, seed=42)
+        p_macd, p_sig, p_hist = compute_macd(df["CLOSE"], fast=12, slow=26, signal=9)
+        r_macd, r_sig, r_hist = ref_macd(df["CLOSE"].tolist(), fast=12, slow=26, signal=9)
+
+        # Drop burn-in periods and compare
+        np.testing.assert_allclose(p_macd.values, r_macd, atol=1e-5)
+        np.testing.assert_allclose(p_sig.values, r_sig, atol=1e-5)
+        np.testing.assert_allclose(p_hist.values, r_hist, atol=1e-5)
+
+    def test_16_composite_score_reference_dot_product(self):
+        """Verify SignalRanker composite score strictly matches independent linear dot product."""
+        ranker = SignalRanker()
+        sub_scores = {
+            "mom": 75.0,
+            "exp": 80.0,
+            "wr": 65.0,
+            "reg": 100.0,
+            "ctx": 60.0,
+        }
+        weights = {"mom": 0.45, "exp": 0.20, "wr": 0.15, "reg": 0.10, "ctx": 0.10}
+        ref_score = ref_composite_score(sub_scores, weights)
+
+        # Construct candidate matching sub_scores
+        candidate = {
+            "ticker": "COMP_REF",
+            "strategy": "trend_following",
+            "momentum_score": sub_scores["mom"],
+            "expectancy_score": sub_scores["exp"],
+            "winrate_score": sub_scores["wr"],
+            "context_score": sub_scores["ctx"],
+        }
+        prod_res = ranker.compute_composite_score(candidate, "bull")
+        # In bull regime, trend_following regime score is 100.0
+        self.assertAlmostEqual(prod_res["total"], ref_score, places=1)
+
+    def test_17_target_hierarchy_reference_model(self):
+        """Verify production calculate_targets hierarchy matches textbook ref_target_hierarchy."""
+        # 1. All three survive
+        cand = (108.0, 115.0, 125.0)
+        r_t1, r_t2, r_t3, r_label = ref_target_hierarchy(cand, (0.50, 0.30, 0.20))
+        prod_res = calculate_targets(
+            "HIER_TEST", entry_price=100.0, atr_14=2.0, stop_loss=94.0,
+            strategy_name="trend_following", mock_reach_probs=(0.50, 0.30, 0.20),
+            override_targets=cand,
+        )
+        self.assertTrue(prod_res.is_valid)
+        self.assertEqual(prod_res.scale_out_weights, r_label)
+        self.assertEqual(prod_res.target_1, r_t1)
+        self.assertEqual(prod_res.target_2, r_t2)
+        self.assertEqual(prod_res.target_3, r_t3)
+
+        # 2. T3 pruned
+        r_t1, r_t2, r_t3, r_label = ref_target_hierarchy(cand, (0.50, 0.30, 0.05))
+        prod_res = calculate_targets(
+            "HIER_TEST", entry_price=100.0, atr_14=2.0, stop_loss=94.0,
+            strategy_name="trend_following", mock_reach_probs=(0.50, 0.30, 0.05),
+            override_targets=cand,
+        )
+        self.assertTrue(prod_res.is_valid)
+        self.assertEqual(prod_res.scale_out_weights, r_label)
+        self.assertIsNone(prod_res.target_3)
+
+        # 3. T2 and T3 pruned
+        r_t1, r_t2, r_t3, r_label = ref_target_hierarchy(cand, (0.50, 0.10, 0.05))
+        prod_res = calculate_targets(
+            "HIER_TEST", entry_price=100.0, atr_14=2.0, stop_loss=94.0,
+            strategy_name="trend_following", mock_reach_probs=(0.50, 0.10, 0.05),
+            override_targets=cand,
+        )
+        self.assertTrue(prod_res.is_valid)
+        self.assertEqual(prod_res.scale_out_weights, r_label)
+        self.assertIsNone(prod_res.target_2)
+        self.assertIsNone(prod_res.target_3)
+
+    def test_18_golden_datasets_9_through_12_validation(self):
+        """Verify quantitative resilience across datasets 9, 10, 11, 12."""
+        # Dataset 9: Seeded random walk produces valid RSI and ATR
+        df9 = dataset_9_pseudorandom_seeded(100, seed=123)
+        rsi9 = calculate_rsi(df9["CLOSE"], period=14).dropna()
+        atr9 = calculate_atr(df9["HIGH"], df9["LOW"], df9["CLOSE"], period=14).dropna()
+        self.assertTrue((rsi9 >= 0.0).all() and (rsi9 <= 100.0).all())
+        self.assertTrue((atr9 > 0.0).all())
+
+        # Dataset 10: Insufficient history (10 bars) correctly yields NaN without crashing
+        df10 = dataset_10_insufficient_history(10)
+        rsi10 = calculate_rsi(df10["CLOSE"], period=14)
+        self.assertTrue(rsi10.isna().all())
+
+        # Dataset 11: Sporadic NaNs handled without unhandled exception
+        df11 = dataset_11_sporadic_nans(100)
+        rsi11 = calculate_rsi(df11["CLOSE"], period=14)
+        self.assertIsNotNone(rsi11)
+
+        # Dataset 12: Numerical stability on penny ($0.05) and mega ($500,000) stocks
+        penny_df, mega_df = dataset_12_extreme_pathological(80)
+        penny_rsi = calculate_rsi(penny_df["CLOSE"], period=14).dropna()
+        mega_rsi = calculate_rsi(mega_df["CLOSE"], period=14).dropna()
+        self.assertTrue((penny_rsi >= 0.0).all() and (penny_rsi <= 100.0).all())
+        self.assertTrue((mega_rsi >= 0.0).all() and (mega_rsi <= 100.0).all())
 
 
 if __name__ == "__main__":

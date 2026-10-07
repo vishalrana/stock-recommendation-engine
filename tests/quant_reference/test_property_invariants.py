@@ -161,8 +161,8 @@ class TestPropertyInvariants(unittest.TestCase):
         self.assertIn("Invalid override targets ordering", res_inverted.rejection_reason)
 
     def test_08_stop_loss_invariants(self):
-        """Invariant: Stop loss must satisfy 0 < stop < entry; stop >= entry is repaired to strategy floor; negative stop rejected."""
-        # Stop >= Entry: repaired to strategy stop floor (6% below entry)
+        """Invariant: Stop loss must satisfy 0 < stop < entry; stop >= entry is rejected; negative stop rejected."""
+        # Stop >= Entry: rejected fail-closed
         res_repaired = calculate_targets(
             ticker="REPAIRED_STOP",
             entry_price=100.0,
@@ -171,9 +171,9 @@ class TestPropertyInvariants(unittest.TestCase):
             strategy_name="trend_following",
             mock_reach_probs=(0.40, 0.25, 0.18),
         )
-        self.assertTrue(res_repaired.is_valid)
-        self.assertGreater(res_repaired.weighted_scaleout_rr, 0.0)
-        self.assertIsNotNone(res_repaired.target_1)
+        self.assertFalse(res_repaired.is_valid)
+        self.assertEqual(res_repaired.weighted_scaleout_rr, 0.0)
+        self.assertIn("Invalid stop loss", res_repaired.rejection_reason)
 
         # Negative Stop
         res_neg_stop = calculate_targets(

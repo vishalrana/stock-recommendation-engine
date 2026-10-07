@@ -80,22 +80,37 @@ REGIME_SCORE_MATRIX: Dict[str, Dict[str, float]] = {
 
 # ==============================================================================
 # 3. HISTORICAL STRATEGY EXPECTANCY & HAIRCUTS (Section 9.2 & 10.3)
-# Survivorship bias haircut: 15% reduction (0.85 multiplier) for strategy historical expectancy
+# Survivorship bias haircut: 15% reduction (0.85 multiplier) for strategy historical expectancy.
+# Econometric Rationale: Historical equity backtests without survivorship-free databases
+# suffer ~1-2% annualized or ~15% relative upward bias (Brown, Goetzmann, Ibbotson, Ross 1992;
+# Elton, Gruber, Blake 1996). We explicitly isolate raw observed backtest returns from
+# the modeled survivorship-adjusted returns.
+#
 # Reach probability fallback haircut: 8% reduction (0.92 multiplier) when delisted sector proxies are unavailable
 # Formula: S_exp = 30.0 + 20.0 * E_adjusted (E_adjusted in percentage points)
 # ==============================================================================
 SURVIVORSHIP_BIAS_HAIRCUT: float = 0.85
 REACH_PROB_FALLBACK_HAIRCUT: float = 0.92
 
-STRATEGY_HISTORICAL_EXPECTANCY: Dict[str, float] = {
-    "trend_following":          0.0169 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.4365% -> 1.44%
-    "52w_high_breakout":        0.0210 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.7850% -> 1.79%
-    "pullback_recovery":        0.0145 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.2325% -> 1.23%
-    "cross_sectional_momentum": 0.0180 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.5300% -> 1.53%
-    "pead":                     0.0225 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.9125% -> 1.91%
-    "sector_rotation":          0.0120 * SURVIVORSHIP_BIAS_HAIRCUT,  # +1.0200% -> 1.02%
-    "mean_reversion":           0.0085 * SURVIVORSHIP_BIAS_HAIRCUT,  # +0.7225% -> 0.72%
+# Raw, unadjusted empirical backtest expectancy per trade (in decimal return)
+STRATEGY_HISTORICAL_EXPECTANCY_RAW: Dict[str, float] = {
+    "trend_following":          0.0169,  # +1.69% empirical mean return
+    "52w_high_breakout":        0.0210,  # +2.10%
+    "pullback_recovery":        0.0145,  # +1.45%
+    "cross_sectional_momentum": 0.0180,  # +1.80%
+    "pead":                     0.0225,  # +2.25%
+    "sector_rotation":          0.0120,  # +1.20%
+    "mean_reversion":           0.0085,  # +0.85%
 }
+
+# Modeled survivorship-adjusted expectancy (raw * 0.85 haircut)
+STRATEGY_HISTORICAL_EXPECTANCY_ADJUSTED: Dict[str, float] = {
+    strat: raw_val * SURVIVORSHIP_BIAS_HAIRCUT
+    for strat, raw_val in STRATEGY_HISTORICAL_EXPECTANCY_RAW.items()
+}
+
+# Active quantitative prior used across scoring pipelines
+STRATEGY_HISTORICAL_EXPECTANCY: Dict[str, float] = STRATEGY_HISTORICAL_EXPECTANCY_ADJUSTED
 
 # Base and multiplier for expectancy scoring: S_exp = EXPECTANCY_BASE + EXPECTANCY_SLOPE * E_adjusted
 EXPECTANCY_BASE: float = 30.0

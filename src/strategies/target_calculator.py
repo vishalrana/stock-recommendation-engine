@@ -383,12 +383,8 @@ def calculate_targets(
     atr = max(0.0, float(atr_14))
     stop = float(stop_loss)
 
-    # Upstream Stop-Loss Validation (stop < entry)
-    # Check stop < entry. If stop >= entry, repair using strategy stop floor or mark invalid;
-    # do NOT mask with max(0.01, entry - stop).
-    stop_cfg = STRATEGY_STOP_CONFIG.get(strat_key, {})
-    stop_floor_pct = stop_cfg.get("stop_floor", 0.05)
-
+    # Upstream Entry and Stop-Loss Validation (0 < stop < entry)
+    # Fail closed with is_valid=False if entry or stop is invalid. Never silently repair invalid financial inputs.
     if entry <= 0:
         return TargetCalculationResult(
             target_1=None, target_2=None, target_3=None,
@@ -404,7 +400,7 @@ def calculate_targets(
             target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
         )
 
-    if stop <= 0:
+    if stop <= 0 or stop >= entry:
         return TargetCalculationResult(
             target_1=None, target_2=None, target_3=None,
             target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
@@ -414,18 +410,10 @@ def calculate_targets(
             weighted_scaleout_rr=0.0,
             weighted_rr_honest=0.0,
             is_valid=False,
-            rejection_reason=f"Invalid stop loss: stop ${stop:.2f} must be positive",
+            rejection_reason=f"Invalid stop loss: stop ${stop:.2f} must satisfy 0 < stop < entry (${entry:.2f})",
             reach_prob_raw=0.0, reach_prob_adjusted=0.0,
             target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
         )
-
-    if stop >= entry:
-        repaired_stop = round(entry * (1.0 - stop_floor_pct), 2)
-        logger.warning(
-            "Invalid stop loss for %s: stop $%.2f >= entry $%.2f. Repaired to strategy stop floor $%.2f (%.1f%%).",
-            ticker, stop, entry, repaired_stop, stop_floor_pct * 100.0
-        )
-        stop = repaired_stop
 
     risk = entry - stop
     if risk <= 0:

@@ -438,6 +438,20 @@ def calculate_targets(
 
     if override_targets is not None:
         cand_t1, cand_t2, cand_t3 = override_targets
+        if not (entry < cand_t1 < cand_t2 < cand_t3):
+            return TargetCalculationResult(
+                target_1=None, target_2=None, target_3=None,
+                target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+                target_1_pct=None, target_2_pct=None, target_3_pct=None,
+                reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+                scale_out_weights="0/0/0",
+                weighted_scaleout_rr=0.0,
+                weighted_rr_honest=0.0,
+                is_valid=False,
+                rejection_reason=f"Invalid override targets ordering: entry={entry:.2f}, t1={cand_t1:.2f}, t2={cand_t2:.2f}, t3={cand_t3:.2f}",
+                reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+                target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+            )
     else:
         cand_t1 = max(entry * (1.0 + cfg["fixed_t1"]), t1_atr)
         cand_t2 = max(entry * (1.0 + cfg["fixed_t2"]), t2_atr)

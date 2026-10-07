@@ -200,7 +200,7 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
             'adx_value': round(adx_value, 1),
             'volume_ratio': round(volume_ratio, 2),
             'macd_histogram': 0,  # Not used in this strategy
-            'ema20': round(sma50, 2),
+            'ema20': round(float(df['EMA_20'].iloc[-1]), 2) if 'EMA_20' in df.columns else round(sma50, 2),
             'is_blocked': is_blocked,
             'blocked_reason': blocked_reason,
             'strategy': 'Cross-Sectional Momentum',

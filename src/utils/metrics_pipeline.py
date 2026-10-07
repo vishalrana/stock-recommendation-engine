@@ -97,11 +97,11 @@ def build_hardened_metrics(
     # Determine raw win rate
     if strategy_win_rate is not None:
         raw_win_rate = float(strategy_win_rate)
-        provenance = "strategy_specific"
+        provenance = "strategy_prior" if completed_trades == 0 else "strategy_specific"
         metric_source = "strategy_backtest"
     elif past_win_rate is not None:
         raw_win_rate = float(past_win_rate)
-        provenance = "candidate_provided"
+        provenance = "candidate_prior" if completed_trades == 0 else "candidate_provided"
         metric_source = "candidate_payload"
     elif completed_trades > 0:
         raw_win_rate = round((wins / completed_trades) * 100.0, 2)
@@ -109,7 +109,7 @@ def build_hardened_metrics(
         metric_source = "historical_trades"
     elif "win_rate" in raw_m and raw_m["win_rate"] is not None and float(raw_m["win_rate"]) > 0:
         raw_win_rate = float(raw_m["win_rate"])
-        provenance = "ticker_historical"
+        provenance = "generic_ticker_prior"
         metric_source = "ticker_metrics"
     else:
         raw_win_rate = DEFAULT_PRIOR_WIN_RATE
@@ -117,15 +117,7 @@ def build_hardened_metrics(
         metric_source = "unseeded_prior"
 
     # Compute Bayesian shrunk win rate
-    if provenance in ("strategy_specific", "candidate_provided") and completed_trades == 0:
-        # If explicitly passed with no trade counts, shrink assuming nominal evidence
-        shrunk_wr = calculate_shrunk_win_rate(
-            wins=int(round(raw_win_rate / 20.0)),
-            losses=int(round((100.0 - raw_win_rate) / 20.0)),
-            alpha=DEFAULT_SHRINKAGE_ALPHA,
-            prior_win_rate=DEFAULT_PRIOR_WIN_RATE,
-        )
-    elif completed_trades > 0:
+    if completed_trades > 0:
         shrunk_wr = calculate_shrunk_win_rate(
             wins=wins,
             losses=losses,
@@ -135,7 +127,9 @@ def build_hardened_metrics(
         if provenance == "unavailable":
             provenance = "shrunk"
     else:
-        shrunk_wr = DEFAULT_PRIOR_WIN_RATE
+        # Zero trade observations: sample_size=0, no synthetic pseudo-counts;
+        # shrunk win rate reflects the authoritative prior directly.
+        shrunk_wr = round(float(raw_win_rate), 2)
 
     # Raw vs shrunk expectancy
     raw_exp = raw_m.get("expectancy_pct")

@@ -33,48 +33,65 @@ def calculate_dma(data: pd.Series, period: int) -> pd.Series:
         Series with DMA values (aligned with input data)
         
     Note:
-        First (period-1) values will be NaN
+        First (period-1) values will be NaN (no partial-window contamination)
     """
-    return data.rolling(window=period, min_periods=1).mean()
+    return data.rolling(window=period, min_periods=period).mean()
 
 
 def calculate_rsi(data: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     """
-    Calculate Relative Strength Index (RSI).
+    Calculate Relative Strength Index (RSI) using canonical Wilder's RMA smoothing.
     
     Formula:
         RSI = 100 - (100 / (1 + RS))
         RS = Average Gain / Average Loss
+        where Average Gain and Loss use Wilder's RMA (alpha = 1 / period),
+        initialized with the simple average over the first `period` price changes.
         
-    Args:
-        data: Price series (e.g., Close prices)
-        period: RSI period (default 14)
-        
-    Returns:
-        Series with RSI values (0-100 range)
-        
-    Note:
-        First (period) values will be NaN due to averaging initialization
+    Edge cases:
+        - When Average Loss == 0:
+            - If Average Gain == 0: RSI = 50.0 (flat market)
+            - If Average Gain > 0: RSI = 100.0
+        - When Average Gain == 0 (and Average Loss > 0): RSI = 0.0
+        - First (period) values are NaN.
     """
-    # Calculate daily price changes
+    if len(data) <= period:
+        return pd.Series(np.nan, index=data.index, dtype=float)
+
     delta = data.diff()
-    
-    # Separate gains and losses
-    gains = delta.where(delta > 0, 0)
-    losses = -delta.where(delta < 0, 0)
-    
-    # Calculate exponential moving averages
-    avg_gain = gains.ewm(span=period, adjust=False).mean()
-    avg_loss = losses.ewm(span=period, adjust=False).mean()
-    
-    # Avoid division by zero
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Replace inf and invalid values with NaN
-    rsi = rsi.replace([np.inf, -np.inf], np.nan)
-    
-    return rsi
+    gains = delta.clip(lower=0.0).to_numpy(dtype=float)
+    losses = (-delta.clip(upper=0.0)).to_numpy(dtype=float)
+
+    avg_gain = np.full(len(data), np.nan, dtype=float)
+    avg_loss = np.full(len(data), np.nan, dtype=float)
+
+    # First valid price difference starts at index 1 (index 0 diff is NaN)
+    # The first `period` price changes span indices 1 .. period
+    avg_gain[period] = np.mean(gains[1:period + 1])
+    avg_loss[period] = np.mean(losses[1:period + 1])
+
+    for i in range(period + 1, len(data)):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i]) / period
+
+    rsi = np.full(len(data), np.nan, dtype=float)
+    for i in range(period, len(data)):
+        ag = avg_gain[i]
+        al = avg_loss[i]
+        if np.isnan(ag) or np.isnan(al):
+            continue
+        if al == 0.0:
+            if ag == 0.0:
+                rsi[i] = 50.0
+            else:
+                rsi[i] = 100.0
+        elif ag == 0.0:
+            rsi[i] = 0.0
+        else:
+            rs = ag / al
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+
+    return pd.Series(rsi, index=data.index, dtype=float)
 
 
 def calculate_volume_ma(volume: pd.Series, period: int = VOLUME_MA_PERIOD) -> pd.Series:
@@ -88,7 +105,7 @@ def calculate_volume_ma(volume: pd.Series, period: int = VOLUME_MA_PERIOD) -> pd
     Returns:
         Series with volume MA values
     """
-    return volume.rolling(window=period, min_periods=1).mean()
+    return volume.rolling(window=period, min_periods=period).mean()
 
 
 def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
@@ -177,6 +194,37 @@ def check_rsi_pullback_recovery(rsi_series: pd.Series,
     }
 
 
+def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Calculate Average True Range (ATR) using canonical Wilder's RMA smoothing.
+    
+    Formula:
+        TR_0 = High_0 - Low_0
+        TR_t = max(High_t - Low_t, |High_t - Close_{t-1}|, |Low_t - Close_{t-1}|)
+        Initial ATR at index period-1 is the simple mean of the first `period` TRs.
+        Subsequent: ATR_t = ((period - 1) * ATR_{t-1} + TR_t) / period
+        First (period - 1) values are NaN.
+    """
+    if len(close) < period:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
+
+    tr_vals = tr.to_numpy(dtype=float)
+    atr = np.full(len(close), np.nan, dtype=float)
+
+    # Initial ATR is simple average of first `period` true ranges (indices 0 .. period - 1)
+    atr[period - 1] = np.mean(tr_vals[:period])
+    for i in range(period, len(close)):
+        atr[i] = (atr[i - 1] * (period - 1) + tr_vals[i]) / period
+
+    return pd.Series(atr, index=close.index, dtype=float)
+
+
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate all required indicators for a stock.
@@ -185,7 +233,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     (handles both uppercase and lowercase column names)
     
     Output DataFrame includes:
-        Original columns + DMA_50 + DMA_200 + RSI_14 + VOLUME_MA_20 + ADX_14 + MACD_LINE + MACD_SIGNAL + MACD_HIST + EMA_20
+        Original columns + DMA_50 + DMA_200 + RSI_14 + VOLUME_MA_20 + ADX_14 + MACD_LINE + MACD_SIGNAL + MACD_HIST + EMA_20 + ATR_14
         
     Args:
         df: OHLCV DataFrame from yfinance
@@ -216,13 +264,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD_HIST"] = histogram
     df["EMA_20"] = compute_ema(df["CLOSE"], 20)
     
-    # Calculate ATR_14 (Task 6.1)
-    tr = pd.concat([
-        df["HIGH"] - df["LOW"],
-        (df["HIGH"] - df["CLOSE"].shift(1)).abs(),
-        (df["LOW"] - df["CLOSE"].shift(1)).abs()
-    ], axis=1).max(axis=1)
-    df["ATR_14"] = tr.ewm(span=14, adjust=False).mean()
+    # Calculate ATR_14 using canonical Wilder RMA smoothing
+    df["ATR_14"] = calculate_atr(df["HIGH"], df["LOW"], df["CLOSE"], 14)
     
     return df
 

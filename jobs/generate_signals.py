@@ -345,6 +345,7 @@ def reconcile_recommendation_lifecycle(
     updated_analytics: dict = None,
     successfully_evaluated_tickers: Optional[Set[str]] = None,
     universe_is_fallback: bool = False,
+    current_scan_date: Optional[str] = None,
 ):
     """
     Reconcile active recommendations against latest market prices and scan qualification.
@@ -353,11 +354,12 @@ def reconcile_recommendation_lifecycle(
     2. Universe Coverage Safeguard: If broad universe degraded to fallback, skip invalidation.
     3. Per-Ticker Quote Safeguard: If market quote is unavailable, skip lifecycle transition.
     4. Incomplete Evaluation Safeguard: Only invalidate if ticker was actually successfully evaluated.
-    5. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
-    6. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
-    7. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
+    5. Trade Activation Separation: Recommendations created on scan_date D activate at D+1. Do not evaluate same-day bars.
+    6. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
+    7. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
+    8. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
        status/outcome -> 'invalidated' with specific disqualification reason.
-    8. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
+    9. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
     
     Crucial:
     - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
@@ -394,9 +396,21 @@ def reconcile_recommendation_lifecycle(
             signal_id = existing.get("id")
             scan_date = existing.get("scan_date")
 
+            # Trade activation separation: Recommendations generated on scan_date D
+            # only begin trade evaluation on D+1 (next trading day).
+            eff_current_date = str(current_scan_date)[:10] if current_scan_date else None
+            if eff_current_date and scan_date and str(scan_date)[:10] >= eff_current_date:
+                logger.info(f"[LIFECYCLE SEPARATION] {ticker}: created on current scan date {scan_date}. Trade activates next trading day (D+1). Skipping stop/target evaluation.")
+                continue
+
             bar = get_latest_bar(ticker)
             if not bar or "close" not in bar or bar["close"] is None or float(bar["close"]) <= 0:
                 logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: Unable to retrieve current quote data. Skipping lifecycle transition.")
+                continue
+
+            bar_date = bar.get("date")
+            if bar_date and scan_date and str(bar_date)[:10] <= str(scan_date)[:10]:
+                logger.info(f"[LIFECYCLE SEPARATION] {ticker}: bar date {bar_date} <= scan date {scan_date}. Skipping stop/target evaluation.")
                 continue
 
             close_price = float(bar["close"])
@@ -1446,6 +1460,7 @@ def run_scan(
                     target_tickers=set(tickers),
                     updated_analytics=updated_analytics,
                     successfully_evaluated_tickers=successfully_evaluated_tickers,
+                    current_scan_date=market_data_date,
                 )
                 logger.info("[TARGETED REFRESH] Reconciled active recommendations for targeted tickers.")
             except Exception as e:
@@ -1479,6 +1494,7 @@ def run_scan(
                 updated_analytics=updated_analytics,
                 successfully_evaluated_tickers=successfully_evaluated_tickers,
                 universe_is_fallback=LAST_UNIVERSE_IS_FALLBACK,
+                current_scan_date=market_data_date,
             )
             logger.info("Clearing previous rejected audit entries from Supabase...")
             supabase.table("signals").delete().eq("status", "rejected").execute()

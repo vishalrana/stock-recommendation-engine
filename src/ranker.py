@@ -77,14 +77,17 @@ def compute_expectancy_score(strategy: str, adjusted_expectancy_pct: Optional[fl
     """
     Master Spec v2.3+ formula: S_exp = 30 + 20 * E_adjusted
     where E_adjusted is expressed in percentage points (e.g. +1.44% -> 1.44 -> 58.8).
+    Strictly clamped to [0.0, 100.0] with null/NaN protection.
     """
-    if adjusted_expectancy_pct is not None:
+    if adjusted_expectancy_pct is not None and not (isinstance(adjusted_expectancy_pct, float) and np.isnan(adjusted_expectancy_pct)):
         e_val = float(adjusted_expectancy_pct)
     else:
         strat_key = normalize_strategy_key(strategy)
         hist_exp = STRATEGY_HISTORICAL_EXPECTANCY.get(strat_key, 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT)
         e_val = round(hist_exp * 100.0, 2)
-    return round(EXPECTANCY_BASE + EXPECTANCY_SLOPE * e_val, 4)
+    raw_score = EXPECTANCY_BASE + EXPECTANCY_SLOPE * e_val
+    clamped_score = max(0.0, min(100.0, raw_score))
+    return round(clamped_score, 4)
 
 
 def compute_regime_alignment(strategy: str, market_regime: str) -> float:

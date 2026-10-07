@@ -205,7 +205,7 @@ class TestQuantHardeningFinal(unittest.TestCase):
             "current_rsi": sig["current_rsi"],
             "price": sig["price"],
             "entry_price": sig["entry_price"],
-            "dma_50": sig["ema20"],
+            "dma_50": sig.get("dma_50", sig["ema20"]),
             "volume_ratio": sig["volume_ratio"],
             "macd_histogram": sig["macd_histogram"],
             "atr_14": sig["atr_14"],

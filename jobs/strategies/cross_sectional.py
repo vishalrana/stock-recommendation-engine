@@ -1,5 +1,7 @@
 import logging
+import math
 from typing import Optional, List
+import numpy as np
 import pandas as pd
 from jobs.strategies.base import StrategyInterface
 from src.utils.candidate_builder import build_candidate_from_row
@@ -43,6 +45,12 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         # Extract indicators already pre-calculated by calculate_indicators
         current_rsi = df['RSI_14'].iloc[-1]
         adx_value = df['ADX_14'].iloc[-1]
+        if 'MACD_HIST' not in df.columns:
+            logger.warning(f"[GATE CROSS] {ticker}: Missing MACD_HIST. Rejecting candidate.")
+            return None
+        macd_hist_val = float(df['MACD_HIST'].iloc[-1])
+        if pd.isna(macd_hist_val) or np.isinf(macd_hist_val):
+            return None
 
         # === GATES ===
         # 1. Top 15% 3-month returns (cross-sectional momentum)
@@ -207,7 +215,7 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
             'current_rsi': round(current_rsi, 1),
             'adx_value': round(adx_value, 1),
             'volume_ratio': round(volume_ratio, 2),
-            'macd_histogram': 0,  # Not used in this strategy
+            'macd_histogram': round(macd_hist_val, 4),
             'ema20': round(ema_20, 2),
             'dma_50': round(sma50, 2),
             'is_blocked': is_blocked,

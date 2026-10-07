@@ -25,28 +25,12 @@ from src.quant_config import (
     T3_REACH_PROB_SURVIVAL_THRESHOLD,
     SCALE_OUT_WEIGHTS,
     MIN_REACH_PROB_WINDOWS,
+    normalize_strategy_key,
 )
+from src.outcome.outcome_calculator import resolve_bar_event
 
-
-def normalize_strategy_name(name: str) -> str:
-    """Normalize any strategy string variant to its canonical configuration key."""
-    n = str(name).lower().strip().replace("-", "_").replace(" ", "_")
-    mapping = {
-        "trend_following": "trend_following",
-        "trend": "trend_following",
-        "52_week_high": "52w_high_breakout",
-        "52w_high": "52w_high_breakout",
-        "52w_high_breakout": "52w_high_breakout",
-        "pullback_recovery": "pullback_recovery",
-        "pullback": "pullback_recovery",
-        "cross_sectional_momentum": "cross_sectional_momentum",
-        "cross_sectional": "cross_sectional_momentum",
-        "pead": "pead",
-        "post_earnings_drift": "pead",
-        "sector_rotation": "sector_rotation",
-        "mean_reversion": "mean_reversion",
-    }
-    return mapping.get(n, "trend_following")
+# Canonical strategy normalizer alias
+normalize_strategy_name = normalize_strategy_key
 
 
 @dataclass
@@ -414,7 +398,38 @@ def calculate_targets(
     Layer 2: Applies reach-probability decision tree with target-before-stop and survivorship bias mitigation.
     Layer 3: Computes honest weighted scale-out risk-to-reward ratio.
     """
-    strat_key = normalize_strategy_name(strategy_name)
+    try:
+        strat_key = normalize_strategy_name(strategy_name)
+    except ValueError as e:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Invalid strategy: {e}",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
+
+    if strat_key not in STRATEGY_TARGET_CONFIG:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Strategy '{strat_key}' configuration not found in STRATEGY_TARGET_CONFIG",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
+
     cfg = STRATEGY_TARGET_CONFIG[strat_key]
 
     entry = float(entry_price)

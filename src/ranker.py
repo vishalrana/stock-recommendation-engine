@@ -36,6 +36,10 @@ from src.quant_config import (
     EXPECTANCY_BASE,
     EXPECTANCY_SLOPE,
     CONTEXT_VETO_THRESHOLDS,
+    CANONICAL_STRATEGIES,
+    CANONICAL_REGIMES,
+    normalize_strategy_key,
+    normalize_regime_key,
 )
 
 # Backward-compatibility aliases
@@ -49,28 +53,6 @@ STRATEGY_OPTIMAL_REGIME = {
     'mean_reversion': 30,
 }
 MARKET_REGIME_SCORE = {'bull': 100.0, 'sideways': 70.0, 'bear': 20.0}
-
-
-def normalize_strategy_key(strategy: str) -> str:
-    """Standardize strategy names to internal dictionary keys."""
-    if not strategy:
-        return 'trend_following'
-    s = str(strategy).strip().lower().replace('-', '_').replace(' ', '_')
-    if '52' in s or 'breakout' in s or 'high' in s:
-        return '52w_high_breakout'
-    if 'trend' in s:
-        return 'trend_following'
-    if 'pullback' in s:
-        return 'pullback_recovery'
-    if 'cross' in s or 'momentum' in s:
-        return 'cross_sectional_momentum'
-    if 'pead' in s or 'earnings' in s:
-        return 'pead'
-    if 'sector' in s or 'rotation' in s:
-        return 'sector_rotation'
-    if 'mean' in s or 'reversion' in s:
-        return 'mean_reversion'
-    return s
 
 
 def compute_expectancy_score(strategy: str, adjusted_expectancy_pct: Optional[float] = None) -> float:
@@ -94,13 +76,16 @@ def compute_regime_alignment(strategy: str, market_regime: str) -> float:
     """
     Master Spec v2.3+ Exact Regime Score Matrix.
     Direct discrete matrix lookup across Bull, Sideways, and Bear regimes.
+    Fails closed on missing or unknown strategy or market regime.
     """
     strat_key = normalize_strategy_key(strategy)
-    regime_key = str(market_regime).strip().lower()
+    regime_key = normalize_regime_key(market_regime)
     if strat_key not in REGIME_SCORE_MATRIX:
-        strat_key = "trend_following"
+        raise ValueError(f"Strategy '{strat_key}' not found in REGIME_SCORE_MATRIX")
     regime_dict = REGIME_SCORE_MATRIX[strat_key]
-    return float(regime_dict.get(regime_key, regime_dict.get("sideways", 70.0)))
+    if regime_key not in regime_dict:
+        raise ValueError(f"Regime '{regime_key}' not found for strategy '{strat_key}'")
+    return float(regime_dict[regime_key])
 
 
 def compute_context_score(
@@ -189,37 +174,46 @@ def compute_momentum_score(row: dict) -> float:
     """
     P0-2 & P1-1 & P1-2: Explicit continuous technical momentum score (0-100).
     Uses RSI, DMA 50 proximity, Volume Ratio, and MACD Histogram (normalized by ATR).
-    Strictly requires valid ATR and DMA 50; never substitutes arbitrary percentages or proxies.
+    Strictly requires valid ATR, DMA 50, and MACD histogram; never substitutes arbitrary percentages or proxies.
+    Fails closed if any required feature is missing, invalid, or non-finite.
     """
     rsi = row.get("current_rsi")
     price = row.get("price") if row.get("price") is not None else row.get("entry_price")
-    dma_50 = row.get("dma_50") if row.get("dma_50") is not None else (row.get("sma50") if row.get("sma50") is not None else row.get("ema20"))
+    dma_50 = row.get("dma_50")
     volume_ratio = row.get("volume_ratio")
-    macd_hist = row.get("macd_histogram", 0.0)
-
+    macd_hist = row.get("macd_histogram")
     atr_val = row.get("atr_14") or row.get("atr")
+
     if (
         rsi is None
+        or not np.isfinite(rsi)
         or price is None
+        or not np.isfinite(price)
+        or float(price) <= 0
         or dma_50 is None
+        or not np.isfinite(dma_50)
+        or float(dma_50) <= 0
         or volume_ratio is None
+        or not np.isfinite(volume_ratio)
+        or float(volume_ratio) < 0
+        or macd_hist is None
+        or not np.isfinite(macd_hist)
         or atr_val is None
-        or pd.isna(atr_val)
+        or not np.isfinite(atr_val)
         or float(atr_val) <= 0
     ):
         raise ValueError(
-            f"Missing or invalid required technical momentum features: rsi={rsi}, price={price}, dma_50={dma_50}, volume_ratio={volume_ratio}, atr={atr_val}"
+            f"Missing or invalid required technical momentum features: rsi={rsi}, price={price}, dma_50={dma_50}, volume_ratio={volume_ratio}, macd_histogram={macd_hist}, atr={atr_val}"
         )
 
     rsi_val = float(rsi)
     p_val = float(price)
     d_val = float(dma_50)
     v_val = float(volume_ratio)
-    m_val = float(macd_hist or 0.0)
+    m_val = float(macd_hist)
     atr = float(atr_val)
 
-    # RSI score (P1-2: Canonical design intentionally penalizes overbought / overextended
-    # deviation from the 50 median line to protect against chasing exhausted swings):
+    # RSI score: penalizes deviation from 50 median line
     rsi_score = max(0.0, min(100.0, 100.0 - abs(rsi_val - 50.0) * 4.0))
 
     # Proximity score to DMA 50
@@ -229,7 +223,7 @@ def compute_momentum_score(row: dict) -> float:
     # Volume score
     volume_score = max(0.0, min(100.0, v_val * 50.0))
 
-    # MACD score normalized by ATR (P1-1):
+    # MACD score normalized by ATR:
     macd_norm = m_val / atr
     macd_score = max(0.0, min(100.0, 50.0 + macd_norm * 200.0))
 
@@ -244,6 +238,7 @@ def compute_momentum_score(row: dict) -> float:
 def validate_candidate_features(row: dict) -> tuple[bool, str]:
     """
     P0-2: Validate that all required production features exist before composite scoring.
+    Fail-closed: all required features must be present, finite, and valid.
     """
     ticker = row.get("ticker")
     if not ticker:
@@ -252,24 +247,45 @@ def validate_candidate_features(row: dict) -> tuple[bool, str]:
     strategy = row.get("strategy") or row.get("strategy_name")
     if not strategy:
         return False, "Missing strategy"
+    try:
+        normalize_strategy_key(strategy)
+    except ValueError as e:
+        return False, f"Invalid strategy: {e}"
 
-    # Momentum check: must either have momentum_score or technical inputs to compute it
+    # Technical momentum check
     if row.get("momentum_score") is None:
+        rsi = row.get("current_rsi")
+        if rsi is None or not np.isfinite(rsi):
+            return False, f"Missing or non-finite current_rsi: {rsi}"
+
+        price = row.get("price") if row.get("price") is not None else row.get("entry_price")
+        if price is None or not np.isfinite(price) or float(price) <= 0:
+            return False, f"Missing or non-positive price/entry_price: {price}"
+
+        dma_50 = row.get("dma_50")
+        if dma_50 is None or not np.isfinite(dma_50) or float(dma_50) <= 0:
+            return False, f"Missing or non-positive dma_50: {dma_50}"
+
+        vol = row.get("volume_ratio")
+        if vol is None or not np.isfinite(vol) or float(vol) < 0:
+            return False, f"Missing or invalid volume_ratio: {vol}"
+
+        macd = row.get("macd_histogram")
+        if macd is None or not np.isfinite(macd):
+            return False, f"Missing or non-finite macd_histogram: {macd}"
+
         atr_raw = row.get("atr_14") if row.get("atr_14") is not None else row.get("atr")
-        atr_ok = atr_raw is not None and not pd.isna(atr_raw) and float(atr_raw) > 0
-        has_tech = (
-            row.get("current_rsi") is not None
-            and (row.get("price") is not None or row.get("entry_price") is not None)
-            and (row.get("dma_50") is not None or row.get("sma50") is not None)
-            and row.get("volume_ratio") is not None
-            and atr_ok
-        )
-        if not has_tech:
-            return False, "Missing momentum_score and required technical momentum features (rsi, price, dma_50, volume_ratio, atr_14)"
+        if atr_raw is None or not np.isfinite(atr_raw) or float(atr_raw) <= 0:
+            return False, f"Missing or non-positive atr_14: {atr_raw}"
 
     # Win rate check: must have winrate_score or win_rate or past_win_rate
-    if row.get("winrate_score") is None and row.get("win_rate") is None and row.get("past_win_rate") is None:
-        return False, "Missing winrate_score / past_win_rate"
+    winrate_val = row.get("winrate_score")
+    if winrate_val is None:
+        winrate_val = row.get("win_rate")
+    if winrate_val is None:
+        winrate_val = row.get("past_win_rate")
+    if winrate_val is None or not np.isfinite(winrate_val):
+        return False, f"Missing or non-finite winrate_score / past_win_rate: {winrate_val}"
 
     return True, "Valid"
 
@@ -351,8 +367,11 @@ class SignalRanker:
         Veto-Gated Context (Fix 3), and Continuous Regime Alignment (Fix 5).
         P0-2: No silent neutral/zero defaults for missing features.
         """
-        strategy = row.get("strategy_name") or row.get("strategy") or "trend_following"
+        strategy = row.get("strategy_name") or row.get("strategy")
+        if not strategy:
+            raise ValueError("Missing required strategy in candidate row")
         strat_key = normalize_strategy_key(strategy)
+        regime_key = normalize_regime_key(regime)
 
         # 1. Momentum score (P0-2: No silent 50.0 fallback)
         if "momentum_score" in row and row["momentum_score"] is not None:
@@ -417,7 +436,9 @@ class SignalRanker:
             )
 
         # Strategy-Specific Weight Vector (Fix 4)
-        w = STRATEGY_WEIGHT_VECTORS.get(strat_key, STRATEGY_WEIGHT_VECTORS["trend_following"])
+        if strat_key not in STRATEGY_WEIGHT_VECTORS:
+            raise ValueError(f"Strategy '{strat_key}' weight vector not defined in STRATEGY_WEIGHT_VECTORS")
+        w = STRATEGY_WEIGHT_VECTORS[strat_key]
 
         # Assert weights sum to 1.0
         assert abs(sum(w.values()) - 1.0) < 1e-9, f"Weights for {strat_key} must sum to 1.0!"

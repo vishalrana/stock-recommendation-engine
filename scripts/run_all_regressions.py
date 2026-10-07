@@ -49,24 +49,49 @@ TEST_SUITES = [
     "scripts/test_strategy_deduplication.py",
     "tests/quant_reference/test_quant_reference_suite.py",
     "tests/quant_reference/test_property_invariants.py",
+    "tests/quant_reference/test_fail_closed_and_canonical_registries.py",
     "tests/test_end_to_end_pipeline.py",
 ]
 
 
 def run_all():
+    import glob
     print("=" * 70)
-    print("RUNNING MASTER REPO REGRESSION SUITE")
+    print("RUNNING MASTER REPO REGRESSION SUITE (SELF-AUDITING)")
     print("=" * 70)
     
+    # 1. Audit uniqueness
+    if len(TEST_SUITES) != len(set(TEST_SUITES)):
+        print("[!] FATAL AUDIT ERROR: Duplicate test suite entries detected in TEST_SUITES.")
+        return False
+
+    # 2. Audit existence of all registered tests
+    for p in TEST_SUITES:
+        fp = os.path.join(PROJECT_ROOT, p)
+        if not os.path.exists(fp):
+            print(f"[!] FATAL AUDIT ERROR: Registered test file does not exist: {p}")
+            return False
+
+    # 3. Audit test discovery: verify no orphaned test_*.py files on disk
+    scripts_tests = {os.path.relpath(f, PROJECT_ROOT).replace("\\", "/") for f in glob.glob(os.path.join(PROJECT_ROOT, "scripts", "test_*.py"))}
+    tests_dir_tests = {os.path.relpath(f, PROJECT_ROOT).replace("\\", "/") for f in glob.glob(os.path.join(PROJECT_ROOT, "tests", "**", "test_*.py"), recursive=True)}
+    all_discovered = scripts_tests | tests_dir_tests
+    registered_set = set(TEST_SUITES)
+
+    unregistered = all_discovered - registered_set
+    if unregistered:
+        print(f"[!] FATAL AUDIT ERROR: Found unregistered test suite(s) on disk: {sorted(unregistered)}")
+        return False
+
+    print(f"[*] Self-audit passed: All {len(TEST_SUITES)} unique test suites accounted for with zero orphans or duplicates.")
+    print("=" * 70)
+
     passed = 0
     failed = 0
     results = []
 
     for test_path in TEST_SUITES:
         full_path = os.path.join(PROJECT_ROOT, test_path)
-        if not os.path.exists(full_path):
-            print(f"[-] SKIPPED: {test_path} (file not found)")
-            continue
 
         t0 = time.time()
         res = subprocess.run(

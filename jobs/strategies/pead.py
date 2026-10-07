@@ -1,6 +1,8 @@
 import logging
+import math
 from datetime import datetime
 from typing import Optional, List
+import numpy as np
 import pandas as pd
 from jobs.strategies.base import StrategyInterface
 from src.utils.candidate_builder import build_candidate_from_row
@@ -222,9 +224,21 @@ class PEADStrategy(StrategyInterface):
             logger.warning(f"[GATE PEAD] {ticker}: Missing EMA_20. Rejecting candidate.")
             return None
 
-        current_rsi = float(df['RSI_14'].iloc[-1]) if 'RSI_14' in df.columns else 50.0
-        volume_ratio = float(earnings_volume / volume_avg) if volume_avg > 0 else 1.0
-        macd_histogram = float(df['MACD_HIST'].iloc[-1]) if 'MACD_HIST' in df.columns else 0.0
+        if 'RSI_14' not in df.columns or 'MACD_HIST' not in df.columns:
+            logger.warning(f"[GATE PEAD] {ticker}: Missing RSI_14 or MACD_HIST. Rejecting candidate.")
+            return None
+
+        current_rsi = float(df['RSI_14'].iloc[-1])
+        if pd.isna(current_rsi) or np.isinf(current_rsi):
+            return None
+
+        volume_ratio = float(earnings_volume / volume_avg) if volume_avg > 0 else 0.0
+        if pd.isna(volume_ratio) or volume_ratio <= 0:
+            return None
+
+        macd_histogram = float(df['MACD_HIST'].iloc[-1])
+        if pd.isna(macd_histogram) or np.isinf(macd_histogram):
+            return None
 
         # 1. Canonical Bayesian Historical Metrics Pipeline
         p_wr = metrics.get("past_win_rate") or metrics.get("win_rate") or metrics.get("shrunk_win_rate") if metrics else None

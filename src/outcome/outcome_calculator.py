@@ -24,12 +24,47 @@ import numpy as np
 # risk management mandates executing stop first.
 SAME_DAY_AMBIGUITY_POLICY: str = "STOP_FIRST"
 
+from enum import Enum
+
+
+class PositionState(str, Enum):
+    OPEN = "open"
+    T1_HIT = "hit_t1"
+    T2_HIT = "hit_t2"
+    T3_HIT = "hit_t3"
+    STOPPED = "stopped"
+    EXPIRED = "expired"
+    INVALIDATED = "invalidated"
+
+
 # Canonical scale-out weights matching quant_config.py
 DEFAULT_SCALE_OUT_WEIGHTS = {
-    "all_three": {"t1": 0.50, "t2": 0.30, "t3": 0.20},
-    "t1_t2_only": {"t1": 0.60, "t2": 0.40, "t3": 0.0},
-    "t1_only": {"t1": 0.70, "t2": 0.0, "t3": 0.0},
+    "all_three": {"t1": 0.50, "t2": 0.30, "t3": 0.20, "runner": 0.0, "label": "50/30/20"},
+    "t1_t2_only": {"t1": 0.60, "t2": 0.40, "t3": 0.0, "runner": 0.0, "label": "60/40/0"},
+    "t1_only": {"t1": 0.70, "t2": 0.0, "t3": 0.0, "runner": 0.30, "label": "70/30/0"},
 }
+
+
+def get_scale_out_plan_weights(
+    target_1: Optional[float],
+    target_2: Optional[float],
+    target_3: Optional[float],
+) -> Tuple[float, float, float, float]:
+    """
+    Determine normalized scale-out weights based on available target levels.
+    Returns (w1, w2, w3, w_runner) where w1 + w2 + w3 + w_runner == 1.0.
+    Canonical mapping:
+    - All 3 targets: 50% T1, 30% T2, 20% T3, 0% runner
+    - T1 and T2: 60% T1, 40% T2, 0% T3, 0% runner
+    - T1 only: 70% T1, 0% T2, 0% T3, 30% runner to breakeven
+    """
+    if target_1 and target_2 and target_3:
+        return 0.50, 0.30, 0.20, 0.0
+    elif target_1 and target_2:
+        return 0.60, 0.40, 0.0, 0.0
+    elif target_1:
+        return 0.70, 0.0, 0.0, 0.30
+    return 0.70, 0.0, 0.0, 0.30
 
 
 def get_effective_scale_out_weights(
@@ -41,16 +76,129 @@ def get_effective_scale_out_weights(
     Determine normalized scale-out weights based on available target levels.
     Canonical mapping:
     - All 3 targets: 50% T1, 30% T2, 20% T3
-    - T1 and T2: 60% T1, 40% T2
+    - T1 and T2: 60% T1, 40% T2, 0% T3
     - T1 only: 70% T1, 30% runner to breakeven
     """
-    if target_1 and target_2 and target_3:
-        return 0.50, 0.30, 0.20
-    elif target_1 and target_2:
-        return 0.60, 0.40, 0.0
-    elif target_1:
-        return 0.70, 0.0, 0.0
-    return 0.70, 0.0, 0.0
+    w1, w2, w3, _ = get_scale_out_plan_weights(target_1, target_2, target_3)
+    return w1, w2, w3
+
+
+class PositionScaleOutTracker:
+    """
+    Canonical deterministic position scale-out state machine (Section 16 & 17).
+    Enforces the fundamental quantitative invariant:
+        realized_weight + remaining_weight == 1.0
+    at every state transition and lifecycle event.
+    """
+    def __init__(
+        self,
+        entry_price: float,
+        stop_loss: float,
+        target_1: float,
+        target_2: Optional[float] = None,
+        target_3: Optional[float] = None,
+    ):
+        self.entry_price = float(entry_price)
+        self.initial_stop = float(stop_loss)
+        self.current_stop = float(stop_loss)
+        self.target_1 = float(target_1) if target_1 else None
+        self.target_2 = float(target_2) if target_2 else None
+        self.target_3 = float(target_3) if target_3 else None
+
+        self.w1, self.w2, self.w3, self.w_runner = get_scale_out_plan_weights(
+            self.target_1, self.target_2, self.target_3
+        )
+        assert abs(self.w1 + self.w2 + self.w3 + self.w_runner - 1.0) < 1e-6, "Weights must sum to 1.0"
+
+        self.state = PositionState.OPEN
+        self.realized_weight = 0.0
+        self.remaining_weight = 1.0
+        self.realized_return_pct = 0.0
+        self.final_exit_price = self.current_stop
+        self._check_invariant()
+
+    def _check_invariant(self):
+        assert abs((self.realized_weight + self.remaining_weight) - 1.0) < 1e-6, (
+            f"Weight leak invariant violated! Realized: {self.realized_weight}, Remaining: {self.remaining_weight}"
+        )
+
+    def on_stop_hit(self, exit_price: float) -> PositionState:
+        """Handle stop loss breach (accounting for slippage / open gap)."""
+        if self.remaining_weight > 0:
+            r_stop = (exit_price - self.entry_price) / self.entry_price * 100.0
+            self.realized_return_pct += self.remaining_weight * r_stop
+            self.realized_weight = round(self.realized_weight + self.remaining_weight, 6)
+            self.remaining_weight = 0.0
+            self.final_exit_price = exit_price
+
+        if self.state == PositionState.T2_HIT:
+            pass  # remains hit_t2
+        elif self.state == PositionState.T1_HIT:
+            pass  # remains hit_t1
+        else:
+            self.state = PositionState.STOPPED
+        self._check_invariant()
+        return self.state
+
+    def on_t1_hit(self, exit_price: float) -> PositionState:
+        """Handle Target 1 hit."""
+        if self.state == PositionState.OPEN:
+            r1 = (exit_price - self.entry_price) / self.entry_price * 100.0
+            self.realized_return_pct += self.w1 * r1
+            self.realized_weight = round(self.realized_weight + self.w1, 6)
+            self.remaining_weight = round(self.remaining_weight - self.w1, 6)
+            self.final_exit_price = exit_price
+            self.state = PositionState.T1_HIT
+            # Ratchet stop to breakeven (entry price) on remaining portion
+            self.current_stop = max(self.current_stop, self.entry_price)
+            self._check_invariant()
+        return self.state
+
+    def on_t2_hit(self, exit_price: float) -> PositionState:
+        """Handle Target 2 hit."""
+        if self.state in (PositionState.OPEN, PositionState.T1_HIT) and self.w2 > 0:
+            if self.state == PositionState.OPEN:
+                self.on_t1_hit(self.target_1)
+            r2 = (exit_price - self.entry_price) / self.entry_price * 100.0
+            self.realized_return_pct += self.w2 * r2
+            self.realized_weight = round(self.realized_weight + self.w2, 6)
+            self.remaining_weight = round(self.remaining_weight - self.w2, 6)
+            self.final_exit_price = exit_price
+            self.state = PositionState.T2_HIT
+            # Trailing stop ratcheted to Target 1
+            if self.target_1:
+                self.current_stop = max(self.current_stop, self.target_1)
+            self._check_invariant()
+        return self.state
+
+    def on_t3_hit(self, exit_price: float) -> PositionState:
+        """Handle Target 3 hit."""
+        if self.state in (PositionState.OPEN, PositionState.T1_HIT, PositionState.T2_HIT) and self.w3 > 0:
+            if self.state == PositionState.OPEN:
+                self.on_t1_hit(self.target_1)
+            if self.state == PositionState.T1_HIT and self.w2 > 0 and self.target_2:
+                self.on_t2_hit(self.target_2)
+            r3 = (exit_price - self.entry_price) / self.entry_price * 100.0
+            self.realized_return_pct += self.w3 * r3
+            self.realized_weight = round(self.realized_weight + self.w3, 6)
+            self.remaining_weight = round(self.remaining_weight - self.w3, 6)
+            self.final_exit_price = exit_price
+            self.state = PositionState.T3_HIT
+            self._check_invariant()
+        return self.state
+
+    def on_expired(self, close_price: float) -> PositionState:
+        """Handle trade horizon expiry."""
+        if self.remaining_weight > 0:
+            r_close = (close_price - self.entry_price) / self.entry_price * 100.0
+            self.realized_return_pct += self.remaining_weight * r_close
+            self.realized_weight = round(self.realized_weight + self.remaining_weight, 6)
+            self.remaining_weight = 0.0
+            self.final_exit_price = close_price
+            if self.state == PositionState.OPEN:
+                self.state = PositionState.EXPIRED
+        self._check_invariant()
+        return self.state
 
 
 def resolve_bar_event(

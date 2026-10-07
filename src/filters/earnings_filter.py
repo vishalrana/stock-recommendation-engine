@@ -42,6 +42,7 @@ from src.quant_config import (
     REASON_EARNINGS_OUTSIDE_BLACKOUT,
     REASON_EARNINGS_BLACKOUT_BLOCK,
     REASON_SECTOR_ETF_EXEMPT,
+    normalize_strategy_key,
 )
 
 DEFAULT_EARNINGS_CACHE_FILE = (
@@ -264,26 +265,6 @@ def reset_session_cache():
     _SESSION_FETCHED_TICKERS.clear()
 
 
-def normalize_strategy_key(strategy: str) -> str:
-    """Normalize any strategy string variant."""
-    if not strategy:
-        return "trend_following"
-    s = str(strategy).strip().lower().replace("-", "_").replace(" ", "_")
-    if "52" in s or "breakout" in s or "high" in s:
-        return "52w_high_breakout"
-    if "trend" in s:
-        return "trend_following"
-    if "pullback" in s:
-        return "pullback_recovery"
-    if "cross" in s or "momentum" in s:
-        return "cross_sectional_momentum"
-    if "pead" in s or "earnings" in s:
-        return "pead"
-    if "sector" in s or "rotation" in s:
-        return "sector_rotation"
-    if "mean" in s or "reversion" in s:
-        return "mean_reversion"
-    return s
 
 
 def normalize_date_str(val: Any) -> Optional[str]:

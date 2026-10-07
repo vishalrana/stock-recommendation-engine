@@ -253,9 +253,9 @@ STRATEGY_TARGET_CONFIG: Dict[str, Dict[str, Any]] = {
 T3_REACH_PROB_SURVIVAL_THRESHOLD: float = 0.15  # 15.0%
 
 SCALE_OUT_WEIGHTS = {
-    "all_three": {"t1": 0.50, "t2": 0.30, "t3": 0.20, "label": "50/30/20"},
-    "t1_t2_only": {"t1": 0.60, "t2": 0.40, "t3": 0.0, "label": "60/40/0"},
-    "t1_only": {"t1": 0.70, "t2": 0.0, "t3": 0.0, "label": "70/30/0"},
+    "all_three": {"t1": 0.50, "t2": 0.30, "t3": 0.20, "runner": 0.0, "label": "50/30/20"},
+    "t1_t2_only": {"t1": 0.60, "t2": 0.40, "t3": 0.0, "runner": 0.0, "label": "60/40/0"},
+    "t1_only": {"t1": 0.70, "t2": 0.0, "t3": 0.0, "runner": 0.30, "label": "70/30/0"},
 }
 
 # Minimum valid historical sliding windows required for empirical reach probability
@@ -301,26 +301,98 @@ STRATEGY_STOP_CONFIG: Dict[str, Dict[str, float]] = {
 MAX_STOP_LOSS_PCT: float = 0.07  # 7.0% maximum risk ceiling across all strategies
 
 
+# ==============================================================================
+# CANONICAL STRATEGY & REGIME REGISTRIES (Section 3 & 4)
+# ==============================================================================
+CANONICAL_STRATEGIES: set[str] = {
+    "trend_following",
+    "52w_high_breakout",
+    "pullback_recovery",
+    "cross_sectional_momentum",
+    "pead",
+    "sector_rotation",
+    "mean_reversion",
+}
+
+STRATEGY_ALIASES: Dict[str, str] = {
+    # trend_following
+    "trend_following": "trend_following",
+    "trend following": "trend_following",
+    "trend": "trend_following",
+    # 52w_high_breakout
+    "52w_high_breakout": "52w_high_breakout",
+    "52_week_high_breakout": "52w_high_breakout",
+    "52-week high breakout": "52w_high_breakout",
+    "52-week high": "52w_high_breakout",
+    "52_week_high": "52w_high_breakout",
+    "52w_high": "52w_high_breakout",
+    "52w-high": "52w_high_breakout",
+    "52w-high-breakout": "52w_high_breakout",
+    "week_52_high": "52w_high_breakout",
+    "52 week high": "52w_high_breakout",
+    # pullback_recovery
+    "pullback_recovery": "pullback_recovery",
+    "pullback recovery": "pullback_recovery",
+    "pullback": "pullback_recovery",
+    # cross_sectional_momentum
+    "cross_sectional_momentum": "cross_sectional_momentum",
+    "cross-sectional momentum": "cross_sectional_momentum",
+    "cross_sectional": "cross_sectional_momentum",
+    "cross sectional momentum": "cross_sectional_momentum",
+    "cross-sectional": "cross_sectional_momentum",
+    "cross sectional": "cross_sectional_momentum",
+    # pead
+    "pead": "pead",
+    "post_earnings_drift": "pead",
+    "post-earnings drift": "pead",
+    "post earnings drift": "pead",
+    # sector_rotation
+    "sector_rotation": "sector_rotation",
+    "sector rotation": "sector_rotation",
+    # mean_reversion
+    "mean_reversion": "mean_reversion",
+    "mean reversion": "mean_reversion",
+}
+
+
 def normalize_strategy_key(strategy: str) -> str:
-    """Normalize any strategy string variant to its canonical configuration key."""
-    if not strategy:
-        return "trend_following"
-    s = str(strategy).strip().lower().replace("-", "_").replace(" ", "_")
-    if "52" in s or "breakout" in s or "high" in s:
-        return "52w_high_breakout"
-    if "trend" in s:
-        return "trend_following"
-    if "pullback" in s:
-        return "pullback_recovery"
-    if "cross" in s or "momentum" in s:
-        return "cross_sectional_momentum"
-    if "pead" in s or "drift" in s or "earnings" in s:
-        return "pead"
-    if "sector" in s or "rotation" in s:
-        return "sector_rotation"
-    if "mean" in s or "reversion" in s:
-        return "mean_reversion"
-    return s
+    """
+    Authoritative Strategy Normalizer (Single Source of Truth).
+    Explicitly maps supported strategies and canonical aliases.
+    Fails closed on missing or unknown strategies (raises ValueError).
+    No substring heuristics, no silent default to trend_following.
+    """
+    if strategy is None:
+        raise ValueError("Missing strategy: strategy name cannot be None")
+    s = str(strategy).strip().lower()
+    if s in STRATEGY_ALIASES:
+        return STRATEGY_ALIASES[s]
+    s_clean = s.replace("-", "_").replace(" ", "_")
+    if s_clean in STRATEGY_ALIASES:
+        return STRATEGY_ALIASES[s_clean]
+    raise ValueError(
+        f"Unknown or unsupported strategy: '{strategy}'. Supported canonical strategies: {sorted(CANONICAL_STRATEGIES)}"
+    )
+
+
+CANONICAL_REGIMES: set[str] = {"bull", "sideways", "bear"}
+
+
+def normalize_regime_key(regime: str) -> str:
+    """
+    Authoritative Market Regime Normalizer (Single Source of Truth).
+    Explicitly validates and normalizes market regime string (bull, sideways, bear).
+    Fails closed on missing or unknown market regime (raises ValueError).
+    No silent substitution to sideways.
+    """
+    if regime is None:
+        raise ValueError("Missing market regime: regime cannot be None")
+    r = str(regime).strip().lower()
+    if r not in CANONICAL_REGIMES:
+        raise ValueError(
+            f"Unknown or unsupported market regime: '{regime}'. Supported regimes: {sorted(CANONICAL_REGIMES)}"
+        )
+    return r
 
 
 # ==============================================================================

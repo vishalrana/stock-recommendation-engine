@@ -193,6 +193,7 @@ def evaluate_signal_outcome(
     high_col = "High" if "High" in df.columns else ("HIGH" if "HIGH" in df.columns else None)
     low_col = "Low" if "Low" in df.columns else ("LOW" if "LOW" in df.columns else None)
     close_col = "Close" if "Close" in df.columns else ("CLOSE" if "CLOSE" in df.columns else None)
+    open_col = "Open" if "Open" in df.columns else ("OPEN" if "OPEN" in df.columns else close_col)
 
     if not high_col or not low_col or not close_col:
         return None
@@ -215,6 +216,7 @@ def evaluate_signal_outcome(
     final_exit_price = current_stop
 
     for i, (idx, bar) in enumerate(df.iterrows()):
+        day_open = float(bar[open_col]) if open_col in bar else float(bar[close_col])
         day_high = float(bar[high_col])
         day_low = float(bar[low_col])
         day_close = float(bar[close_col])
@@ -226,13 +228,24 @@ def evaluate_signal_outcome(
             outcome_date_str = str(idx)[:10]
 
         # -------------------------------------------------------------
-        # 1. AMBIGUITY POLICY: STOP FIRST EVALUATION
+        # 1. CANONICAL EVENT RESOLUTION (Open Gap & STOP_FIRST Ambiguity)
         # -------------------------------------------------------------
-        if ambiguity_policy == "STOP_FIRST" and day_low <= current_stop:
-            # Remaining weight stops out at current_stop
-            r_stop_portion = (current_stop - entry_price) / entry_price * 100.0
+        active_target = target_3 if (hit_t2 and target_3) else (target_2 if (hit_t1 and target_2) else target_1)
+        stop_hit, target_hit, exit_p = resolve_bar_event(
+            open_price=day_open,
+            high_price=day_high,
+            low_price=day_low,
+            close_price=day_close,
+            stop_price=current_stop,
+            target_price=active_target,
+            ambiguity_policy=ambiguity_policy,
+        )
+
+        if stop_hit:
+            # Remaining weight stops out at exit_p (capturing open gap slippage)
+            r_stop_portion = (exit_p - entry_price) / entry_price * 100.0
             realized_return_pct += remaining_weight * r_stop_portion
-            final_exit_price = current_stop
+            final_exit_price = exit_p
             remaining_weight = 0.0
 
             if hit_t2:

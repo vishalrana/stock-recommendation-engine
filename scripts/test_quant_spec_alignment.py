@@ -365,6 +365,7 @@ def test_10_pure_recommendation_architecture():
         "dma_50": 140.0,
         "volume_ratio": 1.2,
         "macd_histogram": 0.5,
+        "atr_14": 2.5,
         "winrate_score": 65.0,
     }
     is_valid, msg = validate_candidate_features(valid_features)

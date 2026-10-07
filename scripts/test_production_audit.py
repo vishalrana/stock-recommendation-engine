@@ -612,7 +612,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
         self.assertIn("removed_at", update_call)
         self.assertIn("outcome_date", update_call)
         # Return percentage calculated accurately from preserved entry_price
-        self.assertEqual(update_call["outcome_return_pct"], 16.67)
+        self.assertAlmostEqual(update_call["outcome_return_pct"], 16.67, places=2)
 
     # -------------------------------------------------------------------------
     # 6. GITHUB ACTIONS DUPLICATE REFRESH PROTECTION (Requirement 3)

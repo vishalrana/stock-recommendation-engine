@@ -82,10 +82,12 @@ class TargetCalculationResult:
         return asdict(self)
 
 
-# Global in-memory cache for reach distributions: (ticker, holding_days) or (ticker, holding_days, as_of_date) -> np.ndarray
-_REACH_DIST_CACHE: Dict[Any, np.ndarray] = {}
-# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days) or with as_of -> float
-_TARGET_STOP_REACH_CACHE: Dict[Any, float] = {}
+ALGORITHM_VERSION: str = "v2_target_reach"
+
+# Global in-memory cache for reach distributions: (ticker, as_of_date, holding_days, lookback_days, algorithm_version) -> np.ndarray
+_REACH_DIST_CACHE: Dict[Tuple[str, str, int, int, str], np.ndarray] = {}
+# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days, lookback_days, as_of_date, algorithm_version) -> float
+_TARGET_STOP_REACH_CACHE: Dict[Tuple[str, float, float, int, int, str, str], float] = {}
 
 
 def reset_reach_prob_cache() -> None:
@@ -99,6 +101,7 @@ def get_reach_prob_distribution(
     holding_days: int,
     price_df: Optional[pd.DataFrame] = None,
     lookback_days: int = 504,
+    as_of_date: Optional[str] = None,
 ) -> np.ndarray:
     """
     Compute or retrieve cached forward max-gain distribution for a ticker and holding period H.
@@ -107,27 +110,41 @@ def get_reach_prob_distribution(
     """
     t_up = ticker.upper()
     h = int(holding_days)
-    as_of = str(price_df.index[-1])[:10] if (price_df is not None and len(price_df) > 0) else ""
-    cache_key = (t_up, h, as_of)
-    cache_key_compat = (t_up, h)
+    lb = int(lookback_days)
+
+    # Filter price_df to as_of_date if provided
+    if price_df is not None and not price_df.empty:
+        if as_of_date:
+            try:
+                as_of_dt = pd.to_datetime(as_of_date)
+                if isinstance(price_df.index, pd.DatetimeIndex):
+                    if price_df.index.tz is not None and as_of_dt.tz is None:
+                        as_of_dt = as_of_dt.tz_localize(price_df.index.tz)
+                    price_df = price_df.loc[price_df.index <= as_of_dt]
+                else:
+                    price_df = price_df.loc[pd.to_datetime(price_df.index) <= as_of_dt]
+            except Exception as e:
+                logger.debug("Failed filtering price_df to as_of_date %s: %s", as_of_date, e)
+        as_of = str(as_of_date)[:10] if as_of_date else str(price_df.index[-1])[:10]
+    else:
+        as_of = str(as_of_date)[:10] if as_of_date else ""
+
+    cache_key = (t_up, as_of, h, lb, ALGORITHM_VERSION)
     if cache_key in _REACH_DIST_CACHE:
         return _REACH_DIST_CACHE[cache_key]
-    if not as_of and cache_key_compat in _REACH_DIST_CACHE:
-        return _REACH_DIST_CACHE[cache_key_compat]
 
     cache_dir = os.path.join("data", "cache", "reach_dists")
-    cache_file = os.path.join(cache_dir, f"{t_up}.parquet")
+    cache_file = os.path.join(cache_dir, f"{t_up}_{as_of}_{h}d_{lb}w_{ALGORITHM_VERSION}.parquet") if as_of else None
 
-    # 1. Check disk cache
-    if os.path.exists(cache_file):
+    # 1. Check disk cache if as_of is specific
+    if cache_file and os.path.exists(cache_file):
         try:
             cached_df = pd.read_parquet(cache_file)
-            col_name = f"max_gain_{holding_days}d"
+            col_name = f"max_gain_{h}d"
             if col_name in cached_df.columns:
                 vals = cached_df[col_name].dropna().to_numpy(dtype=float)
                 if len(vals) > 0:
                     _REACH_DIST_CACHE[cache_key] = vals
-                    _REACH_DIST_CACHE[cache_key_compat] = vals
                     return vals
         except Exception as e:
             logger.debug("Failed reading reach_dist cache for %s: %s", ticker, e)
@@ -138,9 +155,15 @@ def get_reach_prob_distribution(
             from src.data.cache_manager import get_cache_manager
             import datetime
             cm = get_cache_manager()
-            end_date = datetime.date.today().isoformat()
-            start_date = (datetime.date.today() - datetime.timedelta(days=int(lookback_days * 1.6) + holding_days + 30)).isoformat()
+            end_date = as_of if as_of else datetime.date.today().isoformat()
+            try:
+                end_dt = datetime.date.fromisoformat(end_date[:10])
+            except Exception:
+                end_dt = datetime.date.today()
+            start_date = (end_dt - datetime.timedelta(days=int(lb * 1.6) + h + 30)).isoformat()
             price_df = cm.get_ticker_history(ticker, start_date, end_date)
+            if price_df is not None and not price_df.empty and as_of:
+                price_df = price_df.loc[pd.to_datetime(price_df.index) <= pd.to_datetime(as_of)]
         except Exception as e:
             logger.debug("Could not load price history for reach prob %s: %s", ticker, e)
 
@@ -154,14 +177,13 @@ def get_reach_prob_distribution(
 
     closes = price_df[close_col].dropna().to_numpy(dtype=float)
     n = len(closes)
-    h = int(holding_days)
 
     if n <= h + 5:
         return np.array([], dtype=float)
 
     # Slide window across the available history (up to lookback_days windows)
     total_possible_windows = n - h
-    num_windows = min(lookback_days, total_possible_windows)
+    num_windows = min(lb, total_possible_windows)
     start_idx = total_possible_windows - num_windows
 
     max_gains = []
@@ -175,21 +197,16 @@ def get_reach_prob_distribution(
     arr = np.array(max_gains, dtype=float)
 
     # Cache distribution to parquet
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        col_name = f"max_gain_{h}d"
-        save_df = pd.DataFrame({col_name: arr})
-        if os.path.exists(cache_file):
-            existing_df = pd.read_parquet(cache_file)
-            existing_df[col_name] = pd.Series(arr)
-            existing_df.to_parquet(cache_file, engine="pyarrow")
-        else:
+    if cache_file and len(arr) > 0:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            col_name = f"max_gain_{h}d"
+            save_df = pd.DataFrame({col_name: arr})
             save_df.to_parquet(cache_file, engine="pyarrow")
-    except Exception as e:
-        logger.debug("Failed saving reach_dist cache for %s: %s", ticker, e)
+        except Exception as e:
+            logger.debug("Failed saving reach_dist cache for %s: %s", ticker, e)
 
     _REACH_DIST_CACHE[cache_key] = arr
-    _REACH_DIST_CACHE[cache_key_compat] = arr
     return arr
 
 
@@ -200,13 +217,14 @@ def get_reach_prob_target_before_stop(
     holding_days: int,
     price_df: Optional[pd.DataFrame] = None,
     lookback_days: int = 504,
+    as_of_date: Optional[str] = None,
 ) -> float:
     """
     Calculate empirical reach probability where Target is reached BEFORE Stop is hit
     within the forward holding period H (in trading days).
 
     Zero lookahead: Evaluates historical sliding windows up to lookback_days.
-    Conservative intra-day execution rules:
+    Conservative intra-day execution rules resolved via canonical resolve_bar_event():
       1. Gap at Open:
          - Open <= Stop => STOP_HIT (stopped out at open)
          - Open >= Target => TARGET_REACHED (target hit at open)
@@ -216,21 +234,36 @@ def get_reach_prob_target_before_stop(
          - High >= Target => TARGET_REACHED
       3. Neither touched within H days => NEITHER_HIT (counted as failure).
     """
+    from src.outcome.outcome_calculator import resolve_bar_event
+
     t_up = ticker.upper()
     h = int(holding_days)
     t_pct = float(target_pct)
     s_pct = float(stop_pct)
+    lb = int(lookback_days)
 
     if t_pct <= 0 or s_pct <= 0 or h <= 0:
         return 0.0
 
-    as_of = str(price_df.index[-1])[:10] if (price_df is not None and len(price_df) > 0) else ""
-    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h, as_of)
-    cache_key_compat = (t_up, round(t_pct, 4), round(s_pct, 4), h)
+    if price_df is not None and not price_df.empty:
+        if as_of_date:
+            try:
+                as_of_dt = pd.to_datetime(as_of_date)
+                if isinstance(price_df.index, pd.DatetimeIndex):
+                    if price_df.index.tz is not None and as_of_dt.tz is None:
+                        as_of_dt = as_of_dt.tz_localize(price_df.index.tz)
+                    price_df = price_df.loc[price_df.index <= as_of_dt]
+                else:
+                    price_df = price_df.loc[pd.to_datetime(price_df.index) <= as_of_dt]
+            except Exception as e:
+                logger.debug("Failed filtering price_df to as_of_date %s: %s", as_of_date, e)
+        as_of = str(as_of_date)[:10] if as_of_date else str(price_df.index[-1])[:10]
+    else:
+        as_of = str(as_of_date)[:10] if as_of_date else ""
+
+    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h, lb, as_of, ALGORITHM_VERSION)
     if cache_key in _TARGET_STOP_REACH_CACHE:
         return _TARGET_STOP_REACH_CACHE[cache_key]
-    if not as_of and cache_key_compat in _TARGET_STOP_REACH_CACHE:
-        return _TARGET_STOP_REACH_CACHE[cache_key_compat]
 
     # Fetch price history if needed
     if price_df is None or price_df.empty:
@@ -238,9 +271,15 @@ def get_reach_prob_target_before_stop(
             from src.data.cache_manager import get_cache_manager
             import datetime
             cm = get_cache_manager()
-            end_date = datetime.date.today().isoformat()
-            start_date = (datetime.date.today() - datetime.timedelta(days=int(lookback_days * 1.6) + h + 30)).isoformat()
+            end_date = as_of if as_of else datetime.date.today().isoformat()
+            try:
+                end_dt = datetime.date.fromisoformat(end_date[:10])
+            except Exception:
+                end_dt = datetime.date.today()
+            start_date = (end_dt - datetime.timedelta(days=int(lb * 1.6) + h + 30)).isoformat()
             price_df = cm.get_ticker_history(ticker, start_date, end_date)
+            if price_df is not None and not price_df.empty and as_of:
+                price_df = price_df.loc[pd.to_datetime(price_df.index) <= pd.to_datetime(as_of)]
         except Exception as e:
             logger.debug("Could not load price history for target-before-stop %s: %s", ticker, e)
 
@@ -268,7 +307,7 @@ def get_reach_prob_target_before_stop(
     lows = clean_ohlc[low_col].to_numpy(dtype=float)
 
     total_possible_windows = n - h
-    num_windows = min(lookback_days, total_possible_windows)
+    num_windows = min(lb, total_possible_windows)
     if num_windows < MIN_REACH_PROB_WINDOWS:
         return 0.0
 
@@ -288,27 +327,18 @@ def get_reach_prob_target_before_stop(
         target_reached = False
 
         for t in range(d + 1, min(d + h + 1, n)):
-            o_t = opens[t]
-            h_t = highs[t]
-            l_t = lows[t]
-
-            # 1. Open Gap Check
-            if o_t <= stop_price:
+            stop_hit, target_hit, _ = resolve_bar_event(
+                open_price=opens[t],
+                high_price=highs[t],
+                low_price=lows[t],
+                close_price=closes[t],
+                stop_price=stop_price,
+                target_price=target_price,
+            )
+            if stop_hit:
                 target_reached = False
                 break
-            if o_t >= target_price:
-                target_reached = True
-                break
-
-            # 2. Intra-day Bar Check
-            if l_t <= stop_price and h_t >= target_price:
-                # Same-day ambiguity: conservative STOP_FIRST policy
-                target_reached = False
-                break
-            if l_t <= stop_price:
-                target_reached = False
-                break
-            if h_t >= target_price:
+            if target_hit:
                 target_reached = True
                 break
 
@@ -320,7 +350,6 @@ def get_reach_prob_target_before_stop(
 
     prob = float(success_count / valid_windows)
     _TARGET_STOP_REACH_CACHE[cache_key] = prob
-    _TARGET_STOP_REACH_CACHE[cache_key_compat] = prob
     return prob
 
 
@@ -331,6 +360,7 @@ def get_reach_prob(
     price_df: Optional[pd.DataFrame] = None,
     lookback_days: int = 504,
     stop_pct: Optional[float] = None,
+    as_of_date: Optional[str] = None,
 ) -> float:
     """
     Calculate empirical reach probability.
@@ -346,9 +376,16 @@ def get_reach_prob(
             holding_days=holding_days,
             price_df=price_df,
             lookback_days=lookback_days,
+            as_of_date=as_of_date,
         )
 
-    gains = get_reach_prob_distribution(ticker, holding_days, price_df, lookback_days)
+    gains = get_reach_prob_distribution(
+        ticker=ticker,
+        holding_days=holding_days,
+        price_df=price_df,
+        lookback_days=lookback_days,
+        as_of_date=as_of_date,
+    )
     if len(gains) < MIN_REACH_PROB_WINDOWS:
         logger.debug(
             "Insufficient historical gain evidence for %s: windows=%d (min %d). Empirical reach prob is 0.0.",
@@ -368,6 +405,7 @@ def calculate_targets(
     mock_reach_probs: Optional[Tuple[float, float, float]] = None,
     override_targets: Optional[Tuple[float, float, float]] = None,
     sector: Optional[str] = None,
+    as_of_date: Optional[str] = None,
 ) -> TargetCalculationResult:
     """
     Full 3-layer target calculation and reach-probability filtering engine.
@@ -488,9 +526,9 @@ def calculate_targets(
     else:
         hold = cfg["hold_days"]
         from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
-        rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct)
-        rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct)
-        rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct)
+        rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
+        rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
+        rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
 
     # Monotonic reach probability enforcement: farther targets cannot have higher reach prob over same holding period
     rp_t2 = min(rp_t2, rp_t1)

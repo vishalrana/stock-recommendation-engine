@@ -64,6 +64,7 @@ def compute_reach_prob_with_survivorship(
     sector: Optional[str] = None,
     delisted_reach_override: Optional[float] = None,
     stop_pct: Optional[float] = None,
+    as_of_date: Optional[str] = None,
 ) -> Tuple[float, float]:
     """
     Computes reach probability incorporating survivorship bias mitigation.
@@ -75,7 +76,14 @@ def compute_reach_prob_with_survivorship(
     from src.strategies.target_calculator import get_reach_prob
 
     # 1. Compute raw reach probability on the current active ticker
-    raw_reach = get_reach_prob(ticker, target_pct, holding_days, price_df, stop_pct=stop_pct)
+    raw_reach = get_reach_prob(
+        ticker,
+        target_pct,
+        holding_days,
+        price_df=price_df,
+        stop_pct=stop_pct,
+        as_of_date=as_of_date,
+    )
 
     # 2. Blend with delisted proxy if delisted sector history is available
     if delisted_reach_override is not None:
@@ -89,7 +97,13 @@ def compute_reach_prob_with_survivorship(
         delisted_reaches = []
         for dt in delisted_same_sector[:3]:
             try:
-                rp = get_reach_prob(dt, target_pct, holding_days, stop_pct=stop_pct)
+                rp = get_reach_prob(
+                    dt,
+                    target_pct,
+                    holding_days,
+                    stop_pct=stop_pct,
+                    as_of_date=as_of_date,
+                )
                 if rp > 0:
                     delisted_reaches.append(rp)
             except Exception:

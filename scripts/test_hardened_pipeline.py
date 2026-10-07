@@ -360,16 +360,17 @@ class TestHardenedPipeline(unittest.TestCase):
 
     # 24. Reach Distribution Cache Efficiency (Section 13)
     def test_24_reach_distribution_caching(self):
-        from src.strategies.target_calculator import get_reach_prob_distribution, _REACH_DIST_CACHE
+        from src.strategies.target_calculator import get_reach_prob_distribution, _REACH_DIST_CACHE, ALGORITHM_VERSION
         # Call with mock price_df
         dates = pd.date_range("2025-01-01", periods=60, freq="B")
         df_mock = pd.DataFrame({"CLOSE": np.linspace(100, 150, 60)}, index=dates)
         dist1 = get_reach_prob_distribution("CACHE_TEST_TICKER", 10, price_df=df_mock)
-        # Should be in memory cache
-        self.assertIn(("CACHE_TEST_TICKER", 10), _REACH_DIST_CACHE)
+        # Should be in memory cache with canonical key
+        as_of = str(dates[-1])[:10]
+        self.assertIn(("CACHE_TEST_TICKER", as_of, 10, 504, ALGORITHM_VERSION), _REACH_DIST_CACHE)
         self.assertGreater(len(dist1), 0)
         # Second call hits memory cache
-        dist2 = get_reach_prob_distribution("CACHE_TEST_TICKER", 10, price_df=None)
+        dist2 = get_reach_prob_distribution("CACHE_TEST_TICKER", 10, price_df=df_mock)
         np.testing.assert_array_equal(dist1, dist2)
 
 

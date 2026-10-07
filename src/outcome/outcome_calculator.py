@@ -53,6 +53,67 @@ def get_effective_scale_out_weights(
     return 0.70, 0.0, 0.0
 
 
+def resolve_bar_event(
+    open_price: float,
+    high_price: float,
+    low_price: float,
+    close_price: float,
+    stop_price: float,
+    target_price: float,
+    ambiguity_policy: str = SAME_DAY_AMBIGUITY_POLICY,
+) -> Tuple[bool, bool, float]:
+    """
+    Single canonical event resolver for bar evaluation against target and stop levels.
+    Evaluates open gaps and intraday high/low touch with deterministic STOP_FIRST policy.
+
+    Execution precedence:
+    1. Open Gap Check:
+       - Open <= stop_price => STOP_HIT at open_price
+       - Open >= target_price => TARGET_HIT at open_price
+    2. Intraday Bar Check:
+       - Low <= stop_price and High >= target_price =>
+         If ambiguity_policy == "STOP_FIRST", STOP_HIT at stop_price.
+         Else TARGET_HIT at target_price.
+       - Low <= stop_price => STOP_HIT at stop_price.
+       - High >= target_price => TARGET_HIT at target_price.
+    3. Neither touched:
+       => Neither hit. Exit price defaults to close_price.
+
+    Returns:
+        (stop_hit: bool, target_hit: bool, exit_price: float)
+    """
+    o = float(open_price)
+    h = float(high_price)
+    l = float(low_price)
+    c = float(close_price)
+    s = float(stop_price)
+    t = float(target_price)
+
+    # 1. Open Gap Check
+    if s > 0 and o <= s:
+        return True, False, o
+    if t > 0 and o >= t:
+        return False, True, o
+
+    # 2. Intraday Bar Check
+    stop_touched = (s > 0 and l <= s)
+    target_touched = (t > 0 and h >= t)
+
+    if stop_touched and target_touched:
+        if ambiguity_policy == "STOP_FIRST":
+            return True, False, s
+        else:
+            return False, True, t
+
+    if stop_touched:
+        return True, False, s
+
+    if target_touched:
+        return False, True, t
+
+    return False, False, c
+
+
 def calculate_static_scale_out_return(
     entry_price: float,
     stop_loss: float,

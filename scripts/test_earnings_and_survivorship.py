@@ -150,10 +150,66 @@ def run_tests():
     assert "reach-prob-rejected" in summary_line
     print("  --> PASS Scenario F: Delisted universe and summary reporting validated.")
 
+    # --------------------------------------------------------------------------
+    # Scenario G: ReachProbabilityResult Contract & Unpacking Compatibility
+    # --------------------------------------------------------------------------
+    print("\n[Scenario G] ReachProbabilityResult Contract & Unpacking Compatibility")
+    import pandas as pd
+    from src.strategies.target_calculator import ReachProbabilityResult, STATUS_VALID_ESTIMATE
+    dates = pd.date_range("2025-01-01", periods=100, freq="B")
+    test_df = pd.DataFrame({
+        "OPEN": [100.0 + i * 0.1 for i in range(100)],
+        "HIGH": [102.0 + i * 0.1 for i in range(100)],
+        "LOW": [99.0 + i * 0.1 for i in range(100)],
+        "CLOSE": [101.0 + i * 0.1 for i in range(100)],
+    }, index=dates)
+
+    res = compute_reach_prob_with_survivorship(
+        ticker="TEST_TICKER",
+        target_pct=0.01,
+        holding_days=10,
+        price_df=test_df,
+        delisted_reach_override=0.45,
+    )
+    # 2-tuple backwards compatible unpacking
+    adj, raw = res
+    print(f"  * Tuple Unpacking: adjusted={adj:.4f}, raw={raw:.4f}")
+    assert isinstance(adj, float) and isinstance(raw, float)
+    assert len(res) == 2
+    assert res[0] == adj and res[1] == raw
+
+    # Structured fields verification
+    print(f"  * Structured Result: status='{res.status}', provenance='{res.provenance}', delisted_samples={res.delisted_samples}")
+    assert res.status == STATUS_VALID_ESTIMATE
+    assert res.provenance == "empirical_override_delisted_blend"
+    assert res.delisted_samples == 1
+    print("  --> PASS Scenario G: ReachProbabilityResult contract verified.")
+
+    # --------------------------------------------------------------------------
+    # Scenario H: Point-in-Time Universe Reconstitution & Tape Provenance
+    # --------------------------------------------------------------------------
+    print("\n[Scenario H] Point-in-Time Universe Reconstitution & Tape Provenance")
+    from src.universe.us_equities import USEquitiesUniverseProvider
+    univ_prov = USEquitiesUniverseProvider()
+
+    # In September 2008, historical Lehman Brothers (LEH) was still trading
+    pit_2008 = univ_prov.get_universe_provenance(as_of_date="2008-09-01")
+    print(f"  * Point-in-Time (2008-09-01): Reconstituted {pit_2008['delisted_reconstituted_count']} delisted tickers")
+    assert pit_2008["is_point_in_time"] is True
+    assert pit_2008["delisted_reconstituted_count"] >= 30, f"Expected >= 30 delisted tickers active on 2008-09-01, got {pit_2008['delisted_reconstituted_count']}"
+    assert "tape_coverage_limitations" in pit_2008
+
+    # In 2026, those 2008 delistings must be excluded from active universe
+    pit_2026 = univ_prov.get_universe_provenance(as_of_date="2026-01-01")
+    print(f"  * Point-in-Time (2026-01-01): Excluded {pit_2026['delisted_prior_excluded_count']} historically delisted tickers")
+    assert pit_2026["delisted_prior_excluded_count"] >= 50
+    print("  --> PASS Scenario H: Point-in-time universe reconstitution verified.")
+
     print("\n" + "=" * 80)
-    print("  ALL 6 ACCEPTANCE SCENARIOS PASSED WITH ZERO ERRORS!")
+    print("  ALL 8 ACCEPTANCE SCENARIOS PASSED WITH ZERO ERRORS!")
     print("=" * 80)
 
 
 if __name__ == "__main__":
     run_tests()
+

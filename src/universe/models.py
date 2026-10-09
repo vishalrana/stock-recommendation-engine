@@ -26,6 +26,7 @@ class SecurityRecord:
     is_test: bool = False               # Test issue flag
     cik: Optional[int] = None           # SEC Central Index Key (if available)
     data_provider_ticker: Optional[str] = None  # Provider-specific format (e.g., 'BRK-B' for yfinance)
+    delisted_date: Optional[str] = None # Historical delisting date (YYYY-MM-DD) for survivorship mitigation
 
     def __post_init__(self):
         self.ticker = self.ticker.strip().upper()

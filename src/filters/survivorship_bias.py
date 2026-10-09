@@ -65,18 +65,35 @@ def compute_reach_prob_with_survivorship(
     delisted_reach_override: Optional[float] = None,
     stop_pct: Optional[float] = None,
     as_of_date: Optional[str] = None,
-) -> Tuple[float, float]:
+) -> Any:
     """
     Computes reach probability incorporating survivorship bias mitigation.
-    # ponytail: 70/30 blend with sector proxy when available, or flat haircut (REACH_PROB_FALLBACK_HAIRCUT).
-    
-    Returns:
-        (adjusted_reach_prob, raw_reach_prob)
-    """
-    from src.strategies.target_calculator import get_reach_prob
 
-    # 1. Compute raw reach probability on the current active ticker
-    raw_reach = get_reach_prob(
+    MODELING ASSUMPTIONS:
+    1. 70/30 Empirical Blend: Active ticker empirical path is weighted at 70% and
+       sector-matched historical delisted constituents are weighted at 30% to account
+       for historical mortality and downside survivorship inflation.
+    2. Fallback Haircut (0.92): When historical delisted price records for the sector
+       are unavailable, active empirical reach probability is discounted by an 8% haircut
+       (multiplier 0.92 = REACH_PROB_FALLBACK_HAIRCUT from src.quant_config).
+    3. Expectancy Haircut (0.85): Historical strategy backtest expectancies are discounted
+       by a 15% haircut (multiplier 0.85 = SURVIVORSHIP_BIAS_HAIRCUT from src.quant_config).
+
+    Returns:
+        ReachProbabilityResult (iterable 2-tuple backwards compatible with (adjusted_prob, raw_prob))
+        exposing .status, .provenance, .sample_count, .delisted_samples, and .as_of_date.
+    """
+    from src.strategies.target_calculator import (
+        get_reach_prob_structured,
+        ReachProbabilityResult,
+        STATUS_VALID_ESTIMATE,
+        STATUS_CUTOFF_FAILURE,
+        STATUS_INVALID_INPUT,
+        STATUS_INSUFFICIENT_OBSERVATIONS,
+    )
+
+    # 1. Compute raw reach probability on the current active ticker using structured evaluator
+    raw_res = get_reach_prob_structured(
         ticker,
         target_pct,
         holding_days,
@@ -85,40 +102,90 @@ def compute_reach_prob_with_survivorship(
         as_of_date=as_of_date,
     )
 
-    # 2. Blend with delisted proxy if delisted sector history is available
-    if delisted_reach_override is not None:
-        avg_delisted = float(delisted_reach_override)
-        blended = (0.70 * raw_reach) + (0.30 * avg_delisted)
-        return round(blended, 4), round(raw_reach, 4)
+    # Fail closed if cutoff evaluation or input validation failed
+    if raw_res.status in (STATUS_CUTOFF_FAILURE, STATUS_INVALID_INPUT):
+        return raw_res
 
+    raw_reach = raw_res.raw_prob
+
+    # If active ticker has insufficient observations, preserve status
+    if raw_res.status == STATUS_INSUFFICIENT_OBSERVATIONS:
+        return ReachProbabilityResult(
+            adjusted_prob=0.0,
+            raw_prob=0.0,
+            status=STATUS_INSUFFICIENT_OBSERVATIONS,
+            provenance="insufficient_active_observations",
+            sample_count=raw_res.sample_count,
+            delisted_samples=0,
+            as_of_date=raw_res.as_of_date,
+        )
+
+    # 2. Blend with delisted proxy if delisted sector history is explicitly overridden
+    if delisted_reach_override is not None:
+        try:
+            avg_delisted = float(delisted_reach_override)
+            blended = (0.70 * raw_reach) + (0.30 * avg_delisted)
+            return ReachProbabilityResult(
+                adjusted_prob=round(blended, 4),
+                raw_prob=round(raw_reach, 4),
+                status=STATUS_VALID_ESTIMATE,
+                provenance="empirical_override_delisted_blend",
+                sample_count=raw_res.sample_count,
+                delisted_samples=1,
+                as_of_date=raw_res.as_of_date,
+            )
+        except (ValueError, TypeError):
+            pass
+
+    # 3. Lookup sector-matched historical delisted constituents
     delisted_same_sector = get_delisted_tickers_by_sector(sector) if sector else []
     
     if delisted_same_sector:
         delisted_reaches = []
         for dt in delisted_same_sector[:3]:
             try:
-                rp = get_reach_prob(
+                dt_res = get_reach_prob_structured(
                     dt,
                     target_pct,
                     holding_days,
                     stop_pct=stop_pct,
                     as_of_date=as_of_date,
                 )
-                if rp > 0:
-                    delisted_reaches.append(rp)
+                if dt_res.status == STATUS_VALID_ESTIMATE and dt_res.raw_prob > 0:
+                    delisted_reaches.append(dt_res.raw_prob)
             except Exception:
                 pass
 
         if delisted_reaches:
             avg_delisted = float(np.mean(delisted_reaches))
             blended = (0.70 * raw_reach) + (0.30 * avg_delisted)
-            return round(blended, 4), round(raw_reach, 4)
+            return ReachProbabilityResult(
+                adjusted_prob=round(blended, 4),
+                raw_prob=round(raw_reach, 4),
+                status=STATUS_VALID_ESTIMATE,
+                provenance="empirical_sector_delisted_blend",
+                sample_count=raw_res.sample_count,
+                delisted_samples=len(delisted_reaches),
+                as_of_date=raw_res.as_of_date,
+            )
 
-    # 3. Graceful fallback: flat haircut from canonical quant_config
+    # 4. Fallback modeling assumption: flat 8% haircut from canonical quant_config
     blended = raw_reach * REACH_PROB_FALLBACK_HAIRCUT
-    return round(blended, 4), round(raw_reach, 4)
+    return ReachProbabilityResult(
+        adjusted_prob=round(blended, 4),
+        raw_prob=round(raw_reach, 4),
+        status=STATUS_VALID_ESTIMATE,
+        provenance="fallback_haircut_assumption_delisted_unavailable",
+        sample_count=raw_res.sample_count,
+        delisted_samples=0,
+        as_of_date=raw_res.as_of_date,
+    )
 
 
 def apply_expectancy_haircut(expectancy_pct: float) -> float:
-    """Applies global 15% haircut to strategy historical expectancy."""
-    return round(expectancy_pct * SURVIVORSHIP_BIAS_HAIRCUT, 4)
+    """
+    Applies global 15% haircut to strategy historical expectancy.
+    Modeling assumption: SURVIVORSHIP_BIAS_HAIRCUT = 0.85 from src.quant_config.
+    """
+    return round(float(expectancy_pct) * SURVIVORSHIP_BIAS_HAIRCUT, 4)
+

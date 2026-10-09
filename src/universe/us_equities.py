@@ -45,14 +45,31 @@ class USEquitiesUniverseProvider(UniverseProvider):
         self.cache_file = self.cache_dir / "us_equities_master.json"
         self.cache_ttl_seconds = cache_ttl_hours * 3600
         self.delisted_tickers: Set[str] = set()
+        self._delisted_records: Dict[str, SecurityRecord] = {}
 
         if delisted_tickers_path and os.path.exists(delisted_tickers_path):
             try:
                 with open(delisted_tickers_path, "r", encoding="utf-8") as f:
                     delist_data = json.load(f)
                     for item in delist_data.get("delisted_tickers", []):
-                        if "ticker" in item:
-                            self.delisted_tickers.add(item["ticker"].upper())
+                        t = str(item.get("ticker", "")).strip().upper()
+                        if t:
+                            self.delisted_tickers.add(t)
+                            d_date = item.get("delisted_date")
+                            self._delisted_records[t] = SecurityRecord(
+                                ticker=t,
+                                company_name=item.get("company_name", t),
+                                exchange="US",
+                                sector=item.get("sector", "Unknown"),
+                                industry=item.get("sector", "Unknown"),
+                                instrument_type="COMMON",
+                                market="US",
+                                country="US",
+                                currency="USD",
+                                is_active=False,
+                                delisted_date=d_date,
+                                data_provider_ticker=t.replace(".", "-"),
+                            )
             except Exception as e:
                 logger.warning("Failed to load delisted tickers file %s: %s", delisted_tickers_path, e)
 
@@ -67,26 +84,71 @@ class USEquitiesUniverseProvider(UniverseProvider):
         return "US"
 
     def get_universe(self, as_of_date: Optional[str] = None) -> List[SecurityRecord]:
-        """Return list of all eligible common equity records in the US universe."""
-        return list(self._universe.values())
+        """
+        Return list of all eligible common equity records in the US universe.
+        If as_of_date is provided, reconstitutes point-in-time universe:
+        - Includes active records
+        - Reconstitutes historical delisted tickers where delisted_date >= as_of_date[:10]
+        - Excludes delisted tickers where delisted_date < as_of_date[:10]
+        """
+        if as_of_date is None:
+            return list(self._universe.values())
+
+        as_of = str(as_of_date)[:10]
+        records = list(self._universe.values())
+        # Reconstitute delisted records that were still listed on as_of_date
+        for rec in self._delisted_records.values():
+            if rec.delisted_date and rec.delisted_date >= as_of:
+                records.append(rec)
+        return records
 
     def get_tickers(self, as_of_date: Optional[str] = None) -> List[str]:
-        """Return list of canonical ticker symbols."""
-        return list(self._universe.keys())
+        """Return list of canonical ticker symbols for the requested point-in-time universe."""
+        return [rec.ticker for rec in self.get_universe(as_of_date=as_of_date)]
 
     def get_data_provider_tickers(self, as_of_date: Optional[str] = None) -> List[str]:
-        """Return list of data provider tickers (e.g. 'BRK-B' for yfinance)."""
-        return [rec.data_provider_ticker for rec in self._universe.values()]
+        """Return list of data provider tickers for the requested point-in-time universe."""
+        return [rec.data_provider_ticker for rec in self.get_universe(as_of_date=as_of_date)]
 
     def get_security_record(self, ticker: str) -> Optional[SecurityRecord]:
         """Lookup security record by canonical ticker or provider ticker."""
         canonical = to_canonical_ticker(ticker)
         if canonical in self._universe:
             return self._universe[canonical]
+        if canonical in self._delisted_records:
+            return self._delisted_records[canonical]
         provider = to_provider_ticker(ticker)
         if provider in self._provider_ticker_map:
             return self._universe.get(self._provider_ticker_map[provider])
         return None
+
+    def get_universe_provenance(self, as_of_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Returns point-in-time universe provenance and audit metadata, documenting
+        survivorship mitigation and historical tape coverage limitations.
+        """
+        as_of = str(as_of_date)[:10] if as_of_date else None
+        delisted_included = 0
+        delisted_prior_excluded = 0
+        if as_of:
+            for rec in self._delisted_records.values():
+                if rec.delisted_date and rec.delisted_date >= as_of:
+                    delisted_included += 1
+                else:
+                    delisted_prior_excluded += 1
+        return {
+            "as_of_date": as_of,
+            "is_point_in_time": as_of is not None,
+            "active_ticker_count": len(self._universe),
+            "delisted_registry_count": len(self._delisted_records),
+            "delisted_reconstituted_count": delisted_included,
+            "delisted_prior_excluded_count": delisted_prior_excluded,
+            "tape_coverage_limitations": (
+                "Historical S&P 500 delisted tickers reconstituted from curated registry "
+                "(config/delisted_tickers.json). Micro-cap delistings outside S&P 500 historical "
+                "constituents may not be fully represented without a commercial point-in-time tape."
+            ),
+        }
 
     def get_stats(self) -> Dict[str, int]:
         """Return dictionary of universe discovery audit metrics."""

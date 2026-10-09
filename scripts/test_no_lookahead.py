@@ -28,6 +28,16 @@ from src.entry_location import (
     EntryLocationResult,
 )
 
+from src.strategies.target_calculator import (
+    get_reach_prob_distribution,
+    get_reach_prob_target_before_stop,
+    get_reach_prob_target_before_stop_structured,
+    normalize_and_filter_price_df,
+    STATUS_CUTOFF_FAILURE,
+    STATUS_VALID_ESTIMATE,
+    reset_reach_prob_cache,
+)
+
 STRATEGIES = [
     "Trend Following",
     "52-Week High Breakout",
@@ -217,7 +227,159 @@ class TestNoLookaheadIntegrity(unittest.TestCase):
 
         self.assertAlmostEqual(expected_ret, actual_ret, places=6)
 
+    def test_reach_prob_distribution_adversarial_future_corruption(self):
+        """
+        Prove that corrupting future bars after as_of_date has ZERO effect on
+        reach probability distribution.
+        """
+        reset_reach_prob_cache()
+        cutoff_date = str(self.df_full.index[160].date())
+        
+        # Baseline reach distribution calculated up to cutoff
+        dist_baseline = get_reach_prob_distribution(
+            ticker="ADV_TEST",
+            holding_days=10,
+            price_df=self.df_full,
+            as_of_date=cutoff_date,
+        )
+        self.assertGreater(len(dist_baseline), 0)
+
+        # Adversarial corruption: inject 1000% spike, zero price, and wild volatility into future bars (T+1..)
+        df_corrupt = self.df_full.copy()
+        df_corrupt.iloc[161:, df_corrupt.columns.get_loc("CLOSE")] *= 10.0
+        df_corrupt.iloc[161:, df_corrupt.columns.get_loc("HIGH")] *= 15.0
+        df_corrupt.iloc[161:, df_corrupt.columns.get_loc("LOW")] *= 0.1
+
+        reset_reach_prob_cache()
+        dist_corrupt = get_reach_prob_distribution(
+            ticker="ADV_TEST",
+            holding_days=10,
+            price_df=df_corrupt,
+            as_of_date=cutoff_date,
+        )
+
+        np.testing.assert_array_equal(
+            dist_baseline,
+            dist_corrupt,
+            err_msg="Adversarial future bar corruption leaked into historical reach distribution!",
+        )
+
+    def test_reach_prob_target_before_stop_adversarial_future_corruption(self):
+        """
+        Prove that changing or appending future bars after as_of_date has zero effect
+        on target-before-stop reach probability.
+        """
+        reset_reach_prob_cache()
+        cutoff_date = str(self.df_full.index[150].date())
+
+        res_baseline = get_reach_prob_target_before_stop_structured(
+            ticker="ADV_TBS",
+            target_pct=0.05,
+            stop_pct=0.03,
+            holding_days=10,
+            price_df=self.df_full,
+            as_of_date=cutoff_date,
+        )
+        self.assertEqual(res_baseline.status, STATUS_VALID_ESTIMATE)
+
+        # Corrupt future bars
+        df_corrupt = self.df_full.copy()
+        df_corrupt.iloc[151:, df_corrupt.columns.get_loc("HIGH")] = 9999.0
+        df_corrupt.iloc[151:, df_corrupt.columns.get_loc("LOW")] = 0.01
+
+        reset_reach_prob_cache()
+        res_corrupt = get_reach_prob_target_before_stop_structured(
+            ticker="ADV_TBS",
+            target_pct=0.05,
+            stop_pct=0.03,
+            holding_days=10,
+            price_df=df_corrupt,
+            as_of_date=cutoff_date,
+        )
+
+        self.assertEqual(res_baseline.raw_prob, res_corrupt.raw_prob)
+        self.assertEqual(res_baseline.status, res_corrupt.status)
+
+    def test_malformed_cutoff_fails_closed(self):
+        """
+        Prove that unparseable or malformed as_of_date strictly fails closed
+        (STATUS_CUTOFF_FAILURE, prob 0.0) and NEVER proceeds with unfiltered data.
+        """
+        reset_reach_prob_cache()
+        bad_cutoffs = ["not-a-valid-date", "2026-99-99", "INVALID_DATE_STRING"]
+        for bad_date in bad_cutoffs:
+            filtered_df, as_of_str, status = normalize_and_filter_price_df(self.df_full, as_of_date=bad_date)
+            self.assertEqual(status, STATUS_CUTOFF_FAILURE, f"Expected STATUS_CUTOFF_FAILURE for {bad_date}")
+            self.assertIsNone(filtered_df)
+
+            res = get_reach_prob_target_before_stop_structured(
+                ticker="ADV_FAIL",
+                target_pct=0.05,
+                stop_pct=0.03,
+                holding_days=10,
+                price_df=self.df_full,
+                as_of_date=bad_date,
+            )
+            self.assertEqual(res.status, STATUS_CUTOFF_FAILURE)
+            self.assertEqual(res.raw_prob, 0.0)
+
+    def test_tz_aware_vs_naive_cutoff_alignment(self):
+        """
+        Prove that tz-aware price index with naive cutoff string or vice-versa
+        compares cleanly without TypeError.
+        """
+        # Case A: tz-aware UTC DataFrame with naive string cutoff
+        df_utc = self.df_full.copy()
+        df_utc.index = df_utc.index.tz_localize("UTC")
+        cutoff_str = "2026-06-15"
+
+        filtered_df, as_of_str, status = normalize_and_filter_price_df(df_utc, as_of_date=cutoff_str)
+        self.assertEqual(status, STATUS_VALID_ESTIMATE)
+        self.assertIsNotNone(filtered_df)
+        self.assertTrue(all(filtered_df.index <= pd.to_datetime(cutoff_str).tz_localize("UTC") + pd.Timedelta(days=1)))
+
+        # Case B: tz-naive DataFrame with tz-aware cutoff string
+        filtered_df2, as_of_str2, status2 = normalize_and_filter_price_df(self.df_full, as_of_date="2026-06-15T00:00:00Z")
+        self.assertEqual(status2, STATUS_VALID_ESTIMATE)
+        self.assertIsNotNone(filtered_df2)
+
+    def test_cache_isolation_prevents_dataset_bypass(self):
+        """
+        Prove that cache keys incorporate data signatures (fingerprints),
+        preventing different datasets for the same ticker/date from returning stale results.
+        """
+        reset_reach_prob_cache()
+        cutoff_date = str(self.df_full.index[140].date())
+
+        df_set1 = self.df_full.iloc[:141].copy()
+        res1 = get_reach_prob_target_before_stop_structured(
+            ticker="ISOLATION_TEST",
+            target_pct=0.05,
+            stop_pct=0.03,
+            holding_days=10,
+            price_df=df_set1,
+            as_of_date=cutoff_date,
+        )
+
+        # Dataset 2 has different prices for the exact same ticker and date
+        df_set2 = self.df_full.iloc[:141].copy()
+        df_set2["HIGH"] *= 1.20
+        df_set2["CLOSE"] *= 1.15
+
+        res2 = get_reach_prob_target_before_stop_structured(
+            ticker="ISOLATION_TEST",
+            target_pct=0.05,
+            stop_pct=0.03,
+            holding_days=10,
+            price_df=df_set2,
+            as_of_date=cutoff_date,
+        )
+
+        # Must evaluate independently and not return stale hit from dataset 1
+        self.assertNotEqual(res1.raw_prob, res2.raw_prob, "Cache collision between distinct datasets!")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

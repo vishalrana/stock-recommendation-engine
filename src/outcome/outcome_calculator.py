@@ -17,6 +17,7 @@ Example Scale-Out Return:
 
 from typing import Dict, Any, Optional, Tuple
 import datetime
+import math
 import pandas as pd
 import numpy as np
 
@@ -212,7 +213,7 @@ class PositionScaleOutTracker:
 
 
 def resolve_bar_event(
-    open_price: float,
+    open_price: Optional[float],
     high_price: float,
     low_price: float,
     close_price: float,
@@ -225,7 +226,7 @@ def resolve_bar_event(
     Evaluates open gaps and intraday high/low touch with deterministic STOP_FIRST policy.
 
     Execution precedence:
-    1. Open Gap Check:
+    1. Open Gap Check (if open price is provided):
        - Open <= stop_price => STOP_HIT at open_price
        - Open >= target_price => TARGET_HIT at open_price
     2. Intraday Bar Check:
@@ -240,18 +241,19 @@ def resolve_bar_event(
     Returns:
         (stop_hit: bool, target_hit: bool, exit_price: float)
     """
-    o = float(open_price)
     h = float(high_price)
     l = float(low_price)
     c = float(close_price)
     s = float(stop_price)
     t = float(target_price)
 
-    # 1. Open Gap Check
-    if s > 0 and o <= s:
-        return True, False, o
-    if t > 0 and o >= t:
-        return False, True, o
+    # 1. Open Gap Check (if open price is provided)
+    if open_price is not None:
+        o = float(open_price)
+        if s > 0 and o <= s:
+            return True, False, o
+        if t > 0 and o >= t:
+            return False, True, o
 
     # 2. Intraday Bar Check
     stop_touched = (s > 0 and l <= s)
@@ -351,7 +353,7 @@ def evaluate_signal_outcome(
     high_col = "High" if "High" in df.columns else ("HIGH" if "HIGH" in df.columns else None)
     low_col = "Low" if "Low" in df.columns else ("LOW" if "LOW" in df.columns else None)
     close_col = "Close" if "Close" in df.columns else ("CLOSE" if "CLOSE" in df.columns else None)
-    open_col = "Open" if "Open" in df.columns else ("OPEN" if "OPEN" in df.columns else close_col)
+    open_col = "Open" if "Open" in df.columns else ("OPEN" if "OPEN" in df.columns else None)
 
     if not high_col or not low_col or not close_col:
         return None
@@ -368,10 +370,21 @@ def evaluate_signal_outcome(
     holding_days = 0
 
     for i, (idx, bar) in enumerate(df.iterrows()):
-        day_open = float(bar[open_col]) if open_col in bar else float(bar[close_col])
-        day_high = float(bar[high_col])
-        day_low = float(bar[low_col])
-        day_close = float(bar[close_col])
+        try:
+            day_open = float(bar[open_col]) if open_col is not None else None
+            day_high = float(bar[high_col])
+            day_low = float(bar[low_col])
+            day_close = float(bar[close_col])
+        except (ValueError, TypeError):
+            continue
+
+        if not (
+            (day_open is None or (math.isfinite(day_open) and day_open > 0))
+            and math.isfinite(day_high) and math.isfinite(day_low) and math.isfinite(day_close)
+            and day_high > 0 and day_low > 0 and day_close > 0
+        ):
+            continue
+
         holding_days = i + 1
 
         if hasattr(idx, "date"):
@@ -424,17 +437,6 @@ def evaluate_signal_outcome(
                 "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
-        # Stop breach after partial target hit (if not handled by resolve_bar_event)
-        if day_low <= tracker.current_stop:
-            tracker.on_stop_hit(tracker.current_stop)
-            return {
-                "outcome": tracker.state.value,
-                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "outcome_date": outcome_date_str,
-                "outcome_holding_days": holding_days,
-                "exit_price": float(round(tracker.final_exit_price, 2)),
-            }
-
         # 3. EXPIRY EVALUATION
         if holding_days >= max_holding_days:
             tracker.on_expired(day_close)
@@ -445,5 +447,16 @@ def evaluate_signal_outcome(
                 "outcome_holding_days": holding_days,
                 "exit_price": float(round(tracker.final_exit_price, 2)),
             }
+
+    # If all available bars are exhausted and a milestone target was reached
+    if tracker.state in (PositionState.T1_HIT, PositionState.T2_HIT):
+        tracker.on_expired(day_close)
+        return {
+            "outcome": tracker.state.value,
+            "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
+            "outcome_date": outcome_date_str,
+            "outcome_holding_days": holding_days,
+            "exit_price": float(round(tracker.final_exit_price, 2)),
+        }
 
     return None

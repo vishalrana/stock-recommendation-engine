@@ -11,6 +11,7 @@ Guarantees:
 4. Preserves raw metrics separately from shrunk metrics.
 """
 
+import math
 from typing import Optional, Dict, Any
 from src.quant_config import (
     STRATEGY_HISTORICAL_EXPECTANCY,
@@ -59,9 +60,16 @@ def calculate_shrunk_expectancy(
 
     if raw_expectancy is None or total_trades <= 0:
         return round(float(canonical_prior), 2)
-    
+
+    try:
+        raw_val = float(raw_expectancy)
+        if not math.isfinite(raw_val):
+            return round(float(canonical_prior), 2)
+    except (ValueError, TypeError):
+        return round(float(canonical_prior), 2)
+
     # Shrink raw expectancy toward canonical prior based on sample size
-    shrunk = (total_trades * float(raw_expectancy) + alpha * canonical_prior) / (total_trades + alpha)
+    shrunk = (total_trades * raw_val + alpha * canonical_prior) / (total_trades + alpha)
     return round(float(shrunk), 2)
 
 
@@ -94,17 +102,37 @@ def build_hardened_metrics(
     completed_trades = wins + losses
     total_signals = int(raw_m.get("total_signals") or raw_m.get("total_trades") or completed_trades)
 
-    # Determine prior and provenance
+    # Validate strategy_win_rate if provided
+    valid_strat_wr = None
     if strategy_win_rate is not None:
-        eff_prior = float(strategy_win_rate)
+        try:
+            val = float(strategy_win_rate)
+            if math.isfinite(val) and 0.0 <= val <= 100.0:
+                valid_strat_wr = val
+        except (ValueError, TypeError):
+            pass
+
+    # Validate past_win_rate if provided
+    valid_past_wr = None
+    if past_win_rate is not None:
+        try:
+            val = float(past_win_rate)
+            if math.isfinite(val) and 0.0 <= val <= 100.0:
+                valid_past_wr = val
+        except (ValueError, TypeError):
+            pass
+
+    # Determine prior and provenance
+    if valid_strat_wr is not None:
+        eff_prior = valid_strat_wr
         if completed_trades > 0:
             provenance = "ticker_observed"
             metric_source = "ticker_observed_with_strategy_prior"
         else:
             provenance = "strategy_prior"
             metric_source = "strategy_backtest"
-    elif past_win_rate is not None:
-        eff_prior = float(past_win_rate)
+    elif valid_past_wr is not None:
+        eff_prior = valid_past_wr
         if completed_trades > 0:
             provenance = "ticker_observed"
             metric_source = "ticker_observed_with_candidate_prior"
@@ -115,10 +143,21 @@ def build_hardened_metrics(
         eff_prior = DEFAULT_PRIOR_WIN_RATE
         provenance = "ticker_observed"
         metric_source = "ticker_historical_trades"
-    elif "win_rate" in raw_m and raw_m["win_rate"] is not None and float(raw_m["win_rate"]) > 0:
-        eff_prior = float(raw_m["win_rate"])
-        provenance = "ticker_prior"
-        metric_source = "ticker_metrics"
+    elif "win_rate" in raw_m and raw_m["win_rate"] is not None:
+        try:
+            wr_val = float(raw_m["win_rate"])
+            if math.isfinite(wr_val) and 0.0 <= wr_val <= 100.0:
+                eff_prior = wr_val
+                provenance = "generic_ticker_prior"
+                metric_source = "ticker_metrics"
+            else:
+                eff_prior = DEFAULT_PRIOR_WIN_RATE
+                provenance = "unavailable"
+                metric_source = "unseeded_prior"
+        except (ValueError, TypeError):
+            eff_prior = DEFAULT_PRIOR_WIN_RATE
+            provenance = "unavailable"
+            metric_source = "unseeded_prior"
     else:
         eff_prior = DEFAULT_PRIOR_WIN_RATE
         provenance = "unavailable"

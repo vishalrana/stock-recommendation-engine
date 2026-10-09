@@ -67,18 +67,180 @@ class TargetCalculationResult:
         return asdict(self)
 
 
+STATUS_VALID_ESTIMATE: str = "valid_estimate"
+STATUS_INSUFFICIENT_OBSERVATIONS: str = "insufficient_observations"
+STATUS_INVALID_INPUT: str = "invalid_input"
+STATUS_CUTOFF_FAILURE: str = "cutoff_failure"
+STATUS_MISSING_DATA: str = "missing_data"
+STATUS_COMPUTATION_FAILURE: str = "computation_failure"
+
+
+class ReachProbabilityResult:
+    """
+    Structured empirical reach probability result with full provenance and diagnostic status.
+    Behaves as a 2-tuple (adjusted_prob, raw_prob) for backward-compatible unpacking:
+        rp_adj, rp_raw = result
+    """
+    __slots__ = (
+        "adjusted_prob",
+        "raw_prob",
+        "status",
+        "provenance",
+        "sample_count",
+        "delisted_samples",
+        "as_of_date",
+    )
+
+    def __init__(
+        self,
+        adjusted_prob: float,
+        raw_prob: float,
+        status: str = STATUS_VALID_ESTIMATE,
+        provenance: str = "empirical",
+        sample_count: int = 0,
+        delisted_samples: int = 0,
+        as_of_date: Optional[str] = None,
+    ):
+        self.adjusted_prob = float(adjusted_prob)
+        self.raw_prob = float(raw_prob)
+        self.status = str(status)
+        self.provenance = str(provenance)
+        self.sample_count = int(sample_count)
+        self.delisted_samples = int(delisted_samples)
+        self.as_of_date = as_of_date
+
+    def __iter__(self):
+        yield self.adjusted_prob
+        yield self.raw_prob
+
+    def __getitem__(self, idx):
+        if idx == 0:
+            return self.adjusted_prob
+        elif idx == 1:
+            return self.raw_prob
+        raise IndexError(f"Index {idx} out of range for 2-element tuple unpacking")
+
+    def __len__(self):
+        return 2
+
+    def __repr__(self):
+        return (
+            f"ReachProbabilityResult(adjusted={self.adjusted_prob:.4f}, raw={self.raw_prob:.4f}, "
+            f"status='{self.status}', provenance='{self.provenance}', samples={self.sample_count})"
+        )
+
+
+def normalize_and_filter_price_df(
+    price_df: Optional[pd.DataFrame],
+    as_of_date: Optional[str] = None,
+) -> Tuple[Optional[pd.DataFrame], Optional[str], str]:
+    """
+    Strictly validates, normalizes, and filters price data up to the requested cutoff date.
+    
+    Guarantees:
+    1. Zero lookahead: Drops any observations after as_of_date.
+    2. Fail-closed: If as_of_date is provided but cannot be parsed or validated,
+       returns (None, None, STATUS_CUTOFF_FAILURE). NEVER continues with unfiltered data.
+    3. Monotonic sorting & deduplication: Cleans index, drops NaT/duplicates, sorts ascending.
+    4. Timezone normalization: Compares tz-aware vs tz-naive consistently without error.
+    
+    Returns:
+        (filtered_df, normalized_as_of_str, status)
+    """
+    if price_df is None or price_df.empty:
+        norm_as_of = str(as_of_date)[:10] if as_of_date else None
+        return None, norm_as_of, STATUS_MISSING_DATA
+
+    df = price_df.copy()
+
+    # Normalize index to DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index, errors="coerce")
+        except Exception:
+            return None, None, STATUS_INVALID_INPUT
+
+    # Drop NaT index entries
+    if df.index.isna().any():
+        df = df[~df.index.isna()]
+
+    if df.empty:
+        return None, None, STATUS_INSUFFICIENT_OBSERVATIONS
+
+    # Deduplicate index (keep last) and sort monotonically
+    if df.index.has_duplicates:
+        df = df[~df.index.duplicated(keep="last")]
+    if not df.index.is_monotonic_increasing:
+        df = df.sort_index()
+
+    # Enforce cutoff if provided
+    norm_as_of = None
+    if as_of_date is not None:
+        try:
+            as_of_dt = pd.to_datetime(as_of_date)
+            if pd.isna(as_of_dt):
+                return None, None, STATUS_CUTOFF_FAILURE
+        except Exception:
+            return None, None, STATUS_CUTOFF_FAILURE
+
+        # Timezone alignment
+        if df.index.tz is not None and as_of_dt.tz is None:
+            as_of_dt = as_of_dt.tz_localize(df.index.tz)
+        elif df.index.tz is None and as_of_dt.tz is not None:
+            as_of_dt = as_of_dt.tz_localize(None)
+        elif df.index.tz is not None and as_of_dt.tz is not None:
+            as_of_dt = as_of_dt.tz_convert(df.index.tz)
+
+        # Date-boundary semantics: if as_of_date string is a date (YYYY-MM-DD),
+        # include bars through the close of that date (up to 23:59:59.999999).
+        as_of_str_clean = str(as_of_date).strip()
+        if len(as_of_str_clean) == 10 and "-" in as_of_str_clean:
+            as_of_dt = as_of_dt.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+
+        # Filter strictly
+        df = df.loc[df.index <= as_of_dt]
+        norm_as_of = as_of_str_clean[:10]
+
+        if df.empty:
+            return df, norm_as_of, STATUS_INSUFFICIENT_OBSERVATIONS
+    else:
+        norm_as_of = str(df.index[-1])[:10]
+
+    return df, norm_as_of, STATUS_VALID_ESTIMATE
+
+
 ALGORITHM_VERSION: str = "v2_target_reach"
 
-# Global in-memory cache for reach distributions: (ticker, as_of_date, holding_days, lookback_days, algorithm_version) -> np.ndarray
-_REACH_DIST_CACHE: Dict[Tuple[str, str, int, int, str], np.ndarray] = {}
-# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days, lookback_days, as_of_date, algorithm_version) -> float
-_TARGET_STOP_REACH_CACHE: Dict[Tuple[str, float, float, int, int, str, str], float] = {}
+# Global in-memory cache for reach distributions: (ticker, as_of_date, holding_days, lookback_days, data_sig, algorithm_version) -> np.ndarray
+_REACH_DIST_CACHE: Dict[Tuple[str, str, int, int, str, str], np.ndarray] = {}
+# Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days, lookback_days, as_of_date, data_sig, algorithm_version) -> float
+_TARGET_STOP_REACH_CACHE: Dict[Tuple[str, float, float, int, int, str, str, str], float] = {}
 
 
 def reset_reach_prob_cache() -> None:
     """Clear all in-memory reach probability caches."""
     _REACH_DIST_CACHE.clear()
     _TARGET_STOP_REACH_CACHE.clear()
+
+
+def _compute_price_df_signature(df: Optional[pd.DataFrame]) -> str:
+    """
+    Computes a robust data signature to isolate cache keys across different datasets
+    for the same ticker and cutoff date.
+    """
+    if df is None or df.empty:
+        return "nodf"
+    n = len(df)
+    first_idx = df.index[0]
+    last_idx = df.index[-1]
+    close_col = "Close" if "Close" in df.columns else ("CLOSE" if "CLOSE" in df.columns else df.columns[-1])
+    try:
+        c_first = round(float(df[close_col].iloc[0]), 2)
+        c_mid = round(float(df[close_col].iloc[n // 2]), 2)
+        c_last = round(float(df[close_col].iloc[-1]), 2)
+        return f"{n}_{first_idx}_{last_idx}_{c_first}_{c_mid}_{c_last}"
+    except Exception:
+        return f"{n}_{first_idx}_{last_idx}"
 
 
 def get_reach_prob_distribution(
@@ -97,32 +259,30 @@ def get_reach_prob_distribution(
     h = int(holding_days)
     lb = int(lookback_days)
 
-    # Filter price_df to as_of_date if provided
-    if price_df is not None and not price_df.empty:
-        if as_of_date:
-            try:
-                as_of_dt = pd.to_datetime(as_of_date)
-                if isinstance(price_df.index, pd.DatetimeIndex):
-                    if price_df.index.tz is not None and as_of_dt.tz is None:
-                        as_of_dt = as_of_dt.tz_localize(price_df.index.tz)
-                    price_df = price_df.loc[price_df.index <= as_of_dt]
-                else:
-                    price_df = price_df.loc[pd.to_datetime(price_df.index) <= as_of_dt]
-            except Exception as e:
-                logger.debug("Failed filtering price_df to as_of_date %s: %s", as_of_date, e)
-        as_of = str(as_of_date)[:10] if as_of_date else str(price_df.index[-1])[:10]
-    else:
-        as_of = str(as_of_date)[:10] if as_of_date else ""
+    if h <= 0 or lb <= 0:
+        return np.array([], dtype=float)
 
-    cache_key = (t_up, as_of, h, lb, ALGORITHM_VERSION)
+    # 1. Filter price_df strictly up to as_of_date
+    as_of = str(as_of_date)[:10] if as_of_date else ""
+    if price_df is not None:
+        filtered_df, as_of_str, status = normalize_and_filter_price_df(price_df, as_of_date)
+        if status in (STATUS_CUTOFF_FAILURE, STATUS_INVALID_INPUT):
+            logger.warning("Cutoff parsing failed for %s with as_of_date=%s; failing closed.", ticker, as_of_date)
+            return np.array([], dtype=float)
+        price_df = filtered_df
+        if as_of_str:
+            as_of = as_of_str
+
+    data_sig = _compute_price_df_signature(price_df)
+    cache_key = (t_up, as_of, h, lb, data_sig, ALGORITHM_VERSION)
     if cache_key in _REACH_DIST_CACHE:
         return _REACH_DIST_CACHE[cache_key]
 
     cache_dir = os.path.join("data", "cache", "reach_dists")
     cache_file = os.path.join(cache_dir, f"{t_up}_{as_of}_{h}d_{lb}w_{ALGORITHM_VERSION}.parquet") if as_of else None
 
-    # 1. Check disk cache if as_of is specific
-    if cache_file and os.path.exists(cache_file):
+    # Check disk cache if as_of is specific and no custom in-memory price_df was supplied
+    if cache_file and os.path.exists(cache_file) and (price_df is None or price_df.empty):
         try:
             cached_df = pd.read_parquet(cache_file)
             col_name = f"max_gain_{h}d"
@@ -146,9 +306,11 @@ def get_reach_prob_distribution(
             except Exception:
                 end_dt = datetime.date.today()
             start_date = (end_dt - datetime.timedelta(days=int(lb * 1.6) + h + 30)).isoformat()
-            price_df = cm.get_ticker_history(ticker, start_date, end_date)
-            if price_df is not None and not price_df.empty and as_of:
-                price_df = price_df.loc[pd.to_datetime(price_df.index) <= pd.to_datetime(as_of)]
+            fetched_df = cm.get_ticker_history(ticker, start_date, end_date)
+            if fetched_df is not None and not fetched_df.empty:
+                filtered_df, as_of_str, status = normalize_and_filter_price_df(fetched_df, as_of)
+                if status not in (STATUS_CUTOFF_FAILURE, STATUS_INVALID_INPUT):
+                    price_df = filtered_df
         except Exception as e:
             logger.debug("Could not load price history for reach prob %s: %s", ticker, e)
 
@@ -175,14 +337,15 @@ def get_reach_prob_distribution(
     for d in range(start_idx, total_possible_windows):
         window = closes[d : d + h + 1]
         base_price = closes[d]
-        if base_price > 0:
+        if base_price > 0 and math.isfinite(base_price):
             max_gain = (np.max(window) - base_price) / base_price
-            max_gains.append(max_gain)
+            if math.isfinite(max_gain):
+                max_gains.append(max_gain)
 
     arr = np.array(max_gains, dtype=float)
 
     # Cache distribution to parquet
-    if cache_file and len(arr) > 0:
+    if cache_file and len(arr) > 0 and (price_df is None or price_df.empty):
         try:
             os.makedirs(cache_dir, exist_ok=True)
             col_name = f"max_gain_{h}d"
@@ -192,6 +355,7 @@ def get_reach_prob_distribution(
             logger.debug("Failed saving reach_dist cache for %s: %s", ticker, e)
 
     _REACH_DIST_CACHE[cache_key] = arr
+    _REACH_DIST_CACHE[(t_up, as_of, h, lb, ALGORITHM_VERSION)] = arr
     return arr
 
 
@@ -219,36 +383,61 @@ def get_reach_prob_target_before_stop(
          - High >= Target => TARGET_REACHED
       3. Neither touched within H days => NEITHER_HIT (counted as failure).
     """
+    res = get_reach_prob_target_before_stop_structured(
+        ticker=ticker,
+        target_pct=target_pct,
+        stop_pct=stop_pct,
+        holding_days=holding_days,
+        price_df=price_df,
+        lookback_days=lookback_days,
+        as_of_date=as_of_date,
+    )
+    return res.raw_prob
+
+
+def get_reach_prob_target_before_stop_structured(
+    ticker: str,
+    target_pct: float,
+    stop_pct: float,
+    holding_days: int,
+    price_df: Optional[pd.DataFrame] = None,
+    lookback_days: int = 504,
+    as_of_date: Optional[str] = None,
+) -> ReachProbabilityResult:
+    """
+    Calculates empirical target-before-stop reach probability returning a structured
+    ReachProbabilityResult with status, sample count, and provenance.
+    """
     from src.outcome.outcome_calculator import resolve_bar_event
 
     t_up = ticker.upper()
     h = int(holding_days)
-    t_pct = float(target_pct)
-    s_pct = float(stop_pct)
+    try:
+        t_pct = float(target_pct)
+        s_pct = float(stop_pct)
+    except (ValueError, TypeError):
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_INVALID_INPUT, provenance="invalid_parameters", as_of_date=as_of_date)
+
     lb = int(lookback_days)
 
-    if t_pct <= 0 or s_pct <= 0 or h <= 0:
-        return 0.0
+    if t_pct <= 0 or s_pct <= 0 or h <= 0 or not math.isfinite(t_pct) or not math.isfinite(s_pct):
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_INVALID_INPUT, provenance="non_positive_or_non_finite_inputs", as_of_date=as_of_date)
 
-    if price_df is not None and not price_df.empty:
-        if as_of_date:
-            try:
-                as_of_dt = pd.to_datetime(as_of_date)
-                if isinstance(price_df.index, pd.DatetimeIndex):
-                    if price_df.index.tz is not None and as_of_dt.tz is None:
-                        as_of_dt = as_of_dt.tz_localize(price_df.index.tz)
-                    price_df = price_df.loc[price_df.index <= as_of_dt]
-                else:
-                    price_df = price_df.loc[pd.to_datetime(price_df.index) <= as_of_dt]
-            except Exception as e:
-                logger.debug("Failed filtering price_df to as_of_date %s: %s", as_of_date, e)
-        as_of = str(as_of_date)[:10] if as_of_date else str(price_df.index[-1])[:10]
-    else:
-        as_of = str(as_of_date)[:10] if as_of_date else ""
+    as_of = str(as_of_date)[:10] if as_of_date else ""
+    if price_df is not None:
+        filtered_df, as_of_str, status = normalize_and_filter_price_df(price_df, as_of_date)
+        if status in (STATUS_CUTOFF_FAILURE, STATUS_INVALID_INPUT):
+            logger.warning("Cutoff parsing failed for %s with as_of_date=%s; failing closed.", ticker, as_of_date)
+            return ReachProbabilityResult(0.0, 0.0, status=status, provenance="cutoff_failure", as_of_date=as_of_date)
+        price_df = filtered_df
+        if as_of_str:
+            as_of = as_of_str
 
-    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h, lb, as_of, ALGORITHM_VERSION)
+    data_sig = _compute_price_df_signature(price_df)
+    cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h, lb, as_of, data_sig, ALGORITHM_VERSION)
     if cache_key in _TARGET_STOP_REACH_CACHE:
-        return _TARGET_STOP_REACH_CACHE[cache_key]
+        val = _TARGET_STOP_REACH_CACHE[cache_key]
+        return ReachProbabilityResult(val, val, status=STATUS_VALID_ESTIMATE, provenance="memory_cache", as_of_date=as_of)
 
     # Fetch price history if needed
     if price_df is None or price_df.empty:
@@ -262,18 +451,20 @@ def get_reach_prob_target_before_stop(
             except Exception:
                 end_dt = datetime.date.today()
             start_date = (end_dt - datetime.timedelta(days=int(lb * 1.6) + h + 30)).isoformat()
-            price_df = cm.get_ticker_history(ticker, start_date, end_date)
-            if price_df is not None and not price_df.empty and as_of:
-                price_df = price_df.loc[pd.to_datetime(price_df.index) <= pd.to_datetime(as_of)]
+            fetched_df = cm.get_ticker_history(ticker, start_date, end_date)
+            if fetched_df is not None and not fetched_df.empty:
+                filtered_df, as_of_str, status = normalize_and_filter_price_df(fetched_df, as_of)
+                if status not in (STATUS_CUTOFF_FAILURE, STATUS_INVALID_INPUT):
+                    price_df = filtered_df
         except Exception as e:
             logger.debug("Could not load price history for target-before-stop %s: %s", ticker, e)
 
     if price_df is None or price_df.empty:
-        return 0.0
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_MISSING_DATA, provenance="missing_price_data", as_of_date=as_of)
 
     close_col = "CLOSE" if "CLOSE" in price_df.columns else ("Close" if "Close" in price_df.columns else None)
     if close_col is None:
-        return 0.0
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_MISSING_DATA, provenance="missing_close_column", as_of_date=as_of)
 
     open_col = "OPEN" if "OPEN" in price_df.columns else ("Open" if "Open" in price_df.columns else close_col)
     high_col = "HIGH" if "HIGH" in price_df.columns else ("High" if "High" in price_df.columns else close_col)
@@ -282,9 +473,15 @@ def get_reach_prob_target_before_stop(
     # Use joint DataFrame dropna() across all 4 OHLC columns to guarantee row-by-row temporal alignment
     cols_to_check = list(dict.fromkeys([open_col, high_col, low_col, close_col]))
     clean_ohlc = price_df[cols_to_check].dropna()
+    
+    # Filter to strictly finite and positive values
+    for col in cols_to_check:
+        clean_ohlc = clean_ohlc[clean_ohlc[col] > 0]
+        clean_ohlc = clean_ohlc[np.isfinite(clean_ohlc[col])]
+
     n = len(clean_ohlc)
     if n <= h + 5:
-        return 0.0
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_INSUFFICIENT_OBSERVATIONS, provenance="insufficient_history", sample_count=n, as_of_date=as_of)
 
     closes = clean_ohlc[close_col].to_numpy(dtype=float)
     opens = clean_ohlc[open_col].to_numpy(dtype=float)
@@ -294,7 +491,7 @@ def get_reach_prob_target_before_stop(
     total_possible_windows = n - h
     num_windows = min(lb, total_possible_windows)
     if num_windows < MIN_REACH_PROB_WINDOWS:
-        return 0.0
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_INSUFFICIENT_OBSERVATIONS, provenance="insufficient_windows", sample_count=num_windows, as_of_date=as_of)
 
     start_idx = total_possible_windows - num_windows
 
@@ -303,7 +500,7 @@ def get_reach_prob_target_before_stop(
 
     for d in range(start_idx, total_possible_windows):
         p0 = closes[d]
-        if p0 <= 0:
+        if p0 <= 0 or not math.isfinite(p0):
             continue
 
         valid_windows += 1
@@ -331,11 +528,12 @@ def get_reach_prob_target_before_stop(
             success_count += 1
 
     if valid_windows < MIN_REACH_PROB_WINDOWS:
-        return 0.0
+        return ReachProbabilityResult(0.0, 0.0, status=STATUS_INSUFFICIENT_OBSERVATIONS, provenance="insufficient_valid_windows", sample_count=valid_windows, as_of_date=as_of)
 
     prob = float(success_count / valid_windows)
     _TARGET_STOP_REACH_CACHE[cache_key] = prob
-    return prob
+    _TARGET_STOP_REACH_CACHE[(t_up, round(t_pct, 4), round(s_pct, 4), h, lb, as_of, ALGORITHM_VERSION)] = prob
+    return ReachProbabilityResult(prob, prob, status=STATUS_VALID_ESTIMATE, provenance="empirical_target_before_stop", sample_count=valid_windows, as_of_date=as_of)
 
 
 def get_reach_prob(
@@ -353,8 +551,32 @@ def get_reach_prob(
     Otherwise, computes empirical gain reach probability: count(max_gain_d >= target_pct) / total_windows.
     If insufficient historical evidence exists, returns 0.0 (does not manufacture 35%).
     """
+    res = get_reach_prob_structured(
+        ticker=ticker,
+        target_pct=target_pct,
+        holding_days=holding_days,
+        price_df=price_df,
+        lookback_days=lookback_days,
+        stop_pct=stop_pct,
+        as_of_date=as_of_date,
+    )
+    return res.raw_prob
+
+
+def get_reach_prob_structured(
+    ticker: str,
+    target_pct: float,
+    holding_days: int,
+    price_df: Optional[pd.DataFrame] = None,
+    lookback_days: int = 504,
+    stop_pct: Optional[float] = None,
+    as_of_date: Optional[str] = None,
+) -> ReachProbabilityResult:
+    """
+    Calculate empirical reach probability returning a structured ReachProbabilityResult.
+    """
     if stop_pct is not None and float(stop_pct) > 0:
-        return get_reach_prob_target_before_stop(
+        return get_reach_prob_target_before_stop_structured(
             ticker=ticker,
             target_pct=target_pct,
             stop_pct=float(stop_pct),
@@ -376,8 +598,23 @@ def get_reach_prob(
             "Insufficient historical gain evidence for %s: windows=%d (min %d). Empirical reach prob is 0.0.",
             ticker, len(gains), MIN_REACH_PROB_WINDOWS
         )
-        return 0.0
-    return float(np.sum(gains >= target_pct) / len(gains))
+        return ReachProbabilityResult(
+            0.0,
+            0.0,
+            status=STATUS_INSUFFICIENT_OBSERVATIONS,
+            provenance="insufficient_gain_windows",
+            sample_count=len(gains),
+            as_of_date=as_of_date,
+        )
+    prob = float(np.sum(gains >= target_pct) / len(gains))
+    return ReachProbabilityResult(
+        prob,
+        prob,
+        status=STATUS_VALID_ESTIMATE,
+        provenance="empirical_max_gain_distribution",
+        sample_count=len(gains),
+        as_of_date=as_of_date,
+    )
 
 
 def calculate_targets(

@@ -22,6 +22,9 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         return "Buy"
 
     def scan(self, ticker: str, df: pd.DataFrame, regime: str, metrics: dict) -> Optional[dict]:
+        from src.quant_config import normalize_regime_key
+        regime_key = normalize_regime_key(regime)
+
         if len(df) < 63:  # 3 months
             return None
 
@@ -144,7 +147,7 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         elif past_win_rate >= 50: wr_score = 14
         else: wr_score = 5
 
-        regime_score = 10 if regime == 'bull' else 6 if regime == 'sideways' else 3
+        regime_score = 10 if regime_key == 'bull' else 6 if regime_key == 'sideways' else 3
 
         composite_score = momentum_score + exp_score + wr_score + regime_score
 

@@ -237,6 +237,9 @@ class PullbackRecoveryStrategy(StrategyInterface):
             self.gate_rejections[gate] += 1
 
     def scan(self, ticker: str, df: pd.DataFrame, regime: str, metrics: dict) -> Optional[dict]:
+        from src.quant_config import normalize_regime_key
+        regime_key = normalize_regime_key(regime)
+
         company_name = metrics.get("company_name", ticker)
         industry = metrics.get("industry", "Unknown")
         total_trades = metrics.get("total_trades", 0)
@@ -249,7 +252,7 @@ class PullbackRecoveryStrategy(StrategyInterface):
             company_name,
             industry,
             total_trades,
-            regime_str=regime,
+            regime_str=regime_key,
         )
 
         if sig is None:

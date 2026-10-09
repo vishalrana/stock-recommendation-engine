@@ -11,6 +11,7 @@ Layer 3: Honest Weighted R:R Recalculation
 
 from dataclasses import dataclass, asdict
 import os
+import math
 import logging
 from typing import Optional, Dict, Tuple, Any
 import numpy as np
@@ -432,13 +433,14 @@ def calculate_targets(
 
     cfg = STRATEGY_TARGET_CONFIG[strat_key]
 
-    entry = float(entry_price)
-    atr = max(0.0, float(atr_14))
-    stop = float(stop_loss)
-
-    # Upstream Entry and Stop-Loss Validation (0 < stop < entry)
-    # Fail closed with is_valid=False if entry or stop is invalid. Never silently repair invalid financial inputs.
-    if entry <= 0:
+    # 1. Entry Price Validation
+    try:
+        if entry_price is None:
+            raise ValueError("Entry price is None")
+        entry = float(entry_price)
+        if not math.isfinite(entry) or entry <= 0:
+            raise ValueError(f"Non-positive entry price: {entry}")
+    except (ValueError, TypeError) as e:
         return TargetCalculationResult(
             target_1=None, target_2=None, target_3=None,
             target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
@@ -448,12 +450,19 @@ def calculate_targets(
             weighted_scaleout_rr=0.0,
             weighted_rr_honest=0.0,
             is_valid=False,
-            rejection_reason=f"Non-positive entry price: {entry}",
+            rejection_reason=f"Invalid entry price: {e}",
             reach_prob_raw=0.0, reach_prob_adjusted=0.0,
             target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
         )
 
-    if stop <= 0 or stop >= entry:
+    # 2. ATR Validation: strictly finite and > 0. Never convert invalid ATR to zero or proxy.
+    try:
+        if atr_14 is None:
+            raise ValueError("ATR is None")
+        atr = float(atr_14)
+        if not math.isfinite(atr) or atr <= 0:
+            raise ValueError(f"Non-positive or non-finite ATR: {atr}")
+    except (ValueError, TypeError) as e:
         return TargetCalculationResult(
             target_1=None, target_2=None, target_3=None,
             target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
@@ -463,13 +472,35 @@ def calculate_targets(
             weighted_scaleout_rr=0.0,
             weighted_rr_honest=0.0,
             is_valid=False,
-            rejection_reason=f"Invalid stop loss: stop ${stop:.2f} must satisfy 0 < stop < entry (${entry:.2f})",
+            rejection_reason=f"Invalid ATR: {e}",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
+
+    # 3. Stop-Loss Validation (0 < stop < entry)
+    try:
+        if stop_loss is None:
+            raise ValueError("Stop loss is None")
+        stop = float(stop_loss)
+        if not math.isfinite(stop) or stop <= 0 or stop >= entry:
+            raise ValueError(f"Stop ${stop:.2f} must satisfy 0 < stop < entry (${entry:.2f})")
+    except (ValueError, TypeError) as e:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Invalid stop loss: {e}",
             reach_prob_raw=0.0, reach_prob_adjusted=0.0,
             target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
         )
 
     risk = entry - stop
-    if risk <= 0:
+    if not math.isfinite(risk) or risk <= 0:
         return TargetCalculationResult(
             target_1=None, target_2=None, target_3=None,
             target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
@@ -485,16 +516,48 @@ def calculate_targets(
         )
 
     stop_pct = risk / entry
+    if not math.isfinite(stop_pct) or stop_pct <= 0:
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Invalid stop percentage: {stop_pct}",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
 
     # Layer 1 — Candidate Targets (max of fixed percentage floor and ATR multiple)
-    # Use full float precision for internal math; round only at output boundary
     t1_atr = entry + (cfg["atr_k1"] * atr)
     t2_atr = entry + (cfg["atr_k2"] * atr)
     t3_atr = entry + (cfg["atr_k3"] * atr)
+    if not (math.isfinite(t1_atr) and math.isfinite(t2_atr) and math.isfinite(t3_atr)):
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Non-finite ATR target calculations: t1_atr={t1_atr}, t2_atr={t2_atr}, t3_atr={t3_atr}",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
 
     if override_targets is not None:
-        cand_t1, cand_t2, cand_t3 = override_targets
-        if not (entry < cand_t1 < cand_t2 < cand_t3):
+        try:
+            cand_t1, cand_t2, cand_t3 = [float(x) for x in override_targets]
+            if not (math.isfinite(cand_t1) and math.isfinite(cand_t2) and math.isfinite(cand_t3)):
+                raise ValueError("Non-finite override targets")
+            if not (entry < cand_t1 < cand_t2 < cand_t3):
+                raise ValueError(f"Invalid override targets ordering: entry={entry:.2f}, t1={cand_t1:.2f}, t2={cand_t2:.2f}, t3={cand_t3:.2f}")
+        except Exception as e:
             return TargetCalculationResult(
                 target_1=None, target_2=None, target_3=None,
                 target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
@@ -504,7 +567,7 @@ def calculate_targets(
                 weighted_scaleout_rr=0.0,
                 weighted_rr_honest=0.0,
                 is_valid=False,
-                rejection_reason=f"Invalid override targets ordering: entry={entry:.2f}, t1={cand_t1:.2f}, t2={cand_t2:.2f}, t3={cand_t3:.2f}",
+                rejection_reason=f"Invalid override targets: {e}",
                 reach_prob_raw=0.0, reach_prob_adjusted=0.0,
                 target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
             )
@@ -513,8 +576,22 @@ def calculate_targets(
         cand_t2 = max(entry * (1.0 + cfg["fixed_t2"]), t2_atr)
         cand_t3 = max(entry * (1.0 + cfg["fixed_t3"]), t3_atr)
 
+        if not (math.isfinite(cand_t1) and math.isfinite(cand_t2) and math.isfinite(cand_t3)):
+            return TargetCalculationResult(
+                target_1=None, target_2=None, target_3=None,
+                target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+                target_1_pct=None, target_2_pct=None, target_3_pct=None,
+                reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+                scale_out_weights="0/0/0",
+                weighted_scaleout_rr=0.0,
+                weighted_rr_honest=0.0,
+                is_valid=False,
+                rejection_reason=f"Non-finite candidate targets: t1={cand_t1}, t2={cand_t2}, t3={cand_t3}",
+                reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+                target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+            )
+
         # Ensure strict target ordering: entry < cand_t1 < cand_t2 < cand_t3
-        # In accordance with quantitative principles: do not manufacture arbitrary +1% targets; reject if non-monotonic
         if not (entry < cand_t1 < cand_t2 < cand_t3):
             return TargetCalculationResult(
                 target_1=None, target_2=None, target_3=None,
@@ -536,14 +613,46 @@ def calculate_targets(
 
     # Layer 2 — Reach Probabilities with Target-Before-Stop & Survivorship Bias Adjustment
     if mock_reach_probs is not None:
-        rp_t1, rp_t2, rp_t3 = mock_reach_probs
-        raw_t1 = rp_t1
+        try:
+            rp_t1, rp_t2, rp_t3 = [float(x) for x in mock_reach_probs]
+            if not (math.isfinite(rp_t1) and math.isfinite(rp_t2) and math.isfinite(rp_t3)):
+                raise ValueError("Non-finite mock reach probabilities")
+            raw_t1 = rp_t1
+        except Exception as e:
+            return TargetCalculationResult(
+                target_1=None, target_2=None, target_3=None,
+                target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+                target_1_pct=None, target_2_pct=None, target_3_pct=None,
+                reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+                scale_out_weights="0/0/0",
+                weighted_scaleout_rr=0.0,
+                weighted_rr_honest=0.0,
+                is_valid=False,
+                rejection_reason=f"Invalid mock reach probabilities: {e}",
+                reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+                target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+            )
     else:
         hold = cfg["hold_days"]
         from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
         rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
         rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
         rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
+
+    if not (math.isfinite(rp_t1) and math.isfinite(rp_t2) and math.isfinite(rp_t3)):
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason=f"Non-finite reach probabilities: t1={rp_t1}, t2={rp_t2}, t3={rp_t3}",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
 
     # Monotonic reach probability enforcement: farther targets cannot have higher reach prob over same holding period
     rp_t2 = min(rp_t2, rp_t1)
@@ -610,6 +719,20 @@ def calculate_targets(
         rejection_reason = f"T1 reach prob {rp_t1:.1%} below minimum {t1_min:.1%}"
 
     weighted_scaleout_rr = round(weighted_reward / risk, 2)
+    if not math.isfinite(weighted_scaleout_rr):
+        return TargetCalculationResult(
+            target_1=None, target_2=None, target_3=None,
+            target_1_atr=0.0, target_2_atr=0.0, target_3_atr=0.0,
+            target_1_pct=None, target_2_pct=None, target_3_pct=None,
+            reach_prob_t1=0.0, reach_prob_t2=0.0, reach_prob_t3=0.0,
+            scale_out_weights="0/0/0",
+            weighted_scaleout_rr=0.0,
+            weighted_rr_honest=0.0,
+            is_valid=False,
+            rejection_reason="Non-finite weighted scale-out R:R",
+            reach_prob_raw=0.0, reach_prob_adjusted=0.0,
+            target_1_return_decimal=None, target_2_return_decimal=None, target_3_return_decimal=None,
+        )
 
     return TargetCalculationResult(
         target_1=t1,

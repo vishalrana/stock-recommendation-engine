@@ -1,16 +1,16 @@
 """
-Generate Signals — Strategy 1.3 Rev B (Modular Architecture)
-=============================================================
-Regime-aware, gated, percentile-normalized signal generator.
+Generate Signals — Canonical Production Release (Strategy 1.3 Rev B / Master Spec v2.3+)
+========================================================================================
+Regime-aware, gated, multi-strategy stock recommendation generator.
 
-Flow:
-  1. Detect market regime (SPY vs 200 DMA)
-  2. Fetch S&P 500 + Nasdaq-100 universe (deduplicated)
-  3. Scan tickers via registered strategies (Pullback Recovery)
-  4. Merge with historical backtest metrics from ticker_metrics
-  5. Apply gated percentile-normalized ranking (SignalRanker per strategy)
-  6. Archive previous signals to signals_history via upsert (duplicate-safe)
-  7. Clear and insert ranked signals
+Pipeline Flow:
+  1. Detect market regime (SPY vs 200 DMA, HMM, VIX safety override)
+  2. Load US Equities Master universe with point-in-time liquidity & volume gates
+  3. Scan eligible tickers across all registered canonical strategies
+  4. Merge with point-in-time historical backtest metrics from ticker_metrics
+  5. Apply central multi-strategy SignalRanker with strategy-specific weight vectors
+  6. Calculate ATR-based targets, reach probabilities, and scale-out plans
+  7. Reconcile active recommendation lifecycles against latest market data
   8. Log results with regime metadata and gate rejection breakdown
 
 Usage:

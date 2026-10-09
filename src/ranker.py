@@ -1,14 +1,16 @@
 """
-Signal Ranker — Strategy 1.3 Rev B
-===================================
-Composite-normalized, tiered ranking engine for Strategy 1.3.
+Signal Ranker — Canonical Quantitative Specification v2.3+
+=============================================================
+Absolute continuous, strategy-specific composite ranking engine.
+All strategy weight vectors and discrete regime score matrices are
+sourced exclusively from src.quant_config (single source of truth).
 
-Weights:
-  - Technical Momentum (25%): RSI, Proximity to 50 DMA, Volume Ratio, MACD histogram
-  - Risk-Adjusted Expectancy (35%): Z-score in pool, with negative expectancy penalty
-  - Historical Win Rate (15%): Percentile rank
-  - Regime Adjustment (10%): Bull/Bear/Sideways specific bonus
-  - Context Score (15%): Analyst, earnings, fundamentals, news, price/volume events
+Sub-Scores (each normalized to continuous [0.0, 100.0]):
+  - Technical Momentum: RSI, Proximity to 50 DMA, Volume Ratio, ATR-normalized MACD Histogram
+  - Historical Expectancy: S_exp = 30 + 20 * E_adjusted (empirically derived)
+  - Historical Win Rate: Empirical strategy win rate
+  - Continuous Regime Alignment: Discrete matrix lookup per strategy and regime
+  - Context Score: Analyst, Fundamental, News sentiment with hard veto gates
 """
 
 import logging
@@ -41,18 +43,6 @@ from src.quant_config import (
     normalize_strategy_key,
     normalize_regime_key,
 )
-
-# Backward-compatibility aliases
-STRATEGY_OPTIMAL_REGIME = {
-    'trend_following': 100,
-    '52w_high_breakout': 100,
-    'pullback_recovery': 70,
-    'cross_sectional_momentum': 85,
-    'pead': 75,
-    'sector_rotation': 80,
-    'mean_reversion': 30,
-}
-MARKET_REGIME_SCORE = {'bull': 100.0, 'sideways': 70.0, 'bear': 20.0}
 
 
 def compute_expectancy_score(strategy: str, adjusted_expectancy_pct: Optional[float] = None) -> float:
@@ -253,10 +243,14 @@ def validate_candidate_features(row: dict) -> tuple[bool, str]:
         return False, f"Invalid strategy: {e}"
 
     # Technical momentum check
-    if row.get("momentum_score") is None:
+    if row.get("momentum_score") is not None:
+        ms = row.get("momentum_score")
+        if not np.isfinite(ms) or float(ms) < 0.0 or float(ms) > 100.0:
+            return False, f"Invalid precomputed momentum_score: {ms} (must be finite and in [0.0, 100.0])"
+    else:
         rsi = row.get("current_rsi")
-        if rsi is None or not np.isfinite(rsi):
-            return False, f"Missing or non-finite current_rsi: {rsi}"
+        if rsi is None or not np.isfinite(rsi) or float(rsi) < 0.0 or float(rsi) > 100.0:
+            return False, f"Missing or invalid current_rsi: {rsi}"
 
         price = row.get("price") if row.get("price") is not None else row.get("entry_price")
         if price is None or not np.isfinite(price) or float(price) <= 0:
@@ -278,31 +272,25 @@ def validate_candidate_features(row: dict) -> tuple[bool, str]:
         if atr_raw is None or not np.isfinite(atr_raw) or float(atr_raw) <= 0:
             return False, f"Missing or non-positive atr_14: {atr_raw}"
 
-    # Win rate check: must have winrate_score or win_rate or past_win_rate
+    # Win rate check: must have winrate_score or win_rate or past_win_rate in [0.0, 100.0]
     winrate_val = row.get("winrate_score")
     if winrate_val is None:
         winrate_val = row.get("win_rate")
     if winrate_val is None:
         winrate_val = row.get("past_win_rate")
-    if winrate_val is None or not np.isfinite(winrate_val):
-        return False, f"Missing or non-finite winrate_score / past_win_rate: {winrate_val}"
+    if winrate_val is None or not np.isfinite(winrate_val) or float(winrate_val) < 0.0 or float(winrate_val) > 100.0:
+        return False, f"Missing or invalid winrate_score / past_win_rate: {winrate_val} (must be finite and in [0.0, 100.0])"
 
     return True, "Valid"
 
 
 class SignalRanker:
     """
-    Composite-normalized ranking engine with tiered fallback.
+    Composite ranking engine for Strategy 1.3 Rev B / Master Spec v2.3+.
+    Weights and discrete regime scores are sourced exclusively from src.quant_config.
     """
 
-    WEIGHT_MOMENTUM = 0.25
-    WEIGHT_EXPECTANCY = 0.35
-    WEIGHT_WIN_RATE = 0.15
-    WEIGHT_REGIME = 0.10
-    WEIGHT_CONTEXT = 0.15
-
     def __init__(self, min_expectancy: float = 0, min_win_rate: float = 25, min_trades: int = 5):
-        # Kept for backward compatibility
         self.min_expectancy = min_expectancy
         self.min_win_rate = min_win_rate
         self.min_trades = min_trades
@@ -324,48 +312,19 @@ class SignalRanker:
     def regime_adjustment(self, score: float, regime: str, stock_metrics: dict) -> float:
         """
         Calculate regime adjustment score (0-100).
-        Delegates to continuous compute_regime_alignment if strategy is provided,
-        otherwise preserves original defensive/momentum heuristic for backward compatibility.
+        Fails closed: requires strategy and delegates strictly to compute_regime_alignment().
         """
         strat = stock_metrics.get("strategy_name") or stock_metrics.get("strategy")
-        if strat:
-            return compute_regime_alignment(strat, regime)
-
-        rsi = stock_metrics.get("current_rsi", 50.0)
-        price = stock_metrics.get("price", 0.0)
-        dma_50 = stock_metrics.get("dma_50", 0.0)
-        industry = stock_metrics.get("industry", "")
-        beta = stock_metrics.get("beta", 1.0)
-
-        if regime == "bull":
-            if (50.0 <= rsi <= 70.0) and (price > dma_50):
-                return 100.0
-            return 0.0
-        elif regime == "bear":
-            defensive_industries = {
-                "Utilities", "Consumer Staples", "Health Care", 
-                "Insurance", "Telecommunication Services"
-            }
-            ind_clean = str(industry).strip()
-            is_defensive = (ind_clean in defensive_industries) or any(
-                d in ind_clean for d in defensive_industries
-            )
-            if is_defensive or (beta < 1.0):
-                return 100.0
-            return 0.0
-        elif regime == "sideways":
-            if abs(rsi - 50.0) < 8.0:
-                return 100.0
-            return 0.0
-        
-        return 0.0
+        if not strat:
+            raise ValueError("Missing required strategy in stock_metrics for regime_adjustment")
+        return compute_regime_alignment(strat, regime)
 
     def compute_composite_score(self, row, regime: str, pool_stats: dict = None) -> dict:
         """
         Compute the final composite score and breakdown for a candidate.
-        Uses Strategy-Specific Weights (Fix 4), Historical Expectancy (Fix 2),
-        Veto-Gated Context (Fix 3), and Continuous Regime Alignment (Fix 5).
-        P0-2: No silent neutral/zero defaults for missing features.
+        Uses Strategy-Specific Weights from src.quant_config, Historical Expectancy,
+        Veto-Gated Context, and Continuous Regime Alignment.
+        Fails closed: no silent neutral/zero defaults for missing or invalid features.
         """
         strategy = row.get("strategy_name") or row.get("strategy")
         if not strategy:
@@ -373,34 +332,43 @@ class SignalRanker:
         strat_key = normalize_strategy_key(strategy)
         regime_key = normalize_regime_key(regime)
 
-        # 1. Momentum score (P0-2: No silent 50.0 fallback)
+        # 1. Momentum score (must be finite and in [0.0, 100.0])
         if "momentum_score" in row and row["momentum_score"] is not None:
-            momentum_score = float(row["momentum_score"])
+            ms_val = float(row["momentum_score"])
+            if not np.isfinite(ms_val) or ms_val < 0.0 or ms_val > 100.0:
+                raise ValueError(f"Invalid precomputed momentum_score: {ms_val} (must be finite in [0.0, 100.0])")
+            momentum_score = ms_val
         else:
             momentum_score = compute_momentum_score(row)
 
-        # 2. Historical Strategy Expectancy (Fix 2: No circular R:R)
+        # 2. Historical Strategy Expectancy (must be finite and in [0.0, 100.0])
         if "expectancy_score" in row and row["expectancy_score"] is not None:
-            expectancy_score = float(row["expectancy_score"])
+            exp_val = float(row["expectancy_score"])
+            if not np.isfinite(exp_val) or exp_val < 0.0 or exp_val > 100.0:
+                raise ValueError(f"Invalid precomputed expectancy_score: {exp_val}")
+            expectancy_score = exp_val
         else:
             exp_val = row.get("expectancy_pct") if row.get("expectancy_pct") is not None else row.get("adjusted_expectancy_pct")
             expectancy_score = compute_expectancy_score(strat_key, exp_val)
 
-        # 3. Historical Win Rate score (P0-2: No silent 50.0 fallback)
+        # 3. Historical Win Rate score (must be finite and in [0.0, 100.0])
         winrate_val = row.get("winrate_score")
         if winrate_val is None:
             winrate_val = row.get("win_rate")
         if winrate_val is None:
             winrate_val = row.get("past_win_rate")
-        if winrate_val is None:
-            raise ValueError(f"Missing required field 'winrate_score'/'win_rate' for {row.get('ticker', 'unknown')}")
+        if winrate_val is None or not np.isfinite(winrate_val) or float(winrate_val) < 0.0 or float(winrate_val) > 100.0:
+            raise ValueError(f"Missing or invalid winrate_score/win_rate for {row.get('ticker', 'unknown')}: {winrate_val}")
         winrate_score = float(winrate_val)
 
-        # 4. Continuous Strategy-Dependent Regime Alignment (Fix 5)
+        # 4. Continuous Strategy-Dependent Regime Alignment
         if "regime_score" in row and row["regime_score"] is not None:
-            regime_score = float(row["regime_score"])
+            rs_val = float(row["regime_score"])
+            if not np.isfinite(rs_val) or rs_val < 0.0 or rs_val > 100.0:
+                raise ValueError(f"Invalid precomputed regime_score: {rs_val}")
+            regime_score = rs_val
         else:
-            regime_score = compute_regime_alignment(strat_key, regime)
+            regime_score = compute_regime_alignment(strat_key, regime_key)
 
         # 5. Context Score with Veto Gates (Fix 3)
         c_analyst = float(row.get("context_analyst", 0.0) or 0.0)
@@ -579,14 +547,16 @@ class SignalRanker:
             logger.warning("Failed to fetch price history for %s: %s", ticker, e)
             return None
 
-    def rank(self, signals_df: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
-        """Backward compatibility wrapper mapping to composite_rank with default bull regime."""
-        df = signals_df.copy()
-        if "dma_50" not in df.columns:
-            df["dma_50"] = df["price"]
-        if "macd_histogram" not in df.columns:
-            df["macd_histogram"] = 0.0
-        return self.composite_rank(df, "bull", top_n)
+    def rank(self, signals_df: pd.DataFrame, regime: Optional[str] = None, top_n: int = 5) -> pd.DataFrame:
+        """
+        Ranking interface delegating to composite_rank().
+        Fails closed: requires explicit canonical regime ('bull', 'sideways', 'bear').
+        Never fabricates missing indicator columns.
+        """
+        if not regime:
+            raise ValueError("Missing required regime parameter in rank(). Must be 'bull', 'sideways', or 'bear'.")
+        regime_key = normalize_regime_key(regime)
+        return self.composite_rank(signals_df, regime_key, top_n)
 
 
 

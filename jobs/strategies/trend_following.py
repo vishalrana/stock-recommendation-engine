@@ -21,6 +21,9 @@ class TrendFollowingStrategy(StrategyInterface):
         return "Buy"
 
     def scan(self, ticker: str, df: pd.DataFrame, regime: str, metrics: dict) -> Optional[dict]:
+        from src.quant_config import normalize_regime_key
+        regime_key = normalize_regime_key(regime)
+
         # Require minimum history
         if len(df) < 200:
             return None
@@ -173,7 +176,7 @@ class TrendFollowingStrategy(StrategyInterface):
         else: wr_score = 0
 
         # Regime score (0-10)
-        regime_score = 10 if regime == 'bull' else 5 if regime == 'sideways' else 0
+        regime_score = 10 if regime_key == 'bull' else 5 if regime_key == 'sideways' else 0
 
         composite_score = momentum_score + exp_score + wr_score + regime_score
 

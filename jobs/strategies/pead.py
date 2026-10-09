@@ -64,6 +64,9 @@ class PEADStrategy(StrategyInterface):
         return "Buy"
 
     def scan(self, ticker: str, df: pd.DataFrame, regime: str, metrics: dict) -> Optional[dict]:
+        from src.quant_config import normalize_regime_key
+        regime_key = normalize_regime_key(regime)
+
         if len(df) < 50:
             return None
 
@@ -327,7 +330,7 @@ class PEADStrategy(StrategyInterface):
         }
 
         ranker = SignalRanker()
-        score_res = ranker.compute_composite_score(candidate_for_ranker, regime)
+        score_res = ranker.compute_composite_score(candidate_for_ranker, regime_key)
         composite_score = score_res["total"]
         tier_label = assign_tier(composite_score, has_strategy_setup=True)
         is_blocked = False

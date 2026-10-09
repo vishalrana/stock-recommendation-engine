@@ -117,6 +117,11 @@ class PositionScaleOutTracker:
         self.final_exit_price = self.current_stop
         self._check_invariant()
 
+    @property
+    def is_closed(self) -> bool:
+        """True if position is completely closed (zero remaining weight)."""
+        return self.remaining_weight <= 1e-6
+
     def _check_invariant(self):
         assert abs((self.realized_weight + self.remaining_weight) - 1.0) < 1e-6, (
             f"Weight leak invariant violated! Realized: {self.realized_weight}, Remaining: {self.remaining_weight}"
@@ -124,6 +129,8 @@ class PositionScaleOutTracker:
 
     def on_stop_hit(self, exit_price: float) -> PositionState:
         """Handle stop loss breach (accounting for slippage / open gap)."""
+        if self.is_closed:
+            return self.state
         if self.remaining_weight > 0:
             r_stop = (exit_price - self.entry_price) / self.entry_price * 100.0
             self.realized_return_pct += self.remaining_weight * r_stop
@@ -131,10 +138,8 @@ class PositionScaleOutTracker:
             self.remaining_weight = 0.0
             self.final_exit_price = exit_price
 
-        if self.state == PositionState.T2_HIT:
-            pass  # remains hit_t2
-        elif self.state == PositionState.T1_HIT:
-            pass  # remains hit_t1
+        if self.state in (PositionState.T1_HIT, PositionState.T2_HIT):
+            pass  # preserves milestone hit status while closed
         else:
             self.state = PositionState.STOPPED
         self._check_invariant()
@@ -142,53 +147,58 @@ class PositionScaleOutTracker:
 
     def on_t1_hit(self, exit_price: float) -> PositionState:
         """Handle Target 1 hit."""
-        if self.state == PositionState.OPEN:
-            r1 = (exit_price - self.entry_price) / self.entry_price * 100.0
-            self.realized_return_pct += self.w1 * r1
-            self.realized_weight = round(self.realized_weight + self.w1, 6)
-            self.remaining_weight = round(self.remaining_weight - self.w1, 6)
-            self.final_exit_price = exit_price
-            self.state = PositionState.T1_HIT
-            # Ratchet stop to breakeven (entry price) on remaining portion
-            self.current_stop = max(self.current_stop, self.entry_price)
-            self._check_invariant()
+        if self.is_closed or self.state != PositionState.OPEN:
+            return self.state
+        r1 = (exit_price - self.entry_price) / self.entry_price * 100.0
+        self.realized_return_pct += self.w1 * r1
+        self.realized_weight = round(self.realized_weight + self.w1, 6)
+        self.remaining_weight = round(self.remaining_weight - self.w1, 6)
+        self.final_exit_price = exit_price
+        self.state = PositionState.T1_HIT
+        # Ratchet stop to breakeven (entry price) on remaining portion
+        self.current_stop = max(self.current_stop, self.entry_price)
+        self._check_invariant()
         return self.state
 
     def on_t2_hit(self, exit_price: float) -> PositionState:
         """Handle Target 2 hit."""
-        if self.state in (PositionState.OPEN, PositionState.T1_HIT) and self.w2 > 0:
-            if self.state == PositionState.OPEN:
-                self.on_t1_hit(self.target_1)
-            r2 = (exit_price - self.entry_price) / self.entry_price * 100.0
-            self.realized_return_pct += self.w2 * r2
-            self.realized_weight = round(self.realized_weight + self.w2, 6)
-            self.remaining_weight = round(self.remaining_weight - self.w2, 6)
-            self.final_exit_price = exit_price
-            self.state = PositionState.T2_HIT
-            # Trailing stop ratcheted to Target 1
-            if self.target_1:
-                self.current_stop = max(self.current_stop, self.target_1)
-            self._check_invariant()
+        if self.is_closed or self.state not in (PositionState.OPEN, PositionState.T1_HIT) or self.w2 <= 0:
+            return self.state
+        if self.state == PositionState.OPEN:
+            self.on_t1_hit(self.target_1)
+        r2 = (exit_price - self.entry_price) / self.entry_price * 100.0
+        self.realized_return_pct += self.w2 * r2
+        self.realized_weight = round(self.realized_weight + self.w2, 6)
+        self.remaining_weight = round(self.remaining_weight - self.w2, 6)
+        self.final_exit_price = exit_price
+        self.state = PositionState.T2_HIT
+        # Trailing stop ratcheted to Target 1
+        if self.target_1:
+            self.current_stop = max(self.current_stop, self.target_1)
+        self._check_invariant()
         return self.state
 
     def on_t3_hit(self, exit_price: float) -> PositionState:
         """Handle Target 3 hit."""
-        if self.state in (PositionState.OPEN, PositionState.T1_HIT, PositionState.T2_HIT) and self.w3 > 0:
-            if self.state == PositionState.OPEN:
-                self.on_t1_hit(self.target_1)
-            if self.state == PositionState.T1_HIT and self.w2 > 0 and self.target_2:
-                self.on_t2_hit(self.target_2)
-            r3 = (exit_price - self.entry_price) / self.entry_price * 100.0
-            self.realized_return_pct += self.w3 * r3
-            self.realized_weight = round(self.realized_weight + self.w3, 6)
-            self.remaining_weight = round(self.remaining_weight - self.w3, 6)
-            self.final_exit_price = exit_price
-            self.state = PositionState.T3_HIT
-            self._check_invariant()
+        if self.is_closed or self.state not in (PositionState.OPEN, PositionState.T1_HIT, PositionState.T2_HIT) or self.w3 <= 0:
+            return self.state
+        if self.state == PositionState.OPEN:
+            self.on_t1_hit(self.target_1)
+        if self.state == PositionState.T1_HIT and self.w2 > 0 and self.target_2:
+            self.on_t2_hit(self.target_2)
+        r3 = (exit_price - self.entry_price) / self.entry_price * 100.0
+        self.realized_return_pct += self.w3 * r3
+        self.realized_weight = round(self.realized_weight + self.w3, 6)
+        self.remaining_weight = round(self.remaining_weight - self.w3, 6)
+        self.final_exit_price = exit_price
+        self.state = PositionState.T3_HIT
+        self._check_invariant()
         return self.state
 
     def on_expired(self, close_price: float) -> PositionState:
         """Handle trade horizon expiry."""
+        if self.is_closed:
+            return self.state
         if self.remaining_weight > 0:
             r_close = (close_price - self.entry_price) / self.entry_price * 100.0
             self.realized_return_pct += self.remaining_weight * r_close
@@ -273,33 +283,51 @@ def calculate_static_scale_out_return(
 ) -> float:
     """
     Calculate realized percentage return for a specified terminal outcome
-    following canonical scale-out rules.
+    following canonical scale-out rules. Driven directly by PositionScaleOutTracker.
     """
     if entry_price <= 0:
         return 0.0
+    if not target_1:
+        px = exit_price if exit_price is not None else stop_loss
+        r_exit = (px - entry_price) / entry_price * 100.0
+        return float(round(r_exit, 4))
 
-    w1, w2, w3 = get_effective_scale_out_weights(target_1, target_2, target_3)
-    r1 = ((target_1 - entry_price) / entry_price * 100.0) if target_1 else 0.0
-    r2 = ((target_2 - entry_price) / entry_price * 100.0) if target_2 else 0.0
-    r3 = ((target_3 - entry_price) / entry_price * 100.0) if target_3 else 0.0
-    r_stop = (stop_loss - entry_price) / entry_price * 100.0
+    tracker = PositionScaleOutTracker(
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_1=target_1,
+        target_2=target_2,
+        target_3=target_3,
+    )
 
     out = str(outcome).lower()
     if out in ("stopped", "stop_loss"):
-        return float(round(r_stop, 4))
+        tracker.on_stop_hit(exit_price if exit_price is not None else stop_loss)
     elif out in ("hit_t1", "take_profit_1"):
-        # 50% at T1, remainder stopped at breakeven (0.0% return)
-        return float(round(w1 * r1, 4))
+        tracker.on_t1_hit(target_1)
+        # Remainder stopped at breakeven
+        tracker.on_stop_hit(exit_price if exit_price is not None else tracker.current_stop)
     elif out in ("hit_t2", "take_profit_2"):
-        # 50% at T1, 30% at T2, remaining 20% stopped at T1 (trailing stop)
-        r_runner = r1 if w3 > 0 else 0.0
-        return float(round(w1 * r1 + w2 * r2 + w3 * r_runner, 4))
+        tracker.on_t1_hit(target_1)
+        if target_2:
+            tracker.on_t2_hit(target_2)
+        # Remainder stopped at trailing stop (T1)
+        tracker.on_stop_hit(exit_price if exit_price is not None else tracker.current_stop)
     elif out in ("hit_t3", "take_profit_3"):
-        # Full scale-out: 50% T1 + 30% T2 + 20% T3
-        return float(round(w1 * r1 + w2 * r2 + w3 * r3, 4))
-    elif out in ("expired", "open", "invalidated", "manually_removed") and exit_price is not None:
-        return float(round((exit_price - entry_price) / entry_price * 100.0, 4))
-    return 0.0
+        tracker.on_t1_hit(target_1)
+        if target_2:
+            tracker.on_t2_hit(target_2)
+        if target_3:
+            tracker.on_t3_hit(target_3)
+        if not tracker.is_closed:
+            tracker.on_stop_hit(exit_price if exit_price is not None else tracker.current_stop)
+    elif out in ("expired", "open", "invalidated", "manually_removed"):
+        exp_px = exit_price if exit_price is not None else entry_price
+        tracker.on_expired(exp_px)
+    else:
+        return 0.0
+
+    return float(round(tracker.realized_return_pct, 4))
 
 
 def evaluate_signal_outcome(
@@ -314,25 +342,7 @@ def evaluate_signal_outcome(
 ) -> Optional[Dict[str, Any]]:
     """
     Evaluate daily OHLC price bars against entry, stop loss, and canonical scale-out targets.
-
-    Scale-out rules:
-    - 50% closed at Target 1, stop moves to Breakeven for remaining 50%.
-    - 30% closed at Target 2, stop for remaining 20% runner moves to Target 1.
-    - 20% closed at Target 3.
-    - If stopped out before T1: 100% loss at stop_loss.
-    - If stopped out after T1: 50% booked at T1, 50% booked at Breakeven (0.0%). Total return = 0.50 * r1.
-    - If stopped out after T2: 50% at T1, 30% at T2, 20% at T1 (trailing stop). Total = 0.50*r1 + 0.30*r2 + 0.20*r1.
-    - If max_holding_days reached without complete exit: remaining position closed at final bar's Close.
-    - If low <= current_stop and high >= current_target on same bar: stop evaluated first per STOP_FIRST policy.
-
-    Returns:
-        dict with {
-            'outcome': 'stopped' | 'hit_t1' | 'hit_t2' | 'hit_t3' | 'expired',
-            'outcome_return_pct': float,
-            'outcome_date': str (YYYY-MM-DD),
-            'outcome_holding_days': int,
-            'exit_price': float
-        } or None if trade remains open.
+    Directly delegates position accounting and state transitions to PositionScaleOutTracker.
     """
     if df is None or df.empty or entry_price <= 0 or not target_1:
         return None
@@ -346,22 +356,16 @@ def evaluate_signal_outcome(
     if not high_col or not low_col or not close_col:
         return None
 
-    w1, w2, w3 = get_effective_scale_out_weights(target_1, target_2, target_3)
-    r1 = (target_1 - entry_price) / entry_price * 100.0
-    r2 = ((target_2 - entry_price) / entry_price * 100.0) if target_2 else 0.0
-    r3 = ((target_3 - entry_price) / entry_price * 100.0) if target_3 else 0.0
-
-    remaining_weight = 1.0
-    current_stop = float(stop_loss)
-    realized_return_pct = 0.0
-
-    hit_t1 = False
-    hit_t2 = False
-    hit_t3 = False
+    tracker = PositionScaleOutTracker(
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_1=target_1,
+        target_2=target_2,
+        target_3=target_3,
+    )
 
     outcome_date_str = ""
     holding_days = 0
-    final_exit_price = current_stop
 
     for i, (idx, bar) in enumerate(df.iterrows()):
         day_open = float(bar[open_col]) if open_col in bar else float(bar[close_col])
@@ -375,128 +379,71 @@ def evaluate_signal_outcome(
         else:
             outcome_date_str = str(idx)[:10]
 
-        # -------------------------------------------------------------
         # 1. CANONICAL EVENT RESOLUTION (Open Gap & STOP_FIRST Ambiguity)
-        # -------------------------------------------------------------
-        active_target = target_3 if (hit_t2 and target_3) else (target_2 if (hit_t1 and target_2) else target_1)
+        active_target = (
+            tracker.target_3 if (tracker.state == PositionState.T2_HIT and tracker.target_3)
+            else (tracker.target_2 if (tracker.state == PositionState.T1_HIT and tracker.target_2)
+            else tracker.target_1)
+        )
         stop_hit, target_hit, exit_p = resolve_bar_event(
             open_price=day_open,
             high_price=day_high,
             low_price=day_low,
             close_price=day_close,
-            stop_price=current_stop,
+            stop_price=tracker.current_stop,
             target_price=active_target,
             ambiguity_policy=ambiguity_policy,
         )
 
         if stop_hit:
-            # Remaining weight stops out at exit_p (capturing open gap slippage)
-            r_stop_portion = (exit_p - entry_price) / entry_price * 100.0
-            realized_return_pct += remaining_weight * r_stop_portion
-            final_exit_price = exit_p
-            remaining_weight = 0.0
-
-            if hit_t2:
-                outcome = "hit_t2"
-            elif hit_t1:
-                outcome = "hit_t1"
-            else:
-                outcome = "stopped"
-
+            tracker.on_stop_hit(exit_p)
             return {
-                "outcome": outcome,
-                "outcome_return_pct": float(round(realized_return_pct, 4)),
+                "outcome": tracker.state.value,
+                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
-                "exit_price": float(round(final_exit_price, 2)),
+                "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
-        # -------------------------------------------------------------
         # 2. TARGET PROGRESSION
-        # -------------------------------------------------------------
-        # Target 1
-        if not hit_t1 and day_high >= target_1:
-            hit_t1 = True
-            realized_return_pct += w1 * r1
-            remaining_weight -= w1
-            final_exit_price = target_1
-            # Breakeven stop ratchet on remainder
-            current_stop = max(current_stop, float(entry_price))
+        if tracker.state == PositionState.OPEN and day_high >= tracker.target_1:
+            tracker.on_t1_hit(tracker.target_1)
 
-        # Target 2 (can occur same bar as T1 if high was strong)
-        if hit_t1 and not hit_t2 and target_2 and day_high >= target_2:
-            hit_t2 = True
-            realized_return_pct += w2 * r2
-            remaining_weight -= w2
-            final_exit_price = target_2
-            # Trailing stop to Target 1
-            current_stop = max(current_stop, float(target_1))
+        if tracker.state == PositionState.T1_HIT and tracker.target_2 and day_high >= tracker.target_2:
+            tracker.on_t2_hit(tracker.target_2)
 
-        # Target 3 (can occur same bar if breakout continues)
-        if hit_t2 and not hit_t3 and target_3 and day_high >= target_3:
-            hit_t3 = True
-            realized_return_pct += w3 * r3
-            remaining_weight -= w3
-            final_exit_price = target_3
+        if tracker.state == PositionState.T2_HIT and tracker.target_3 and day_high >= tracker.target_3:
+            tracker.on_t3_hit(tracker.target_3)
 
-        # If all scale-out portions have exited
-        if remaining_weight <= 0.0001:
-            outcome = "hit_t3" if hit_t3 else ("hit_t2" if hit_t2 else "hit_t1")
+        if tracker.is_closed:
             return {
-                "outcome": outcome,
-                "outcome_return_pct": float(round(realized_return_pct, 4)),
+                "outcome": tracker.state.value,
+                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
-                "exit_price": float(round(final_exit_price, 2)),
+                "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
-        # If STOP_FIRST was not triggered earlier and low breaches current_stop now
-        # (e.g., if ambiguity_policy != STOP_FIRST or stop hit occurred after partial target)
-        if day_low <= current_stop:
-            r_stop_portion = (current_stop - entry_price) / entry_price * 100.0
-            realized_return_pct += remaining_weight * r_stop_portion
-            final_exit_price = current_stop
-            remaining_weight = 0.0
-
-            if hit_t2:
-                outcome = "hit_t2"
-            elif hit_t1:
-                outcome = "hit_t1"
-            else:
-                outcome = "stopped"
-
+        # Stop breach after partial target hit (if not handled by resolve_bar_event)
+        if day_low <= tracker.current_stop:
+            tracker.on_stop_hit(tracker.current_stop)
             return {
-                "outcome": outcome,
-                "outcome_return_pct": float(round(realized_return_pct, 4)),
+                "outcome": tracker.state.value,
+                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
-                "exit_price": float(round(final_exit_price, 2)),
+                "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
-        # -------------------------------------------------------------
         # 3. EXPIRY EVALUATION
-        # -------------------------------------------------------------
         if holding_days >= max_holding_days:
-            # Position closes on expiry bar at Close
-            r_close_portion = (day_close - entry_price) / entry_price * 100.0
-            realized_return_pct += remaining_weight * r_close_portion
-            final_exit_price = day_close
-            remaining_weight = 0.0
-
-            if hit_t2:
-                outcome = "hit_t2"
-            elif hit_t1:
-                outcome = "hit_t1"
-            else:
-                outcome = "expired"
-
+            tracker.on_expired(day_close)
             return {
-                "outcome": outcome,
-                "outcome_return_pct": float(round(realized_return_pct, 4)),
+                "outcome": tracker.state.value,
+                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
-                "exit_price": float(round(final_exit_price, 2)),
+                "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
-    # Still open, holding_days < max_holding_days and neither stop nor complete exit reached
     return None

@@ -38,6 +38,9 @@ class SectorRotationStrategy(StrategyInterface):
         return "Buy"
 
     def scan(self, ticker: str, df: pd.DataFrame, regime: str, metrics: dict) -> Optional[dict]:
+        from src.quant_config import normalize_regime_key
+        regime_key = normalize_regime_key(regime)
+
         # Require minimum history
         if len(df) < 50:
             return None
@@ -186,7 +189,7 @@ class SectorRotationStrategy(StrategyInterface):
         else: wr_score = 5
 
         # Regime score (0-10): sector rotation works in all regimes but best in bull
-        regime_score = 10 if regime == 'bull' else 7 if regime == 'sideways' else 5
+        regime_score = 10 if regime_key == 'bull' else 7 if regime_key == 'sideways' else 5
 
         composite_score = momentum_score + exp_score + wr_score + regime_score
 

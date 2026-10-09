@@ -5,6 +5,8 @@ from jobs.strategies.base import StrategyInterface
 
 logger = logging.getLogger(__name__)
 
+MIN_RSI_BOUNCE_POINTS = 3.0  # Current RSI must be this far above its 5-bar low to count as a bounce
+
 
 class MeanReversionStrategy(StrategyInterface):
     @property
@@ -61,9 +63,14 @@ class MeanReversionStrategy(StrategyInterface):
         if current_rsi >= 40:
             return None
 
-        # 2. Bounce gate: RSI recovered from < 35 (relaxed from 30)
+        # 2. Bounce gate: RSI was below 35 within the last 5 bars AND has actually turned up
+        #    (current RSI at least 3 points off that low, on an up-close day).
         rsi_min_5d = df['RSI_14'].rolling(5).min().iloc[-1]
         if rsi_min_5d > 35:
+            return None
+        if current_rsi < rsi_min_5d + MIN_RSI_BOUNCE_POINTS:
+            return None
+        if len(df) < 2 or not (price > df['CLOSE'].iloc[-2]):
             return None
 
         # 3. Support gate: Price within 8% of 20-day low (relaxed from 5%)
@@ -191,27 +198,9 @@ class MeanReversionStrategy(StrategyInterface):
         else:
             tier_label = 'Speculative'
 
-        # === GUARDRAILS ===
-        MIN_WIN_RATE = 50.0
-        MIN_EXPECTANCY = 1.0
-        MIN_SAMPLE = 10
-
+        # Qualification is decided centrally by the composite score; no per-strategy blocking.
         is_blocked = False
         blocked_reason = None
-
-        if past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Win rate {past_win_rate:.1f}% below {MIN_WIN_RATE}%'
-        if expectancy_pct < MIN_EXPECTANCY:
-            is_blocked = True
-            blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
-
-
-        if is_blocked:
-            tier_label = 'Blocked'
 
         # Get latest scan date from DataFrame index
         latest_date = df.index[-1]

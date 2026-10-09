@@ -252,12 +252,15 @@ class TestCanonicalQuantGolden(unittest.TestCase):
             }
         ]
 
-        with patch("jobs.supabase_client.get_latest_bar") as mock_bar, \
+        same_day_bar = pd.DataFrame(
+            [{"OPEN": 99.0, "HIGH": 102.0, "LOW": 93.0, "CLOSE": 94.0}],
+            index=pd.DatetimeIndex(["2026-10-07"]),
+        )
+        with patch("jobs.supabase_client.get_bars_after", return_value=same_day_bar), \
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
              patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
 
-            # Even if quote low breaches stop loss, same-day trade activation guard skips it
-            mock_bar.return_value = {"close": 94.0, "low": 93.0, "high": 102.0}
+            # Even if the same-day bar breaches the stop loss, the activation guard skips it
 
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,

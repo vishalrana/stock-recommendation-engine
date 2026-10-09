@@ -190,27 +190,9 @@ class TrendFollowingStrategy(StrategyInterface):
         else:
             tier_label = 'Speculative'
 
-        # === GUARDRAILS ===
-        MIN_WIN_RATE = 50.0
-        MIN_EXPECTANCY = 1.0
-        MIN_SAMPLE = 10
-
+        # Qualification is decided centrally by the composite score; no per-strategy blocking.
         is_blocked = False
         blocked_reason = None
-
-        if past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Win rate {past_win_rate:.1f}% below {MIN_WIN_RATE}%'
-        if expectancy_pct < MIN_EXPECTANCY:
-            is_blocked = True
-            blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
-
-
-        if is_blocked:
-            tier_label = 'Blocked'
 
         # Get latest scan date from DataFrame index
         latest_date = df.index[-1]

@@ -62,6 +62,13 @@ class TargetCalculationResult:
     target_1_return_decimal: Optional[float] = None
     target_2_return_decimal: Optional[float] = None
     target_3_return_decimal: Optional[float] = None
+    # Sample quality of the T1 reach estimate (raw empirical basis); see ReachProbabilityResult
+    reach_prob_t1_ci_low: Optional[float] = None
+    reach_prob_t1_ci_high: Optional[float] = None
+    reach_prob_effective_samples: Optional[float] = None
+    # "strategy_conditional" (backtest hit rate of this strategy's qualified setups) or
+    # "ticker_base_rate" (all historical days of this ticker; not specific to the setup)
+    reach_prob_source: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -89,6 +96,9 @@ class ReachProbabilityResult:
         "sample_count",
         "delisted_samples",
         "as_of_date",
+        "effective_samples",
+        "ci_low",
+        "ci_high",
     )
 
     def __init__(
@@ -100,6 +110,9 @@ class ReachProbabilityResult:
         sample_count: int = 0,
         delisted_samples: int = 0,
         as_of_date: Optional[str] = None,
+        effective_samples: Optional[float] = None,
+        ci_low: Optional[float] = None,
+        ci_high: Optional[float] = None,
     ):
         self.adjusted_prob = float(adjusted_prob)
         self.raw_prob = float(raw_prob)
@@ -108,6 +121,11 @@ class ReachProbabilityResult:
         self.sample_count = int(sample_count)
         self.delisted_samples = int(delisted_samples)
         self.as_of_date = as_of_date
+        # Overlapping H-day windows are strongly autocorrelated: ~sample_count / H of them are
+        # independent. effective_samples and the 95% Wilson interval (on raw_prob) reflect that.
+        self.effective_samples = effective_samples
+        self.ci_low = ci_low
+        self.ci_high = ci_high
 
     def __iter__(self):
         yield self.adjusted_prob
@@ -128,6 +146,27 @@ class ReachProbabilityResult:
             f"ReachProbabilityResult(adjusted={self.adjusted_prob:.4f}, raw={self.raw_prob:.4f}, "
             f"status='{self.status}', provenance='{self.provenance}', samples={self.sample_count})"
         )
+
+
+def wilson_interval(p: float, n: float, z: float = 1.959964) -> Tuple[Optional[float], Optional[float]]:
+    """95% Wilson score interval for a proportion p observed over n (possibly fractional) samples."""
+    if n is None or n <= 0 or not math.isfinite(p):
+        return None, None
+    denom = 1.0 + z * z / n
+    centre = p + z * z / (2.0 * n)
+    half = z * math.sqrt(max(0.0, p * (1.0 - p) / n + z * z / (4.0 * n * n)))
+    return max(0.0, (centre - half) / denom), min(1.0, (centre + half) / denom)
+
+
+def _sample_quality(prob: float, windows: int, holding_days: int) -> Dict[str, Optional[float]]:
+    """Effective independent sample size and Wilson interval for overlapping H-day windows."""
+    n_eff = windows / max(1, int(holding_days))
+    lo, hi = wilson_interval(prob, n_eff)
+    return {
+        "effective_samples": round(n_eff, 1),
+        "ci_low": round(lo, 4) if lo is not None else None,
+        "ci_high": round(hi, 4) if hi is not None else None,
+    }
 
 
 def normalize_and_filter_price_df(
@@ -215,12 +254,15 @@ ALGORITHM_VERSION: str = "v2_target_reach"
 _REACH_DIST_CACHE: Dict[Tuple[str, str, int, int, str, str], np.ndarray] = {}
 # Global in-memory cache for target-before-stop reach prob: (ticker, target_pct_round, stop_pct_round, holding_days, lookback_days, as_of_date, data_sig, algorithm_version) -> float
 _TARGET_STOP_REACH_CACHE: Dict[Tuple[str, float, float, int, int, str, str, str], float] = {}
+# Window counts behind cached target-before-stop probabilities (same keys), for sample-quality metadata
+_TARGET_STOP_REACH_WINDOWS: Dict[Tuple, int] = {}
 
 
 def reset_reach_prob_cache() -> None:
     """Clear all in-memory reach probability caches."""
     _REACH_DIST_CACHE.clear()
     _TARGET_STOP_REACH_CACHE.clear()
+    _TARGET_STOP_REACH_WINDOWS.clear()
 
 
 def _compute_price_df_signature(df: Optional[pd.DataFrame]) -> str:
@@ -437,7 +479,11 @@ def get_reach_prob_target_before_stop_structured(
     cache_key = (t_up, round(t_pct, 4), round(s_pct, 4), h, lb, as_of, data_sig, ALGORITHM_VERSION)
     if cache_key in _TARGET_STOP_REACH_CACHE:
         val = _TARGET_STOP_REACH_CACHE[cache_key]
-        return ReachProbabilityResult(val, val, status=STATUS_VALID_ESTIMATE, provenance="memory_cache", as_of_date=as_of)
+        windows = _TARGET_STOP_REACH_WINDOWS.get(cache_key, 0)
+        return ReachProbabilityResult(
+            val, val, status=STATUS_VALID_ESTIMATE, provenance="memory_cache", sample_count=windows,
+            as_of_date=as_of, **(_sample_quality(val, windows, h) if windows else {}),
+        )
 
     # Fetch price history if needed
     if price_df is None or price_df.empty:
@@ -533,7 +579,11 @@ def get_reach_prob_target_before_stop_structured(
     prob = float(success_count / valid_windows)
     _TARGET_STOP_REACH_CACHE[cache_key] = prob
     _TARGET_STOP_REACH_CACHE[(t_up, round(t_pct, 4), round(s_pct, 4), h, lb, as_of, ALGORITHM_VERSION)] = prob
-    return ReachProbabilityResult(prob, prob, status=STATUS_VALID_ESTIMATE, provenance="empirical_target_before_stop", sample_count=valid_windows, as_of_date=as_of)
+    _TARGET_STOP_REACH_WINDOWS[cache_key] = valid_windows
+    return ReachProbabilityResult(
+        prob, prob, status=STATUS_VALID_ESTIMATE, provenance="empirical_target_before_stop",
+        sample_count=valid_windows, as_of_date=as_of, **_sample_quality(prob, valid_windows, h),
+    )
 
 
 def get_reach_prob(
@@ -614,6 +664,7 @@ def get_reach_prob_structured(
         provenance="empirical_max_gain_distribution",
         sample_count=len(gains),
         as_of_date=as_of_date,
+        **_sample_quality(prob, len(gains), holding_days),
     )
 
 
@@ -628,13 +679,18 @@ def calculate_targets(
     override_targets: Optional[Tuple[float, float, float]] = None,
     sector: Optional[str] = None,
     as_of_date: Optional[str] = None,
+    strategy_target_hits: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> TargetCalculationResult:
     """
     Full 3-layer target calculation and reach-probability filtering engine.
 
     Layer 1: Computes ATR targets and fixed-floor targets per strategy, selecting max().
-    Layer 2: Applies reach-probability decision tree with target-before-stop and survivorship bias mitigation.
-    Layer 3: Computes honest weighted scale-out risk-to-reward ratio.
+    Layer 2: Reach probabilities. Setup-conditional when available: the fraction of this
+             strategy's backtested qualified trades that reached each target before the stop
+             within the holding period (strategy_target_hits = {"t1": (hits, n), ...}, used
+             when n >= MIN_STRATEGY_REACH_TRADES). Otherwise falls back to the ticker's
+             unconditional target-before-stop base rate with survivorship mitigation.
+    Layer 3: Computes weighted scale-out risk-to-reward ratio (assumes surviving targets are hit).
     """
     try:
         strat_key = normalize_strategy_name(strategy_name)
@@ -849,6 +905,7 @@ def calculate_targets(
     t3_ret_dec = (cand_t3 - entry) / entry
 
     # Layer 2 — Reach Probabilities with Target-Before-Stop & Survivorship Bias Adjustment
+    t1_quality: Dict[str, Optional[float]] = {}
     if mock_reach_probs is not None:
         try:
             rp_t1, rp_t2, rp_t3 = [float(x) for x in mock_reach_probs]
@@ -872,9 +929,43 @@ def calculate_targets(
     else:
         hold = cfg["hold_days"]
         from src.filters.survivorship_bias import compute_reach_prob_with_survivorship
-        rp_t1, raw_t1 = compute_reach_prob_with_survivorship(ticker, t1_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
-        rp_t2, _ = compute_reach_prob_with_survivorship(ticker, t2_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
-        rp_t3, _ = compute_reach_prob_with_survivorship(ticker, t3_ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
+        from src.quant_config import MIN_STRATEGY_REACH_TRADES
+
+        def _conditional(key: str) -> Optional[Tuple[float, int]]:
+            hits_n = (strategy_target_hits or {}).get(key)
+            if not hits_n:
+                return None
+            hits, n = int(hits_n[0]), int(hits_n[1])
+            if n < MIN_STRATEGY_REACH_TRADES:
+                return None
+            return hits / n, n
+
+        def _base_rate(ret_dec: float):
+            return compute_reach_prob_with_survivorship(ticker, ret_dec, hold, price_df, sector=sector, stop_pct=stop_pct, as_of_date=as_of_date)
+
+        cond_t1 = _conditional("t1")
+        if cond_t1 is not None:
+            rp_t1 = raw_t1 = cond_t1[0]
+            lo, hi = wilson_interval(cond_t1[0], cond_t1[1])
+            t1_quality = {
+                "reach_prob_t1_ci_low": round(lo, 4) if lo is not None else None,
+                "reach_prob_t1_ci_high": round(hi, 4) if hi is not None else None,
+                "reach_prob_effective_samples": float(cond_t1[1]),
+                "reach_prob_source": "strategy_conditional",
+            }
+        else:
+            res_t1 = _base_rate(t1_ret_dec)
+            rp_t1, raw_t1 = res_t1
+            t1_quality = {
+                "reach_prob_t1_ci_low": getattr(res_t1, "ci_low", None),
+                "reach_prob_t1_ci_high": getattr(res_t1, "ci_high", None),
+                "reach_prob_effective_samples": getattr(res_t1, "effective_samples", None),
+                "reach_prob_source": "ticker_base_rate",
+            }
+        cond_t2 = _conditional("t2")
+        rp_t2 = cond_t2[0] if cond_t2 is not None else _base_rate(t2_ret_dec)[0]
+        cond_t3 = _conditional("t3")
+        rp_t3 = cond_t3[0] if cond_t3 is not None else _base_rate(t3_ret_dec)[0]
 
     if not (math.isfinite(rp_t1) and math.isfinite(rp_t2) and math.isfinite(rp_t3)):
         return TargetCalculationResult(
@@ -994,4 +1085,5 @@ def calculate_targets(
         target_1_return_decimal=t1_dec,
         target_2_return_decimal=t2_dec,
         target_3_return_decimal=t3_dec,
+        **t1_quality,
     )

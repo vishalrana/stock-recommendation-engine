@@ -286,11 +286,11 @@ def run_cross_sectional_screen(universe: list[str], cache_manager, as_of_date: O
     for ticker in universe:
         try:
             raw = cache_manager.get_ticker_history(ticker, start_date_str, end_date_str)
-            if raw is None or len(raw) < 63:
+            if raw is None or len(raw) < 64:
                 continue
             close_col = "CLOSE" if "CLOSE" in raw.columns else "Close"
             price = raw[close_col].iloc[-1]
-            price_63d = raw[close_col].iloc[-63]
+            price_63d = raw[close_col].iloc[-64]  # 63 trading-day intervals back
             if price is not None and price_63d is not None and float(price_63d) > 0:
                 ret = (float(price) / float(price_63d) - 1.0) * 100.0
                 if ret is not None and not np.isnan(ret) and np.isfinite(ret):
@@ -324,6 +324,25 @@ def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries
 
 
 
+def _mark_context_unavailable(c: dict) -> None:
+    """
+    Context data could not be obtained (provider failure, timeout, or NLP skipped).
+    The composite score then excludes the context component and renormalizes the
+    remaining weights, instead of scoring the missing data as a genuine 0.
+    """
+    c["context_available"] = False
+    c["context_score"] = None
+    c["context_analyst"] = 0.0
+    c["context_earnings"] = 0.0
+    c["context_fundamental"] = 0.0
+    c["context_news"] = 0.0
+    c["de_ratio"] = None
+    c["current_ratio"] = None
+    c["earnings_surprise_pct"] = None
+    c["finbert_sentiment"] = None
+    c["target_consensus"] = None
+
+
 def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
     """Keep highest quality_score per ticker."""
     best: dict[str, dict] = {}
@@ -332,6 +351,43 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
         if ticker not in best or sig["quality_score"] > best[ticker]["quality_score"]:
             best[ticker] = sig
     return list(best.values())
+
+
+# Analytical fields refreshed on an open recommendation when it still qualifies.
+# Trade parameters (entry, stop, targets, reach probabilities, R:R) and strategy identity
+# are frozen at issuance and never overwritten by a later scan.
+REFRESHABLE_ANALYTICS_FIELDS = (
+    "composite_score", "score", "quality_score", "tier_label",
+    "current_rsi", "volume_ratio", "adx_value", "macd_histogram", "ema20",
+    "pe_ratio",
+)
+
+# Columns added by migration_lifecycle_replay_and_pe.sql; dropped and retried if not yet migrated.
+OPTIONAL_LIFECYCLE_COLUMNS = ("entry_fill_price", "position_state", "current_stop", "pe_ratio")
+
+# Insert columns added by later migrations; dropped and retried if the table is not yet migrated.
+OPTIONAL_INSERT_COLUMNS = (
+    "reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "pe_ratio",
+    "reach_prob_t1_ci_low", "reach_prob_t1_ci_high", "reach_prob_effective_samples",
+    "reach_prob_source", "strategy_win_rate", "strategy_expectancy_pct", "strategy_trades",
+)
+
+# Used only when a recommendation's strategy is unknown (no holding period to apply).
+NO_EXPIRY_HOLDING_DAYS = 10 ** 9
+
+
+def _safe_signal_update(supabase, signal_id: str, fields: dict) -> None:
+    """Update one signals row by id, retrying without unmigrated optional columns."""
+    try:
+        supabase.table("signals").update(fields).eq("id", signal_id).execute()
+    except Exception as e:
+        err = str(e)
+        if "42703" in err or any(c in err for c in OPTIONAL_LIFECYCLE_COLUMNS):
+            reduced = {k: v for k, v in fields.items() if k not in OPTIONAL_LIFECYCLE_COLUMNS}
+            if reduced:
+                supabase.table("signals").update(reduced).eq("id", signal_id).execute()
+        else:
+            raise
 
 
 def reconcile_recommendation_lifecycle(
@@ -348,45 +404,53 @@ def reconcile_recommendation_lifecycle(
     current_scan_date: Optional[str] = None,
 ):
     """
-    Reconcile active recommendations against latest market prices and scan qualification.
+    Reconcile active recommendations against market data.
     Pure recommendation engine lifecycle:
-    1. Scan Failure Safeguard: If scan failed or scanned_count < min_required_scanned, skip invalidation.
-    2. Universe Coverage Safeguard: If broad universe degraded to fallback, skip invalidation.
-    3. Per-Ticker Quote Safeguard: If market quote is unavailable, skip lifecycle transition.
-    4. Incomplete Evaluation Safeguard: Only invalidate if ticker was actually successfully evaluated.
-    5. Trade Activation Separation: Recommendations created on scan_date D activate at D+1. Do not evaluate same-day bars.
-    6. Stop Loss Hit: If low <= stop_loss, status/outcome -> 'stopped'.
-    7. Target 3 Hit: If high >= target_3 (when target_3 is set), status/outcome -> 'hit_t3'.
-    8. Subsequent Scan Invalidation: If ticker does not appear in qualified_tickers (and stop not hit),
-       status/outcome -> 'invalidated' with specific disqualification reason.
-    9. Still Active: If still qualified and stop not hit, status remains 'open', price and analytics updated.
-    
+    1. Scan Failure Safeguard: If scan failed or scanned_count < min_required_scanned, skip the run
+       (the next run replays the full path, so nothing is lost).
+    2. Per-Ticker Data Safeguard: If price history is unavailable, skip lifecycle transition.
+    3. Trade Activation Separation: A recommendation issued on scan_date D is filled at the open of the
+       first bar after D (D+1). Bars on or before D are never evaluated.
+    4. Full Path Replay: Every bar from D+1 through the current scan date is replayed through the
+       canonical PositionScaleOutTracker (stop, T1/T2/T3 scale-outs, breakeven/T1 stop ratchets,
+       STOP_FIRST ambiguity), so hits on days without a successful scan are never missed.
+    5. Exits: stop, final target, or the strategy's holding period (hold_days, in trading bars from
+       the fill) -> stopped / hit_t1 / hit_t2 / hit_t3 / expired, with the scale-out realized return
+       measured from the D+1 fill, the bar date it occurred, and the trading-day holding period.
+       Failing to requalify in a later scan is NOT an exit: the trade is measured as designed.
+    6. Still Active: status 'open'; price and lifecycle state are refreshed, plus analytical fields
+       when the ticker re-qualified tonight. Entry, stop, targets and strategy stay frozen as issued.
+
+    qualified_tickers / disqualification_reasons / successfully_evaluated_tickers / universe_is_fallback
+    no longer drive transitions (kept for call compatibility).
+
     Crucial:
     - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
     - None of these actions blacklist the stock. Tickers remain 100% eligible for future scans.
     """
     if not scan_successful:
-        logger.warning("[LIFECYCLE SAFEGUARD] Scan did not complete successfully. Skipping automatic invalidation to protect active recommendations.")
+        logger.warning("[LIFECYCLE SAFEGUARD] Scan did not complete successfully. Skipping lifecycle reconciliation this run.")
         return
 
     eff_min_scanned = len(target_tickers) if target_tickers is not None else min_required_scanned
     if scanned_count < eff_min_scanned:
-        logger.warning(f"[LIFECYCLE SAFEGUARD] Incomplete scan detected ({scanned_count} < {eff_min_scanned} tickers scanned). Skipping automatic invalidation.")
+        logger.warning(f"[LIFECYCLE SAFEGUARD] Incomplete scan detected ({scanned_count} < {eff_min_scanned} tickers scanned). Skipping lifecycle reconciliation this run.")
         return
 
-    if universe_is_fallback and target_tickers is None:
-        logger.warning("[LIFECYCLE UNIVERSE SAFEGUARD] Broad universe degraded to fallback coverage. Skipping invalidation to protect active recommendations.")
-
     try:
-        from jobs.supabase_client import get_latest_bar, update_signals_price, update_signals_status, update_history_outcome
-        
+        from src.pipeline_steps import holding_days_for
+        from jobs.supabase_client import get_bars_after, update_signals_price, update_signals_status, update_history_outcome
+        from src.outcome.outcome_calculator import evaluate_signal_outcome
+
         res = supabase.table("signals").select("id, ticker, status, stop_loss, entry_price, price, target_1, target_2, target_3, strategy, scan_date").in_("status", ["open", "pending"]).execute()
         active_signals = res.data or []
-        
+
         if not active_signals:
             logger.info("No active recommendations in database for lifecycle reconciliation.")
             return
-            
+
+        eff_current_date = str(current_scan_date)[:10] if current_scan_date else None
+
         logger.info("Reconciling recommendation lifecycle for %d active recommendations...", len(active_signals))
         for existing in active_signals:
             ticker = existing["ticker"].upper()
@@ -395,101 +459,101 @@ def reconcile_recommendation_lifecycle(
 
             signal_id = existing.get("id")
             scan_date = existing.get("scan_date")
+            if not scan_date:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: missing scan_date. Skipping lifecycle transition.")
+                continue
 
-            # Trade activation separation: Recommendations generated on scan_date D
+            # Trade activation separation: recommendations generated on scan_date D
             # only begin trade evaluation on D+1 (next trading day).
-            eff_current_date = str(current_scan_date)[:10] if current_scan_date else None
-            if eff_current_date and scan_date and str(scan_date)[:10] >= eff_current_date:
+            if eff_current_date and str(scan_date)[:10] >= eff_current_date:
                 logger.info(f"[LIFECYCLE SEPARATION] {ticker}: created on current scan date {scan_date}. Trade activates next trading day (D+1). Skipping stop/target evaluation.")
                 continue
 
-            bar = get_latest_bar(ticker)
-            if not bar or "close" not in bar or bar["close"] is None or float(bar["close"]) <= 0:
-                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: Unable to retrieve current quote data. Skipping lifecycle transition.")
+            bars = get_bars_after(ticker, scan_date, eff_current_date)
+            if bars is None:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: Unable to retrieve price history. Skipping lifecycle transition.")
+                continue
+            if bars.empty:
+                logger.info(f"[LIFECYCLE SEPARATION] {ticker}: no bar after scan date {scan_date} yet. Awaiting D+1 fill.")
                 continue
 
-            bar_date = bar.get("date")
-            if bar_date and scan_date and str(bar_date)[:10] <= str(scan_date)[:10]:
-                logger.info(f"[LIFECYCLE SEPARATION] {ticker}: bar date {bar_date} <= scan date {scan_date}. Skipping stop/target evaluation.")
+            first_bar = bars.iloc[0]
+            fill_raw = first_bar.get("OPEN")
+            if fill_raw is None or pd.isna(fill_raw) or float(fill_raw) <= 0:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: D+1 open price unavailable. Skipping lifecycle transition.")
                 continue
+            entry_fill = float(fill_raw)
+            fill_idx = bars.index[0]
+            entry_fill_date = fill_idx.date().isoformat() if hasattr(fill_idx, "date") else str(fill_idx)[:10]
 
-            close_price = float(bar["close"])
-            open_price = float(bar.get("open", close_price))
-            low_price = float(bar.get("low", close_price))
-            high_price = float(bar.get("high", close_price))
-            
             stop_loss = float(existing.get("stop_loss") or 0.0)
-            target_1 = float(existing.get("target_1") or 0.0)
-            target_2 = float(existing.get("target_2") or 0.0)
-            target_3 = float(existing.get("target_3") or 0.0)
-            
-            from src.outcome.outcome_calculator import resolve_bar_event
-            terminal_target = target_3 if target_3 > 0 else (target_2 if target_2 > 0 else target_1)
-            stop_hit, target_hit, exit_p = resolve_bar_event(
-                open_price, high_price, low_price, close_price, stop_loss, terminal_target, "STOP_FIRST"
+            target_1 = float(existing.get("target_1") or 0.0) or None
+            target_2 = float(existing.get("target_2") or 0.0) or None
+            target_3 = float(existing.get("target_3") or 0.0) or None
+            if stop_loss <= 0:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: missing stop loss. Skipping lifecycle transition.")
+                continue
+            if not target_1:
+                # Legacy record without targets: only the stop or the holding period can close it.
+                target_1, target_2, target_3 = float("inf"), None, None
+
+            hold_days = holding_days_for(existing.get("strategy"))
+            if hold_days is None:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: unknown strategy '{existing.get('strategy')}'; no holding-period expiry applied.")
+                hold_days = NO_EXPIRY_HOLDING_DAYS
+
+            path = evaluate_signal_outcome(
+                bars, entry_fill, stop_loss, target_1, target_2, target_3,
+                max_holding_days=hold_days, ambiguity_policy="STOP_FIRST", return_open=True,
             )
-            
-            # 1. Stop Loss Hit (Conservative STOP_FIRST Ambiguity Policy)
-            if stop_hit:
-                logger.info(f"[LIFECYCLE STOP LOSS HIT] {ticker}: exit at ${exit_p:.2f} <= stop ${stop_loss:.2f}. Transitioning to stopped.")
-                update_signals_status(ticker, "stopped", exit_p, True, "Stop loss hit", signal_id=signal_id)
-                update_history_outcome(ticker, "stopped", exit_p, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason="Stop loss hit")
-                continue
-                
-            # 2. Target Hierarchy Progression (Terminal Targets)
-            if target_hit:
-                target_status = "hit_t3" if terminal_target == target_3 else ("hit_t2" if terminal_target == target_2 else "hit_t1")
-                logger.info(f"[LIFECYCLE TARGET HIT] {ticker}: exit at ${exit_p:.2f} >= target ${terminal_target:.2f}. Transitioning to {target_status}.")
-                update_signals_status(ticker, target_status, exit_p, True, f"{target_status.upper()} hit", signal_id=signal_id)
-                update_history_outcome(ticker, target_status, exit_p, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason=f"{target_status.upper()} hit")
-                continue
-                
-            # 3. Subsequent Scan Invalidation
-            # Fallback universe safeguard: do NOT invalidate if universe degraded to fallback
-            if universe_is_fallback and target_tickers is None:
-                logger.info(f"[LIFECYCLE COVERAGE SAFEGUARD] {ticker}: skipping invalidation because universe coverage was degraded.")
+            if path is None:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: no valid bars after scan date. Skipping lifecycle transition.")
                 continue
 
-            # Incomplete evaluation safeguard: do NOT invalidate if ticker was not successfully evaluated in this scan
-            if successfully_evaluated_tickers is not None and ticker not in successfully_evaluated_tickers:
-                logger.warning(f"[LIFECYCLE INCOMPLETE SAFEGUARD] {ticker}: not successfully evaluated in this scan. Skipping invalidation.")
+            # 1. Terminal outcome reached somewhere along the replayed path
+            if path["is_closed"]:
+                outcome = path["outcome"]
+                if path.get("exit_reason") == "expiry":
+                    reason = f"Holding period ended ({hold_days} trading days)"
+                elif outcome == "stopped":
+                    reason = "Stop loss hit"
+                else:
+                    reason = f"{outcome.upper()} hit"
+                logger.info(f"[LIFECYCLE CLOSED] {ticker}: {outcome} ({path.get('exit_reason')}) on {path['outcome_date']} at ${path['exit_price']:.2f} ({path['realized_return_pct']:+.2f}% from fill ${entry_fill:.2f}).")
+                update_signals_status(ticker, outcome, path["exit_price"], True, reason, signal_id=signal_id, exit_date=path["outcome_date"])
+                update_history_outcome(
+                    ticker, outcome, path["exit_price"], True, signal_id=signal_id, scan_date=scan_date,
+                    sell_signal_reason=reason, return_pct=path["realized_return_pct"],
+                    outcome_date=path["outcome_date"], holding_days=path["holding_days"],
+                    entry_fill_price=round(entry_fill, 2),
+                )
                 continue
 
-            if ticker not in qualified_tickers:
-                raw_reason = (disqualification_reasons or {}).get(ticker)
-                dq_reason = f"No longer qualifies in subsequent scan: {raw_reason}" if raw_reason else "No longer qualifies in subsequent scan"
-                logger.info(f"[LIFECYCLE INVALIDATION] {ticker}: no longer qualifies in new scan ({dq_reason}). Transitioning to invalidated.")
-                update_signals_status(ticker, "invalidated", close_price, True, dq_reason, signal_id=signal_id)
-                update_history_outcome(ticker, "invalidated", close_price, True, signal_id=signal_id, scan_date=scan_date, sell_signal_reason=dq_reason)
-                continue
-                
-            # 4. Still Active — update price and refreshed analytical data
+            close_price = float(path["last_close"])
+
+            # 2. Still Active — refresh price, lifecycle state and analytical (non-trade) fields
             update_signals_price(ticker, close_price, signal_id=signal_id)
+            if not signal_id:
+                logger.error(f"[LIFECYCLE REFUSED] Refusing unsafe lifecycle update for {ticker}. Exact signal_id is required.")
+                continue
+            update_fields = {
+                "status": "open",
+                "entry_date": entry_fill_date,
+                "entry_fill_price": round(entry_fill, 2),
+                "position_state": path["outcome"],
+                "current_stop": path["current_stop"],
+            }
             if updated_analytics and ticker in updated_analytics:
                 ana = updated_analytics[ticker]
-                update_fields = {"price": close_price}
-                for k in [
-                    "composite_score", "score", "quality_score",
-                    "target_1", "target_2", "target_3",
-                    "target_1_pct", "target_2_pct", "target_3_pct",
-                    "target_1_atr", "target_2_atr", "target_3_atr",
-                    "stop_loss", "tier_label",
-                    "reach_prob_t1", "reach_prob_t2", "reach_prob_t3",
-                    "reach_prob_raw", "reach_prob_adjusted",
-                    "weighted_rr", "weighted_rr_honest",
-                    "current_rsi", "volume_ratio", "adx_value",
-                    "macd_histogram", "ema20", "strategy", "strategy_name"
-                ]:
+                for k in REFRESHABLE_ANALYTICS_FIELDS:
                     if ana.get(k) is not None:
                         update_fields[k] = ana[k]
-                try:
-                    if signal_id:
-                        supabase.table("signals").update(update_fields).eq("id", signal_id).execute()
-                    else:
-                        logger.error(f"[LIFECYCLE REFUSED] Refusing unsafe analytics update for {ticker}. Exact signal_id is required.")
-                except Exception as ana_err:
-                    logger.warning(f"Could not update refreshed analytical data in signals for {ticker}: {ana_err}")
-            logger.info(f"[LIFECYCLE ACTIVE] {ticker}: still qualified, price and current analytics refreshed in signals.")
+            try:
+                _safe_signal_update(supabase, signal_id, update_fields)
+            except Exception as ana_err:
+                logger.warning(f"Could not update lifecycle/analytical data in signals for {ticker}: {ana_err}")
+            requalified = "re-qualified" if ticker in (qualified_tickers or set()) else "not re-qualified (kept open until stop/target/holding period)"
+            logger.info(f"[LIFECYCLE ACTIVE] {ticker}: {path['outcome']}, day {path['holding_days']}/{hold_days}, {requalified}.")
     except Exception as e:
         logger.warning("Could not reconcile recommendation lifecycle: %s", e)
 
@@ -743,12 +807,18 @@ def run_scan(
             ).execute()
             for row in res.data:
                 ticker = row["ticker"].upper()
+                wins = int(row["wins"]) if row.get("wins") is not None else None
+                losses = int(row["losses"]) if row.get("losses") is not None else None
+                completed = (wins or 0) + (losses or 0)
+                # Missing values stay None (never coerced to 0). A ticker with zero completed
+                # trades has no observed win rate or expectancy; the seed job writes 0.0 placeholders.
+                has_observations = completed > 0
                 metrics_map[ticker] = {
-                    "win_rate": float(row["win_rate"] or 0),
-                    "expectancy_pct": float(row["expectancy_pct"] or 0),
+                    "win_rate": float(row["win_rate"]) if (has_observations and row.get("win_rate") is not None) else None,
+                    "expectancy_pct": float(row["expectancy_pct"]) if (has_observations and row.get("expectancy_pct") is not None) else None,
                     "total_signals": int(row["total_signals"] or 0),
-                    "wins": int(row.get("wins") or 0),
-                    "losses": int(row.get("losses") or 0),
+                    "wins": wins,
+                    "losses": losses,
                     "median_win_return": float(row.get("median_win_return") or 0.0),
                 }
             logger.info("Loaded metrics for %d tickers.", len(metrics_map))
@@ -875,6 +945,11 @@ def run_scan(
                             evaluated_dfs[ticker] = None
                             continue
 
+                    # Older bars with missing OHLC values pass validation (only the recent window
+                    # must be complete), but one NaN would propagate through the recursive
+                    # Wilder RSI/ATR/ADX smoothing and disable the ticker permanently. Drop them.
+                    ohlc_cols = [c for c in raw.columns if str(c).upper() in ("HIGH", "LOW", "CLOSE")]
+                    raw = raw.dropna(subset=ohlc_cols)
                     df = calculate_indicators(raw).sort_index()
                     evaluated_dfs[ticker] = df
 
@@ -960,64 +1035,11 @@ def run_scan(
         context_scorer = ContextScorer()
         skip_nlp = os.getenv("SKIP_NLP", "false").lower() == "true"
 
-        # P0-2: Calculate technical momentum, win rate, expectancy, and regime scores
+        # P0-2: Momentum, strategy-evidence (win rate / expectancy from the production-pipeline
+        # backtest, shrunk by trade count) and regime sub-scores. Shared with the backtest.
+        from src.pipeline_steps import prepare_candidate_scores, composite_score, build_trade_plan, BUY_THRESHOLD
         for sig in candidates:
-            # 1. Technical Momentum Score (from real indicator values)
-            try:
-                sig["momentum_score"] = compute_momentum_score(sig)
-            except Exception as m_err:
-                logger.warning(f"Could not compute momentum score for {sig.get('ticker')}: {m_err}")
-                sig["momentum_score"] = None
-
-            # 2. Historical Win Rate Score & Provenance (P0-6 & Section 2)
-            from src.utils.metrics_pipeline import build_hardened_metrics
-            t_upper = sig["ticker"].upper()
-            m_rec = metrics_map.get(t_upper)
-            hardened = build_hardened_metrics(
-                ticker=t_upper,
-                raw_record=m_rec,
-                strategy_name=sig.get("strategy"),
-                strategy_win_rate=sig.get("strategy_win_rate"),
-                past_win_rate=sig.get("past_win_rate"),
-            )
-
-            if sig.get("strategy_win_rate") is not None:
-                provenance = "strategy_specific"
-            elif sig.get("past_win_rate") is not None:
-                provenance = "candidate_provided"
-            elif t_upper in metrics_map:
-                provenance = "generic_ticker_prior"
-            else:
-                provenance = "unavailable"
-
-            shrunk_wr = hardened["shrunk_win_rate"]
-            raw_wr = hardened["raw_win_rate"]
-
-            sig["winrate_score"] = float(shrunk_wr)
-            sig["win_rate"] = float(shrunk_wr)
-            sig["shrunk_win_rate"] = float(shrunk_wr)
-            sig["raw_win_rate"] = float(raw_wr)
-            sig["win_rate_provenance"] = provenance
-            sig["metric_source"] = hardened["metric_source"]
-            sig["metric_confidence"] = hardened["metric_confidence"]
-            sig["metric_sample_size"] = hardened["metric_sample_size"]
-            sig["completed_trades"] = hardened["completed_trades"]
-            sig["wins"] = hardened["wins"]
-            sig["losses"] = hardened["losses"]
-            sig["expectancy_pct"] = hardened["shrunk_expectancy"]
-            sig["raw_expectancy"] = hardened["raw_expectancy"]
-            sig["shrunk_expectancy"] = hardened["shrunk_expectancy"]
-
-            # 3. Strategy Expectancy Score (Section 2 & 9)
-            strat_name = sig.get("strategy", "Trend Following")
-            sig["expectancy_score"] = compute_expectancy_score(
-                strat_name,
-                adjusted_expectancy_pct=hardened["shrunk_expectancy"] if hardened["completed_trades"] > 0 else None,
-            )
-
-
-            # 4. Continuous Regime Score
-            sig["regime_score"] = compute_regime_alignment(strat_name, regime_str)
+            prepare_candidate_scores(sig, regime_str)
 
         # Context Scoring with breakdown (P0-2)
         if not skip_nlp and candidates:
@@ -1044,10 +1066,11 @@ def run_scan(
                         earn_surp = None  # Decoupled: earnings surprise not part of initial score
                         finbert = ctx.news.headline_sentiment if ctx.news else None
                         target_c = ctx.analyst.target_mean_price if ctx.analyst else None
-                        return (t, c_score, c_analyst, 0.0, c_fundamental, c_news, de_val, cr_val, None, finbert, target_c)
+                        pe_val = ctx.fundamental.trailing_pe if ctx.fundamental else None
+                        return (t, c_score, c_analyst, 0.0, c_fundamental, c_news, de_val, cr_val, None, finbert, target_c, pe_val)
                 except Exception as ctx_err:
                     logger.warning(f"Context scoring failed for {t}: {ctx_err}")
-                return (t, 0.0, 0.0, 0.0, 0.0, 0.0, None, None, None, None, None)
+                return (t, None)  # Context unavailable (not a genuine zero score)
 
             from concurrent.futures import ThreadPoolExecutor, as_completed
             # Deduplicate by ticker for parallel context fetching
@@ -1064,7 +1087,8 @@ def run_scan(
                 for future in as_completed(futures, timeout=60.0):
                     try:
                         res_data = future.result(timeout=10.0)
-                        ctx_map[res_data[0]] = res_data[1:]
+                        if len(res_data) > 2:
+                            ctx_map[res_data[0]] = res_data[1:]
                     except Exception as res_err:
                         logger.warning(f"Error reading context result: {res_err}")
             except Exception as batch_err:
@@ -1078,64 +1102,31 @@ def run_scan(
             for c in candidates:
                 t = c["ticker"]
                 if t in ctx_map:
-                    c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"], c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"] = ctx_map[t]
+                    c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"], c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"], c["pe_ratio"] = ctx_map[t]
+                    c["context_available"] = True
                 else:
-                    c["context_score"] = 0.0
-                    c["context_analyst"] = 0.0
-                    c["context_earnings"] = 0.0
-                    c["context_fundamental"] = 0.0
-                    c["context_news"] = 0.0
-                    c["de_ratio"] = None
-                    c["current_ratio"] = None
-                    c["earnings_surprise_pct"] = None
-                    c["finbert_sentiment"] = None
-                    c["target_consensus"] = None
+                    _mark_context_unavailable(c)
         else:
             for c in candidates:
-                c["context_score"] = 0.0
-                c["context_analyst"] = 0.0
-                c["context_earnings"] = 0.0
-                c["context_fundamental"] = 0.0
-                c["context_news"] = 0.0
-                c["de_ratio"] = None
-                c["current_ratio"] = None
-                c["earnings_surprise_pct"] = None
-                c["finbert_sentiment"] = None
-                c["target_consensus"] = None
+                _mark_context_unavailable(c)
 
         # P0-2: Central Composite Scoring with strict validation
         scored_candidates = []
         for sig in candidates:
-            is_valid_feat, feat_msg = validate_candidate_features(sig)
-            if not is_valid_feat:
-                logger.warning(f"[FEATURE VALIDATION FAIL] Dropping {sig.get('ticker')}: {feat_msg}")
+            score_err = composite_score(sig, regime_str, ranker)
+            if score_err:
+                logger.warning(f"[SCORING] Dropping {sig.get('ticker')}: {score_err}")
                 sig["status"] = "rejected"
-                sig["rejection_reason"] = f"Validation failed: {feat_msg}"
+                sig["rejection_reason"] = score_err
                 rejected_signals_to_insert.append(sig)
                 continue
-
-            try:
-                res = ranker.compute_composite_score(sig, regime_str)
-                sig["composite_score"] = round(res["total"], 4)
-                sig["quality_score"] = round(res["total"], 4)
-                sig["score_breakdown"] = res["breakdown"]
-                scored_candidates.append(sig)
-            except Exception as score_err:
-                logger.warning(f"Scoring error for {sig.get('ticker')}: {score_err}")
-                sig["status"] = "rejected"
-                sig["rejection_reason"] = f"Scoring error: {score_err}"
-                rejected_signals_to_insert.append(sig)
+            scored_candidates.append(sig)
 
         # Sort ALL valid candidates by composite score DESC
         # P0-3: DO NOT TRUNCATE TO TOP_N HERE!
         scored_candidates.sort(key=lambda x: float(x.get('composite_score', 0.0)), reverse=True)
         final_signals = scored_candidates
         logger.info(f"Central ranking complete: {len(final_signals)} candidates scored.")
-
-        # ponytail: Hybrid exit architecture — short-term keeps ATR-scaled T1/T2/T3,
-        # trend/momentum strategies get None targets + trailing stop
-        SHORT_TERM_STRATEGIES = {'Pullback Recovery', 'Mean Reversion', 'Post-Earnings Drift'}
-        TREND_STRATEGIES = {'Trend Following', 'Sector Rotation', '52-Week High', '52-Week High Breakout', 'Cross-Sectional Momentum'}
 
         # Fetch active open recommendations from Supabase to prevent duplicate active recommendations
         open_positions = []
@@ -1160,15 +1151,13 @@ def run_scan(
         for sig in final_signals:
             ticker = sig["ticker"]
 
-            entry_price = float(sig["entry_price"])
-            stop_loss = float(sig["stop_loss"])
             strategy_name = sig["strategy"]
 
             score = float(sig.get("composite_score", sig.get("score", 0.0)))
 
             # 1. Quantitative Score Threshold Gate (Canonical Buy Threshold >= 65.0)
             # Candidates scoring < 65.0 do NOT qualify and NEVER trigger detailed earnings resolution.
-            if score < 65.0:
+            if score < BUY_THRESHOLD:
                 sig["tier_label"] = "Rejected"
                 sig["status"] = "rejected"
                 sig["rejection_reason"] = f"Composite score {score:.1f} below Buy threshold (65.0)"
@@ -1210,27 +1199,8 @@ def run_scan(
             else:
                 sig["earnings_rejected"] = False
 
-            atr = float(sig.get("atr_14", 0.0))
-
-            # 1. Enforce Hard Stop-Loss Risk Ceiling (Max 7.0% Max Loss)
-            min_stop = round(entry_price * 0.93, 2)
-            if stop_loss < min_stop:
-                stop_loss = min_stop
-                sig["stop_loss"] = stop_loss
-
-            # Minimum stop distance floor: ensure at least strategy-specific canonical buffer
-            strat_key = normalize_strategy_key(strategy_name)
-            stop_cfg = STRATEGY_STOP_CONFIG.get(strat_key, {})
-            stop_floor_pct = float(stop_cfg.get("stop_floor", 0.04))
-            max_tight_stop = round(entry_price * (1.0 - stop_floor_pct), 2)
-            if stop_loss > max_tight_stop:
-                logger.info(
-                    f"[STOP FLOOR] {sig['ticker']} ({strategy_name}): widening tight stop from ${stop_loss} to ${max_tight_stop} ({stop_floor_pct*100:.1f}% minimum)"
-                )
-                stop_loss = max_tight_stop
-                sig['stop_loss'] = stop_loss
-
-            # 2. Strategy-Specific ATR Targets with Survivorship Bias Mitigation
+            # 2. Trade plan from the strategy's own stop (used as issued: no floor, no cap),
+            #    canonical targets, setup-conditional reach probabilities and scale-out plan.
             ticker_df = None
             if cache_manager:
                 try:
@@ -1238,15 +1208,7 @@ def run_scan(
                 except Exception as e:
                     logger.debug("Could not fetch ticker history for %s: %s", ticker, e)
 
-            calc_res = calculate_targets(
-                ticker=ticker,
-                entry_price=entry_price,
-                atr_14=atr,
-                stop_loss=stop_loss,
-                strategy_name=strategy_name,
-                price_df=ticker_df,
-                sector=sig.get("sector") or sig.get("industry"),
-            )
+            calc_res = build_trade_plan(sig, ticker_df)
 
             # If target calculation is invalid (e.g. invalid setup or mathematical impossibility), reject setup safely
             if not calc_res.is_valid:
@@ -1255,25 +1217,6 @@ def run_scan(
                 sig["rejection_reason"] = f"Target calculation invalid: {calc_res.rejection_reason}"
                 rejected_signals_to_insert.append(sig)
                 continue
-
-            sig["target_1"] = calc_res.target_1
-            sig["target_2"] = calc_res.target_2
-            sig["target_3"] = calc_res.target_3
-            sig["target_1_atr"] = calc_res.target_1_atr
-            sig["target_2_atr"] = calc_res.target_2_atr
-            sig["target_3_atr"] = calc_res.target_3_atr
-            sig["target_1_pct"] = calc_res.target_1_pct
-            sig["target_2_pct"] = calc_res.target_2_pct
-            sig["target_3_pct"] = calc_res.target_3_pct
-            sig["reach_prob_t1"] = calc_res.reach_prob_t1
-            sig["reach_prob_t2"] = calc_res.reach_prob_t2
-            sig["reach_prob_t3"] = calc_res.reach_prob_t3
-            sig["reach_prob_raw"] = calc_res.reach_prob_raw
-            sig["reach_prob_adjusted"] = calc_res.reach_prob_adjusted
-            sig["scale_out_weights"] = calc_res.scale_out_weights
-            sig["weighted_scaleout_rr"] = calc_res.weighted_scaleout_rr
-            sig["weighted_rr"] = calc_res.weighted_scaleout_rr
-            sig["weighted_rr_honest"] = calc_res.weighted_scaleout_rr
 
             # Assign tier based on composite score & honest scale-out R:R
             from src.ranker import assign_tier
@@ -1349,6 +1292,28 @@ def run_scan(
             f"{reach_rejected_count} reach-prob-rejected | "
             f"{len(rejected_signals_to_insert)} total rejected/audit logged"
         )
+
+        # Informational P/E ratio for the ideas shown to the user (never used in scoring).
+        # Context scoring already captured it when it ran; fetch the rest directly.
+        if not dry_run:
+            pe_targets = [
+                s for s in list(qualified_recommendations) + list(active_qualified_recommendations.values())
+                if s.get("pe_ratio") is None
+            ]
+            if pe_targets:
+                from src.providers.context.metadata_provider import MetadataProvider
+                metadata_provider = MetadataProvider()
+                for s in pe_targets:
+                    try:
+                        s["pe_ratio"] = metadata_provider.get_fundamentals(s["ticker"]).trailing_pe
+                    except Exception as pe_err:
+                        logger.debug("Could not fetch P/E for %s: %s", s.get("ticker"), pe_err)
+        for s in list(qualified_recommendations) + list(active_qualified_recommendations.values()):
+            pe = s.get("pe_ratio")
+            try:
+                s["pe_ratio"] = round(float(pe), 2) if pe is not None and np.isfinite(float(pe)) else None
+            except (TypeError, ValueError):
+                s["pe_ratio"] = None
 
         # Phase 3: Construct final ranked signals list for database insertion
         all_signals_to_save = qualified_recommendations + rejected_signals_to_insert
@@ -1433,6 +1398,14 @@ def run_scan(
                     "earnings_rejected": bool(sig.get("earnings_rejected", False)),
                     "reach_prob_raw": sig.get("reach_prob_raw"),
                     "reach_prob_adjusted": sig.get("reach_prob_adjusted"),
+                    "reach_prob_t1_ci_low": sig.get("reach_prob_t1_ci_low"),
+                    "reach_prob_t1_ci_high": sig.get("reach_prob_t1_ci_high"),
+                    "reach_prob_effective_samples": sig.get("reach_prob_effective_samples"),
+                    "reach_prob_source": sig.get("reach_prob_source"),
+                    "strategy_win_rate": sig.get("strategy_win_rate"),
+                    "strategy_expectancy_pct": sig.get("strategy_expectancy_pct"),
+                    "strategy_trades": sig.get("strategy_trades"),
+                    "pe_ratio": sig.get("pe_ratio"),
                 }
             )
     else:
@@ -1529,7 +1502,6 @@ def run_scan(
                 history_rows = []
                 for sig in ranked_signals:
                     ticker = sig.get("ticker", "")
-                    m = metrics_map.get(ticker.upper(), {})
                     history_rows.append({
                         "signal_id": sig.get("id"),
                         "scan_date": sig.get("scan_date"),
@@ -1554,9 +1526,10 @@ def run_scan(
                         "quality_score": sig.get("quality_score", sig.get("composite_score", 0.0)),
                         "tier_label": sig.get("tier_label", "Rejected"),
                         "strategy": sig.get("strategy"),
-                        "past_win_rate": m.get("win_rate") if (m.get("wins") is not None and m.get("losses") is not None and (m["wins"] + m["losses"]) > 0) else None,
-                        "expectancy_pct": m.get("expectancy_pct") if (m.get("wins") is not None and m.get("losses") is not None and (m["wins"] + m["losses"]) > 0) else None,
-                        "total_trades": (m["wins"] + m["losses"]) if (m.get("wins") is not None and m.get("losses") is not None and (m["wins"] + m["losses"]) > 0) else None,
+                        # Strategy-level backtest evidence the score used (not legacy per-ticker metrics)
+                        "past_win_rate": sig.get("strategy_win_rate"),
+                        "expectancy_pct": sig.get("strategy_expectancy_pct"),
+                        "total_trades": sig.get("strategy_trades") or None,
                         "regime": regime_str,
                         "earnings_date": sig.get("earnings_date"),
                         "is_momentum_exception": sig.get("is_momentum_exception", False),
@@ -1601,6 +1574,14 @@ def run_scan(
                         "earnings_rejected": bool(sig.get("earnings_rejected", False)),
                         "reach_prob_raw": sig.get("reach_prob_raw"),
                         "reach_prob_adjusted": sig.get("reach_prob_adjusted"),
+                        "reach_prob_t1_ci_low": sig.get("reach_prob_t1_ci_low"),
+                        "reach_prob_t1_ci_high": sig.get("reach_prob_t1_ci_high"),
+                        "reach_prob_effective_samples": sig.get("reach_prob_effective_samples"),
+                        "reach_prob_source": sig.get("reach_prob_source"),
+                        "strategy_win_rate": sig.get("strategy_win_rate"),
+                        "strategy_expectancy_pct": sig.get("strategy_expectancy_pct"),
+                        "strategy_trades": sig.get("strategy_trades"),
+                        "pe_ratio": sig.get("pe_ratio"),
                     })
                 
                 # Direct persistence with full schema parity and exact instance identity
@@ -1608,12 +1589,11 @@ def run_scan(
                     supabase.table("signals").insert(ranked_signals).execute()
                 except Exception as sig_err:
                     err_str = str(sig_err)
-                    if any(c in err_str for c in ["reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "42703"]):
+                    if "42703" in err_str or any(c in err_str for c in OPTIONAL_INSERT_COLUMNS):
                         logger.warning("Unmigrated column in signals table (42703). Retrying insert without new optional columns.")
                         for s in ranked_signals:
-                            s.pop("reference_entry_price", None)
-                            s.pop("weighted_scaleout_rr", None)
-                            s.pop("entry_location_zone", None)
+                            for col in OPTIONAL_INSERT_COLUMNS:
+                                s.pop(col, None)
                         supabase.table("signals").insert(ranked_signals).execute()
                     else:
                         raise sig_err
@@ -1622,12 +1602,11 @@ def run_scan(
                     supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
                 except Exception as hist_err:
                     hist_err_str = str(hist_err)
-                    if any(c in hist_err_str for c in ["reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "42703"]):
+                    if "42703" in hist_err_str or any(c in hist_err_str for c in OPTIONAL_INSERT_COLUMNS):
                         logger.warning("Unmigrated column in signals_history table (42703). Retrying history upsert without new optional columns.")
                         for h in history_rows:
-                            h.pop("reference_entry_price", None)
-                            h.pop("weighted_scaleout_rr", None)
-                            h.pop("entry_location_zone", None)
+                            for col in OPTIONAL_INSERT_COLUMNS:
+                                h.pop(col, None)
                         try:
                             supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
                         except Exception as h_retry_err:

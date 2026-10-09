@@ -35,6 +35,19 @@ from indicators import calculate_indicators
 logger = logging.getLogger(__name__)
 
 
+REGIME_BAND_PCT = 2.0  # SPY within +/-2% of its 200 DMA is "sideways"
+
+
+def classify_regime(spy_price: float, spy_200dma: float) -> str:
+    """Canonical regime rule shared by the nightly scan and the backtest."""
+    pct_above_200dma = (spy_price / spy_200dma - 1) * 100
+    if pct_above_200dma > REGIME_BAND_PCT:
+        return "bull"
+    if pct_above_200dma < -REGIME_BAND_PCT:
+        return "bear"
+    return "sideways"
+
+
 def get_regime() -> dict:
     """
     Detect the current market regime by comparing SPY price to its 200-day SMA.
@@ -99,13 +112,7 @@ def get_regime() -> dict:
                 "date": date_str,
             }
 
-        pct_above_200dma = (spy_price / spy_200dma - 1) * 100
-        if pct_above_200dma > 2.0:
-            regime = "bull"
-        elif pct_above_200dma < -2.0:
-            regime = "bear"
-        else:
-            regime = "sideways"
+        regime = classify_regime(spy_price, spy_200dma)
 
         logger.info(
             "Regime detected: %s | SPY: $%.2f | 200 DMA: $%.2f | Date: %s",

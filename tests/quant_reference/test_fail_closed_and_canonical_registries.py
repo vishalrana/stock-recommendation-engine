@@ -497,13 +497,16 @@ class TestFailClosedAndCanonicalRegistries(unittest.TestCase):
         self.assertTrue(is_valid, f"CRL candidate validation failed: {msg}")
 
         # 2. Composite score calculation
+        # Baseline updated 2026-10-09: Cross-Sectional Momentum uses the strength-seeking momentum score
+        # (RSI peak 65 -> 74.0; 5.86% above 50 DMA -> 95.70; volume 62.5; MACD 62.07; raw 73.57;
+        # sigmoid-weighted 72.6903). Total = .4*72.6903 + .2*60.6 + .2*50 + .1*85 + .1*50 = 64.6961.
         scored = ranker.compute_composite_score(crl_candidate, regime="bull")
-        self.assertEqual(scored["total"], 60.2741)
-        self.assertEqual(scored["composite_score"], 60.2741)
+        self.assertEqual(scored["total"], 64.6961)
+        self.assertEqual(scored["composite_score"], 64.6961)
         self.assertEqual(scored["tier_label"], "Rejected")
         self.assertEqual(scored["strategy"], "cross_sectional_momentum")
         self.assertEqual(scored["weights"], {"mom": 0.4, "exp": 0.2, "wr": 0.2, "reg": 0.1, "ctx": 0.1})
-        self.assertEqual(scored["breakdown"]["momentum"], 61.6352)
+        self.assertEqual(scored["breakdown"]["momentum"], 72.6903)
         self.assertEqual(scored["breakdown"]["expectancy"], 60.6)
         self.assertEqual(scored["breakdown"]["winrate"], 50.0)
         self.assertEqual(scored["breakdown"]["regime"], 85.0)  # Discrete matrix for cross_sectional in bull

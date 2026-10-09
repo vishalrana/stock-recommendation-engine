@@ -73,8 +73,10 @@ class TestValidatorSerialization(unittest.TestCase):
     @patch('jobs.validate_ranking.yf.download')
     def test_hit_t2_outcome_serialization(self, mock_download):
         """Test hit_t2 outcome serialization."""
+        # Low stays above breakeven (100) after T1 but reaches the T1-ratcheted stop (110)
+        # after T2 on the same bar -> remainder exits at T1 under STOP_FIRST.
         mock_download.return_value = self._create_mock_df([
-            {'High': 122.0, 'Low': 98.0, 'Close': 118.0}
+            {'High': 122.0, 'Low': 105.0, 'Close': 118.0}
         ])
         res = vr.evaluate_signal(self.sample_row)
         self.assertIsNotNone(res)
@@ -88,8 +90,9 @@ class TestValidatorSerialization(unittest.TestCase):
     @patch('jobs.validate_ranking.yf.download')
     def test_hit_t3_outcome_serialization(self, mock_download):
         """Test hit_t3 outcome serialization."""
+        # Low stays above every ratcheted stop, so T1 -> T2 -> T3 all fill on the same bar.
         mock_download.return_value = self._create_mock_df([
-            {'High': 135.0, 'Low': 98.0, 'Close': 132.0}
+            {'High': 135.0, 'Low': 111.0, 'Close': 132.0}
         ])
         res = vr.evaluate_signal(self.sample_row)
         self.assertIsNotNone(res)

@@ -25,12 +25,12 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         from src.quant_config import normalize_regime_key
         regime_key = normalize_regime_key(regime)
 
-        if len(df) < 63:  # 3 months
+        if len(df) < 64:  # 3 months (63 trading-day intervals)
             return None
 
         # Normalized to uppercase columns for consistency
         price = df['CLOSE'].iloc[-1]
-        price_63d = df['CLOSE'].iloc[-63]
+        price_63d = df['CLOSE'].iloc[-64]
         returns_3m = (price / price_63d - 1) * 100 if price_63d > 0 else 0
 
         sma50 = df['CLOSE'].rolling(50).mean().iloc[-1]
@@ -156,27 +156,9 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         elif composite_score >= 35: tier_label = 'Watch'
         else: tier_label = 'Speculative'
 
-        # Guardrails
-        MIN_WIN_RATE = 50.0
-        MIN_EXPECTANCY = 1.0
-        MIN_SAMPLE = 5
-
+        # Qualification is decided centrally by the composite score; no per-strategy blocking.
         is_blocked = False
         blocked_reason = None
-
-        if past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Win rate {past_win_rate:.1f}% below {MIN_WIN_RATE}%'
-        if expectancy_pct < MIN_EXPECTANCY:
-            is_blocked = True
-            blocked_reason = f'Expectancy {expectancy_pct:.2f}% below {MIN_EXPECTANCY}%'
-        if 0 < total_trades < MIN_SAMPLE and past_win_rate < MIN_WIN_RATE:
-            is_blocked = True
-            blocked_reason = f'Sample size {total_trades} below {MIN_SAMPLE} trades'
-
-
-        if is_blocked:
-            tier_label = 'Blocked'
 
         # Get latest scan date from DataFrame index
         latest_date = df.index[-1]

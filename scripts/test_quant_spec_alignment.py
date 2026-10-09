@@ -31,7 +31,6 @@ sys.path.insert(0, PROJECT_ROOT)
 from src.quant_config import (
     STRATEGY_WEIGHT_VECTORS,
     REGIME_SCORE_MATRIX,
-    STRATEGY_HISTORICAL_EXPECTANCY,
     EXPECTANCY_BASE,
     EXPECTANCY_SLOPE,
     CONTEXT_VETO_THRESHOLDS,
@@ -41,7 +40,6 @@ from src.quant_config import (
     T3_REACH_PROB_SURVIVAL_THRESHOLD,
     SCALE_OUT_WEIGHTS,
     MIN_REACH_PROB_WINDOWS,
-    SURVIVORSHIP_BIAS_HAIRCUT,
 )
 from src.ranker import (
     SignalRanker,
@@ -114,13 +112,13 @@ def test_3_expectancy_score_formula():
     assert EXPECTANCY_BASE == 30.0
     assert EXPECTANCY_SLOPE == 20.0
 
-    # Test Trend Following: raw 1.69% * 0.85 = +1.4365% -> 1.44 -> 30 + 20 * 1.44 = 58.8
-    s_trend = compute_expectancy_score("trend_following")
-    assert round(s_trend, 1) == 58.8, f"Trend Following S_exp expected 58.8, got {s_trend}"
-
-    # Test 52W Breakout: raw 2.10% * 0.85 = +1.7850% -> 1.79 -> 30 + 20 * 1.79 = 65.8
-    s_52w = compute_expectancy_score("52w_high_breakout")
-    assert round(s_52w, 1) == 65.8, f"52W Breakout S_exp expected 65.8, got {s_52w}"
+    # No explicit value: falls back to the strategy's shrunk backtest evidence (neutral 0% without it)
+    from src.strategy_evidence import get_strategy_evidence
+    for strat in ("trend_following", "52w_high_breakout"):
+        ev_exp = get_strategy_evidence(strat).shrunk_expectancy
+        expected = max(0.0, min(100.0, 30.0 + 20.0 * ev_exp))
+        s_fallback = compute_expectancy_score(strat)
+        assert abs(s_fallback - expected) < 1e-6, f"{strat} S_exp expected {expected}, got {s_fallback}"
 
     # Test direct expectancy input: 0.0 percentage points -> 30.0
     s_zero = compute_expectancy_score("trend_following", adjusted_expectancy_pct=0.0)

@@ -85,6 +85,17 @@ CREATE TABLE IF NOT EXISTS signals (
     allocated_dollars       NUMERIC(10,2) DEFAULT NULL,
     exact_shares            NUMERIC(10,4) DEFAULT NULL,
     max_shares              INTEGER DEFAULT NULL,
+    entry_fill_price        NUMERIC,
+    position_state          TEXT,
+    current_stop            NUMERIC,
+    pe_ratio                NUMERIC,
+    reach_prob_t1_ci_low    NUMERIC,
+    reach_prob_t1_ci_high   NUMERIC,
+    reach_prob_effective_samples NUMERIC,
+    reach_prob_source       TEXT,
+    strategy_win_rate       NUMERIC,
+    strategy_expectancy_pct NUMERIC,
+    strategy_trades         INTEGER,
     created_at              TIMESTAMPTZ DEFAULT now()
 );
 
@@ -181,6 +192,15 @@ CREATE TABLE IF NOT EXISTS signals_history (
     allocated_dollars       NUMERIC(10,2) DEFAULT NULL,
     exact_shares            NUMERIC(10,4) DEFAULT NULL,
     max_shares              INTEGER DEFAULT NULL,
+    entry_fill_price        NUMERIC,
+    pe_ratio                NUMERIC,
+    reach_prob_t1_ci_low    NUMERIC,
+    reach_prob_t1_ci_high   NUMERIC,
+    reach_prob_effective_samples NUMERIC,
+    reach_prob_source       TEXT,
+    strategy_win_rate       NUMERIC,
+    strategy_expectancy_pct NUMERIC,
+    strategy_trades         INTEGER,
     created_at              TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT signals_history_signal_id_key UNIQUE (signal_id)
 );

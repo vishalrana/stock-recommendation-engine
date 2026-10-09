@@ -66,7 +66,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
   const { data: scanLogSignals, error: scanError } = await supabase
     .from('signals')
     .select('*')
-    .in('status', ['rejected', 'cancelled_gap_up', 'stopped', 'invalidated', 'manually_removed'])
+    .in('status', ['rejected', 'cancelled_gap_up', 'stopped', 'expired', 'invalidated', 'manually_removed'])
     .gte('scan_date', cutoffDateStr)
     .order('scan_date', { ascending: false })
     .order('composite_score', { ascending: false });
@@ -105,6 +105,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
     else if (outcome === 'hit_t3') reason = 'Target 3 hit';
     else if (outcome === 'hit_t2') reason = 'Target 2 hit';
     else if (outcome === 'hit_t1') reason = 'Target 1 hit';
+    else if (outcome === 'expired') reason = h.sell_signal_reason || 'Holding period ended';
     else if (outcome === 'rejected') reason = h.sell_signal_reason || 'Filter rejected';
 
     combined.push({
@@ -186,7 +187,7 @@ export async function fetchClosedSignals(): Promise<Recommendation[]> {
   const { data: closedHistory, error: historyError } = await supabase
     .from('signals_history')
     .select('*')
-    .in('outcome', ['stopped', 'hit_t1', 'hit_t2', 'hit_t3', 'invalidated', 'manually_removed'])
+    .in('outcome', ['stopped', 'hit_t1', 'hit_t2', 'hit_t3', 'expired', 'invalidated', 'manually_removed'])
     .order('outcome_date', { ascending: false })
     .order('scan_date', { ascending: false });
 
@@ -209,6 +210,7 @@ export async function fetchClosedSignals(): Promise<Recommendation[]> {
     else if (outcome === 'hit_t1') reason = 'Target 1 reached';
     else if (outcome === 'hit_t2') reason = 'Target 2 reached';
     else if (outcome === 'hit_t3') reason = 'Target 3 reached';
+    else if (outcome === 'expired') reason = h.sell_signal_reason || 'Holding period ended';
     else if (outcome === 'invalidated') reason = h.sell_signal_reason || 'Idea invalidated';
     else if (outcome === 'manually_removed') {
       const parts = [h.removal_reason || 'Manually removed'];
@@ -351,6 +353,9 @@ export function getRejectionReason(sig: Recommendation): string {
   }
   if (sig.status === 'stopped' || sig.outcome === 'stopped') {
     return 'Stop loss hit';
+  }
+  if (sig.status === 'expired' || sig.outcome === 'expired') {
+    return sig.sell_signal_reason || 'Holding period ended';
   }
   if (sig.status === 'hit_t3' || sig.outcome === 'hit_t3') {
     return 'Target 3 hit';

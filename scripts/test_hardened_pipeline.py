@@ -89,7 +89,8 @@ class TestHardenedPipeline(unittest.TestCase):
         self.assertEqual(m["win_rate_provenance"], "unavailable")
         self.assertEqual(m["metric_confidence"], "prior")
         self.assertEqual(m["completed_trades"], 0)
-        self.assertGreater(m["shrunk_expectancy"], 0.0)
+        # No assumed edge: missing evidence means the neutral 0% expectancy prior
+        self.assertEqual(m["shrunk_expectancy"], 0.0)
 
     # 3. Small-sample vs large-sample behavior
     def test_03_sample_size_scaling(self):

@@ -49,6 +49,13 @@ function getOutcomeBadge(outcome?: string | null, reason?: string | null) {
       icon: AlertOctagon,
     };
   }
+  if (o === 'expired') {
+    return {
+      label: 'Holding Period Ended',
+      color: 'bg-slate-800 text-slate-300 border-slate-700',
+      icon: Clock,
+    };
+  }
   if (o === 'manually_removed') {
     return {
       label: reason || 'Manually Removed',
@@ -98,7 +105,8 @@ export default function ClosedIdeasView({ closedIdeas }: ClosedIdeasViewProps) {
         {closedIdeas.map((rec, index) => {
           const ticker = rec.ticker?.toUpperCase() || 'UNKNOWN';
           const company = rec.company_name || '';
-          const entryPriceVal = rec.reference_entry_price ?? rec.entry_price;
+          // Returns are measured from the actual D+1 fill when it was recorded
+          const entryPriceVal = rec.entry_fill_price ?? rec.reference_entry_price ?? rec.entry_price;
           const entryPrice = (entryPriceVal !== undefined && entryPriceVal !== null && !isNaN(Number(entryPriceVal)))
             ? Number(entryPriceVal).toFixed(2)
             : '—';

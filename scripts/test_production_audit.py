@@ -32,6 +32,12 @@ from src.strategies.target_calculator import calculate_targets, TargetCalculatio
 from jobs.generate_signals import reconcile_recommendation_lifecycle
 
 
+def _bars_after(start_date, *rows) -> pd.DataFrame:
+    """Daily OHLC bars after the signal date, as returned by get_bars_after(). Rows: (open, high, low, close)."""
+    idx = pd.bdate_range(start=start_date, periods=len(rows))
+    return pd.DataFrame([{"OPEN": o, "HIGH": h, "LOW": l, "CLOSE": c} for (o, h, l, c) in rows], index=idx)
+
+
 def generate_deterministic_ohlcv(bars=100, trend='up', last_price=100.0) -> pd.DataFrame:
     """Generate deterministic OHLCV bars with proper indicator columns."""
     dates = pd.date_range(end=datetime.now(), periods=bars, freq='B')
@@ -102,7 +108,8 @@ class ProductionAuditTestSuite(unittest.TestCase):
     # 2. TARGETED ACTIVE-TICKER REFRESH & ANALYTICS UPDATE (P0-1 & Amendment 4)
     # -------------------------------------------------------------------------
     def test_active_ticker_still_qualifies_updates_analytics(self):
-        """Active ticker that continues to qualify must receive refreshed price and analytical fields."""
+        """Active ticker that continues to qualify must receive refreshed price and analytical fields,
+        while its issued trade parameters (stop, targets, strategy) stay frozen."""
         import uuid
         test_uuid = str(uuid.uuid4())
         mock_supabase = MagicMock()
@@ -162,7 +169,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
             }
         }
         
-        with patch("jobs.supabase_client.get_latest_bar", return_value={"close": 185.50, "low": 183.0, "high": 186.0}), \
+        with patch("jobs.supabase_client.get_bars_after", return_value=_bars_after("2026-09-02", (181.0, 186.0, 183.0, 185.50))), \
              patch("jobs.supabase_client.update_signals_price") as mock_price_update:
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,
@@ -183,14 +190,18 @@ class ProductionAuditTestSuite(unittest.TestCase):
         
         # Check that updated analytics fields were passed in the update payload
         last_update_payload = update_calls[-1][0][0]
-        self.assertEqual(last_update_payload["price"], 185.50)
         self.assertEqual(last_update_payload["composite_score"], 82.5)
         self.assertEqual(last_update_payload["tier_label"], "Strong Buy")
-        self.assertEqual(last_update_payload["stop_loss"], 174.0)
-        self.assertEqual(last_update_payload["target_1"], 195.0)
+        self.assertEqual(last_update_payload["entry_fill_price"], 181.0)
+        self.assertEqual(last_update_payload["position_state"], "open")
+        # Issued trade parameters and strategy identity are never overwritten by a re-scan
+        for frozen in ("stop_loss", "target_1", "target_2", "target_3", "target_1_pct",
+                       "reach_prob_t1", "weighted_rr_honest", "strategy", "strategy_name"):
+            self.assertNotIn(frozen, last_update_payload)
 
     def test_active_ticker_no_longer_qualifies_invalidates(self):
-        """Active ticker that fails qualification must transition to invalidated with reason."""
+        """Active ticker that fails re-qualification is NOT closed: ideas exit only on stop,
+        final target, or the strategy holding period, so they are measured as designed."""
         mock_supabase = MagicMock()
         active_signal_row = {
             "id": "sig-uuid-456",
@@ -216,7 +227,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
         mock_table.update.return_value = mock_update
         mock_supabase.table.return_value = mock_table
         
-        with patch("jobs.supabase_client.get_latest_bar", return_value={"close": 405.0, "low": 402.0, "high": 408.0}), \
+        with patch("jobs.supabase_client.get_bars_after", return_value=_bars_after("2026-09-02", (401.0, 408.0, 402.0, 405.0))), \
              patch("jobs.supabase_client.update_signals_status") as mock_status_update, \
              patch("jobs.supabase_client.update_history_outcome") as mock_history_update:
             
@@ -231,13 +242,9 @@ class ProductionAuditTestSuite(unittest.TestCase):
                 successfully_evaluated_tickers={"MSFT"},
             )
             
-            # Verify status update to invalidated
-            mock_status_update.assert_called_once_with(
-                "MSFT", "invalidated", 405.0, True,
-                "No longer qualifies in subsequent scan: Trend broken below 50 DMA",
-                signal_id="sig-uuid-456"
-            )
-            mock_history_update.assert_called_once()
+            # No invalidation exit: status and history untouched, position stays open
+            mock_status_update.assert_not_called()
+            mock_history_update.assert_not_called()
 
     def test_incomplete_scan_safeguard_prevents_invalidation(self):
         """If an active ticker was NOT successfully evaluated (e.g. data fetch failed), do NOT invalidate."""
@@ -260,7 +267,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
         mock_table.select.return_value = mock_select
         mock_supabase.table.return_value = mock_table
         
-        with patch("jobs.supabase_client.get_latest_bar", return_value={"close": 122.0, "low": 118.0, "high": 125.0}), \
+        with patch("jobs.supabase_client.get_bars_after", return_value=_bars_after("2026-09-02", (121.0, 125.0, 118.0, 122.0))), \
              patch("jobs.supabase_client.update_signals_status") as mock_status_update:
             
             reconcile_recommendation_lifecycle(
@@ -300,7 +307,8 @@ class ProductionAuditTestSuite(unittest.TestCase):
         mock_table.select.return_value = mock_select
         mock_supabase.table.return_value = mock_table
         
-        with patch("jobs.supabase_client.get_latest_bar", return_value={"close": 230.0, "low": 228.0, "high": 245.0}), \
+        # Gap-down open at 230.0 below the 235.0 stop: exit at the open, not at the stop level.
+        with patch("jobs.supabase_client.get_bars_after", return_value=_bars_after("2026-09-02", (230.0, 245.0, 228.0, 240.0))), \
              patch("jobs.supabase_client.update_signals_status") as mock_status_update, \
              patch("jobs.supabase_client.update_history_outcome") as mock_history_update:
             
@@ -316,7 +324,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
             
             # Stop loss must take precedence!
             mock_status_update.assert_called_once_with(
-                "TSLA", "stopped", 230.0, True, "Stop loss hit", signal_id="sig-uuid-stop"
+                "TSLA", "stopped", 230.0, True, "Stop loss hit", signal_id="sig-uuid-stop", exit_date="2026-09-02"
             )
 
     def test_missing_quote_does_not_invalidate(self):
@@ -338,7 +346,7 @@ class ProductionAuditTestSuite(unittest.TestCase):
         mock_table.select.return_value = mock_select
         mock_supabase.table.return_value = mock_table
         
-        with patch("jobs.supabase_client.get_latest_bar", return_value=None), \
+        with patch("jobs.supabase_client.get_bars_after", return_value=None), \
              patch("jobs.supabase_client.update_signals_status") as mock_status_update:
             
             reconcile_recommendation_lifecycle(

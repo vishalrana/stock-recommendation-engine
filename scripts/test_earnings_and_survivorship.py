@@ -23,12 +23,11 @@ if PROJECT_ROOT not in sys.path:
 
 from src.filters.earnings_filter import earnings_risk_filter, EARNINGS_BLACKOUT_DAYS
 from src.filters.survivorship_bias import (
-    SURVIVORSHIP_BIAS_HAIRCUT,
     compute_reach_prob_with_survivorship,
-    apply_expectancy_haircut,
     load_delisted_tickers,
 )
-from src.ranker import STRATEGY_HISTORICAL_EXPECTANCY, compute_expectancy_score
+from src.ranker import compute_expectancy_score
+from src.strategy_evidence import get_strategy_evidence
 
 
 def run_tests():
@@ -95,20 +94,16 @@ def run_tests():
     print("  --> PASS Scenario C: Distant earnings passed safely.")
 
     # --------------------------------------------------------------------------
-    # Scenario D: Survivorship Bias — Expectancy Haircut
-    # Trend Following: +1.69% -> after 15% haircut: +1.44%
-    # S_exp before: 36.9, S_exp after: 34.4
+    # Scenario D: Strategy expectancy comes from backtest evidence, not a hard-coded prior.
+    # No multiplicative survivorship haircut (it would shrink a negative expectancy toward 0).
     # --------------------------------------------------------------------------
-    print("\n[Scenario D] Survivorship Bias -- Expectancy Haircut (15%)")
-    hist_raw = 0.0169  # +1.69%
-    hist_haircut = apply_expectancy_haircut(hist_raw)
-    print(f"  * Trend Following Expectancy: Raw = {hist_raw * 100:.2f}%, After 15% Haircut = {hist_haircut * 100:.2f}%")
-    assert abs(hist_haircut * 100 - 1.44) < 0.01, f"Expected 1.44%, got {hist_haircut * 100}"
-
-    s_exp_after = compute_expectancy_score('trend_following')
-    print(f"  * Sub-score S_exp: After haircut = {s_exp_after:.1f} (Formula: 30 + 20*1.44 = 58.8)")
-    assert abs(s_exp_after - 58.8) < 0.2, f"Expected S_exp = 58.8, got {s_exp_after}"
-    print("  --> PASS Scenario D: Expectancy haircut verified.")
+    print("\n[Scenario D] Strategy expectancy from backtest evidence")
+    ev = get_strategy_evidence('trend_following')
+    s_exp = compute_expectancy_score('trend_following')
+    expected = max(0.0, min(100.0, 30.0 + 20.0 * ev.shrunk_expectancy))
+    print(f"  * Trend Following evidence: {ev.trades} trades, shrunk expectancy {ev.shrunk_expectancy:.2f}% -> S_exp {s_exp:.1f}")
+    assert abs(s_exp - expected) < 1e-6, f"Expected S_exp = {expected}, got {s_exp}"
+    print("  --> PASS Scenario D: Evidence-based expectancy verified.")
 
     # --------------------------------------------------------------------------
     # Scenario E: Survivorship Bias — Reach Probability

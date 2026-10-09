@@ -57,10 +57,11 @@ class TestHistoricalMetricsProvenance(unittest.TestCase):
         self.assertEqual(m["sample_size"], 0)
 
     def test_3_generic_ticker_prior(self):
-        """Generic ticker prior is utilized when candidate does not supply priors."""
+        """Generic ticker prior (legacy record with an aggregate win rate but no win/loss
+        counts) is utilized when candidate does not supply priors."""
         m = build_hardened_metrics(
             ticker="NVDA",
-            raw_record={"win_rate": 58.0, "wins": 0, "losses": 0},
+            raw_record={"win_rate": 58.0},
             strategy_name="52w_high_breakout",
         )
         self.assertEqual(m["shrunk_win_rate"], 58.0)
@@ -83,16 +84,29 @@ class TestHistoricalMetricsProvenance(unittest.TestCase):
         self.assertEqual(m["sample_size"], 0)
 
     def test_5_legitimate_zero_prior_preserved(self):
-        """A legitimate 0.0% win rate prior must be preserved as 0.0% and NOT inflated to 50%."""
+        """A legitimate legacy 0.0% win rate prior must be preserved as 0.0% and NOT inflated to 50%."""
         m = build_hardened_metrics(
             ticker="DOG_STOCK",
-            raw_record={"win_rate": 0.0, "wins": 0, "losses": 0},
+            raw_record={"win_rate": 0.0},
             strategy_name="mean_reversion",
         )
         self.assertEqual(m["shrunk_win_rate"], 0.0)
         self.assertEqual(m["prior"], 0.0)
         self.assertEqual(m["provenance"], "generic_ticker_prior")
         self.assertEqual(m["metric_source"], "ticker_metrics")
+
+    def test_5b_zero_trade_placeholder_is_not_a_zero_win_rate(self):
+        """Seeded rows with zero completed trades store win_rate=0.0 as a placeholder.
+        That is missing evidence, not an observed 0% win rate: the neutral prior applies."""
+        m = build_hardened_metrics(
+            ticker="NO_TRADES",
+            raw_record={"win_rate": 0.0, "wins": 0, "losses": 0, "total_signals": 3},
+            strategy_name="mean_reversion",
+        )
+        self.assertEqual(m["shrunk_win_rate"], 50.0)
+        self.assertEqual(m["prior"], 50.0)
+        self.assertEqual(m["provenance"], "unavailable")
+        self.assertEqual(m["sample_size"], 0)
 
     def test_6_non_finite_values_handled_fail_closed(self):
         """NaN and infinite priors must be caught safely and fallback to unavailable without crash or NaN propagation."""

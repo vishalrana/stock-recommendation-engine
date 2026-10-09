@@ -11,44 +11,17 @@ from src.utils.candidate_builder import build_candidate_from_row
 
 logger = logging.getLogger(__name__)
 
-RSI_PULLBACK_THRESHOLD = 55.0  # Relaxed from 50
-RSI_RECOVERY_MIN = 35.0        # Relaxed from 45
-RSI_RECOVERY_MAX = 70.0        # Relaxed from 67
+# Pullback-and-recover RSI pattern: RSI dipped below the pullback threshold within the
+# lookback window, is now back inside the recovery band, AND has risen a minimum number of
+# points off that low (so a stock still sitting at its RSI low does not count as recovered).
+RSI_PULLBACK_THRESHOLD = 50.0
+RSI_RECOVERY_MIN = 45.0
+RSI_RECOVERY_MAX = 67.0
+MIN_RSI_RECOVERY_POINTS = 5.0
 ADX_MIN = 12.0                 # Relaxed from 18
 VOLUME_MULTIPLIER = 0.8        # Relaxed from 1.0
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
-
-MIN_WIN_RATE = 35.0            # Relaxed from 50.0
-MIN_EXPECTANCY = 0.0           # Relaxed from 1.0
-MIN_SAMPLE_SIZE = 5            # Relaxed from 10
-
-
-def apply_guardrails(signal: dict) -> dict:
-    """Override tier label if historical performance is below minimums (consumes shrunk metrics)."""
-    win_rate = signal.get("shrunk_win_rate", signal.get("past_win_rate", 50.0))
-    expectancy = signal.get("shrunk_expectancy", signal.get("expectancy_pct", 1.44))
-    sample = signal.get("completed_trades", signal.get("total_trades", 0))
-
-    reasons = []
-
-    if win_rate < MIN_WIN_RATE:
-        reasons.append(f"Win rate {win_rate:.1f}% below {MIN_WIN_RATE}%")
-    if expectancy < MIN_EXPECTANCY:
-        reasons.append(f"Expectancy {expectancy:.2f}% below {MIN_EXPECTANCY}%")
-    if 0 < sample < MIN_SAMPLE_SIZE and win_rate < MIN_WIN_RATE:
-        reasons.append(f"Sample size {sample} below {MIN_SAMPLE_SIZE} trades")
-
-    if reasons:
-        signal["tier_label"] = "Blocked"
-        signal["blocked_reason"] = "; ".join(reasons)
-        signal["is_blocked"] = True
-        signal["quality_score"] = signal.get("composite_score", 0) * 0.3
-    else:
-        signal["is_blocked"] = False
-        signal["blocked_reason"] = None
-
-    return signal
 
 
 def find_swing_low(df_slice: pd.DataFrame) -> float:
@@ -371,6 +344,8 @@ class PullbackRecoveryStrategy(StrategyInterface):
         if not is_momentum_exception:
             if not rsi_res.get("passed"):
                 return None, "failed_rsi_gate"
+            if rsi_now < rsi_min_10d + MIN_RSI_RECOVERY_POINTS:
+                return None, "failed_rsi_gate"
         else:
             if rsi_now > 75:
                 return None, "failed_rsi_gate"
@@ -415,9 +390,6 @@ class PullbackRecoveryStrategy(StrategyInterface):
         upside_pct = targets["target_3_pct"]
         risk_reward = weighted_rr
 
-        if total_trades < 10:
-            return None, "failed_trades_gate"
-
         earnings_buffer_days = 7
         earnings_date = get_earnings_date(
             ticker,
@@ -427,7 +399,8 @@ class PullbackRecoveryStrategy(StrategyInterface):
         )
         if earnings_date:
             ts_earnings = pd.Timestamp(earnings_date).normalize()
-            ts_now = pd.Timestamp.now().normalize()
+            # Measured from the signal bar's date (point-in-time), not the wall clock
+            ts_now = pd.Timestamp(dates[t]).tz_localize(None).normalize() if getattr(pd.Timestamp(dates[t]), "tzinfo", None) else pd.Timestamp(dates[t]).normalize()
             days_to_earnings = (ts_earnings - ts_now).days
             if 0 < days_to_earnings <= earnings_buffer_days:
                 return None, "failed_earnings_gate"

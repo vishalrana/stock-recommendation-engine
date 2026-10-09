@@ -33,8 +33,6 @@ logger = logging.getLogger(__name__)
 from src.quant_config import (
     STRATEGY_WEIGHT_VECTORS,
     REGIME_SCORE_MATRIX,
-    STRATEGY_HISTORICAL_EXPECTANCY,
-    SURVIVORSHIP_BIAS_HAIRCUT,
     EXPECTANCY_BASE,
     EXPECTANCY_SLOPE,
     CONTEXT_VETO_THRESHOLDS,
@@ -47,28 +45,23 @@ from src.quant_config import (
 
 def compute_expectancy_score(strategy: str, adjusted_expectancy_pct: Optional[float] = None) -> float:
     """
-    Master Spec v2.3+ formula: S_exp = 30 + 20 * E_adjusted
-    where E_adjusted is expressed in percentage points (e.g. +1.44% -> 1.44 -> 58.8).
-    Strictly clamped to [0.0, 100.0] with null and NaN protection (falls back to canonical historical prior).
+    Master Spec v2.3+ formula: S_exp = 30 + 20 * E
+    where E is the per-trade expectancy in percentage points (e.g. +1.44% -> 1.44 -> 58.8).
+    Strictly clamped to [0.0, 100.0]. When no value is given (None/NaN) it falls back to the
+    strategy's shrunk backtest expectancy (src.strategy_evidence; neutral 0% without evidence).
     Rejects infinite values with ValueError rather than concealing via clamping.
     """
+    e_val = float("nan")
     if adjusted_expectancy_pct is not None:
         try:
-            val = float(adjusted_expectancy_pct)
+            e_val = float(adjusted_expectancy_pct)
         except (ValueError, TypeError):
-            val = float("nan")
-        if math.isinf(val):
+            e_val = float("nan")
+        if math.isinf(e_val):
             raise ValueError(f"adjusted_expectancy_pct must be finite, got {adjusted_expectancy_pct}")
-        if not math.isnan(val):
-            e_val = val
-        else:
-            strat_key = normalize_strategy_key(strategy)
-            hist_exp = STRATEGY_HISTORICAL_EXPECTANCY.get(strat_key, 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT)
-            e_val = round(hist_exp * 100.0, 2)
-    else:
-        strat_key = normalize_strategy_key(strategy)
-        hist_exp = STRATEGY_HISTORICAL_EXPECTANCY.get(strat_key, 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT)
-        e_val = round(hist_exp * 100.0, 2)
+    if math.isnan(e_val):
+        from src.strategy_evidence import get_strategy_evidence
+        e_val = float(get_strategy_evidence(strategy).shrunk_expectancy)
     raw_score = EXPECTANCY_BASE + EXPECTANCY_SLOPE * e_val
     clamped_score = max(0.0, min(100.0, raw_score))
     return round(clamped_score, 4)
@@ -172,6 +165,16 @@ def assign_tier(composite_score: float, honest_rr: float = 2.0, has_strategy_set
         return "Rejected"
 
 
+# Strategies whose setups are defined by strength (momentum score rewards strength for these)
+STRENGTH_SEEKING_STRATEGIES = {
+    "trend_following",
+    "52w_high_breakout",
+    "cross_sectional_momentum",
+    "sector_rotation",
+    "pead",
+}
+
+
 def compute_momentum_score(row: dict) -> float:
     """
     P0-2 & P1-1 & P1-2: Explicit continuous technical momentum score (0-100).
@@ -215,12 +218,27 @@ def compute_momentum_score(row: dict) -> float:
     m_val = float(macd_hist)
     atr = float(atr_val)
 
-    # RSI score: penalizes deviation from 50 median line
-    rsi_score = max(0.0, min(100.0, 100.0 - abs(rsi_val - 50.0) * 4.0))
+    strat = row.get("strategy") or row.get("strategy_name")
+    try:
+        strat_key = normalize_strategy_key(strat) if strat else None
+    except ValueError:
+        strat_key = None
 
-    # Proximity score to DMA 50
-    proximity = abs(p_val / d_val - 1.0) if d_val > 0 else 0.0
-    proximity_score = max(0.0, min(100.0, 100.0 - proximity * 500.0))
+    if strat_key in STRENGTH_SEEKING_STRATEGIES:
+        # Trend / breakout / momentum / drift setups: reward strength, not neutrality.
+        # RSI peaks at 65 (strong but not exhausted); price is best moderately above the
+        # 50 DMA (~5%), scoring 0 below it and fading when over-extended.
+        rsi_score = max(0.0, min(100.0, 100.0 - abs(rsi_val - 65.0) * 4.0))
+        extension = p_val / d_val - 1.0 if d_val > 0 else 0.0
+        if extension < 0:
+            proximity_score = 0.0
+        else:
+            proximity_score = max(0.0, min(100.0, 100.0 - abs(extension - 0.05) * 500.0))
+    else:
+        # Pullback / mean-reversion setups: best near the RSI midline and close to the 50 DMA.
+        rsi_score = max(0.0, min(100.0, 100.0 - abs(rsi_val - 50.0) * 4.0))
+        proximity = abs(p_val / d_val - 1.0) if d_val > 0 else 0.0
+        proximity_score = max(0.0, min(100.0, 100.0 - proximity * 500.0))
 
     # Volume score
     volume_score = max(0.0, min(100.0, v_val * 50.0))
@@ -383,6 +401,9 @@ class SignalRanker:
             regime_score = compute_regime_alignment(strat_key, regime_key)
 
         # 5. Context Score with Veto Gates (Fix 3)
+        # context_available=False means the context data could not be obtained; the context
+        # component is then excluded and the other weights renormalized (missing != zero).
+        context_available = row.get("context_available") is not False
         c_analyst = float(row.get("context_analyst", 0.0) or 0.0)
         c_earnings = float(row.get("context_earnings", 0.0) or 0.0)
         c_fundamental = float(row.get("context_fundamental", 0.0) or 0.0)
@@ -441,13 +462,16 @@ class SignalRanker:
         regime_score = max(0.0, min(100.0, float(regime_score)))
         context_score = max(0.0, min(100.0, float(context_score)))
 
-        total = (
+        non_ctx_total = (
             w["mom"] * momentum_score
             + w["exp"] * expectancy_score
             + w["wr"] * winrate_score
             + w["reg"] * regime_score
-            + w["ctx"] * context_score
         )
+        if context_available:
+            total = non_ctx_total + w["ctx"] * context_score
+        else:
+            total = non_ctx_total / (1.0 - w["ctx"])
         total = max(0.0, min(100.0, total))
 
         honest_rr = float(row.get("weighted_scaleout_rr") or row.get("weighted_rr_honest") or row.get("weighted_rr") or row.get("risk_reward") or 2.0)
@@ -462,8 +486,9 @@ class SignalRanker:
                 "expectancy": round(expectancy_score, 4),
                 "winrate": round(winrate_score, 4),
                 "regime": round(regime_score, 4),
-                "context": round(context_score, 4),
+                "context": round(context_score, 4) if context_available else None,
             },
+            "context_available": context_available,
             "strategy": strat_key,
             "weights": w,
         }

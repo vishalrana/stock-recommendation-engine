@@ -68,10 +68,29 @@ export default function StockCard({
     ? Number(entryPriceVal).toFixed(2)
     : '—';
 
+  const fillPrice = (recommendation.entry_fill_price !== undefined && recommendation.entry_fill_price !== null && !isNaN(Number(recommendation.entry_fill_price)))
+    ? Number(recommendation.entry_fill_price).toFixed(2)
+    : null;
+
+  const peVal = recommendation.pe_ratio;
+  const peDisplay = (peVal !== undefined && peVal !== null && !isNaN(Number(peVal)))
+    ? Number(peVal).toFixed(1)
+    : 'N/A';
+
   const t1 = recommendation.target_1 ? Number(recommendation.target_1).toFixed(2) : null;
   const t2 = recommendation.target_2 ? Number(recommendation.target_2).toFixed(2) : null;
   const t3 = recommendation.target_3 ? Number(recommendation.target_3).toFixed(2) : null;
-  const stop = recommendation.stop_loss ? Number(recommendation.stop_loss).toFixed(2) : '—';
+
+  // After a scale-out the effective stop is ratcheted (breakeven after T1, T1 after T2)
+  const positionState = recommendation.position_state;
+  const scaledOut = positionState === 'hit_t1' || positionState === 'hit_t2';
+  const effectiveStopVal = scaledOut && recommendation.current_stop ? recommendation.current_stop : recommendation.stop_loss;
+  const stop = effectiveStopVal ? Number(effectiveStopVal).toFixed(2) : '—';
+  const stopNote = positionState === 'hit_t1'
+    ? 'T1 reached · stop at breakeven'
+    : positionState === 'hit_t2'
+    ? 'T2 reached · stop at T1'
+    : null;
   const activeDays = getDaysActive(recommendation.entry_date || recommendation.scan_date);
 
   const strategy = recommendation.strategy_name || recommendation.strategy;
@@ -152,22 +171,21 @@ export default function StockCard({
     });
   }
 
-  // Win rate and Analytical R:R helpers
+  // Strategy evidence (production-pipeline backtest of this strategy) and analytical R:R
   let winRateDisplay = 'Not enough history';
-  if (
-    recommendation.past_win_rate !== null &&
-    recommendation.past_win_rate !== undefined &&
-    !isNaN(Number(recommendation.past_win_rate)) &&
-    Number(recommendation.past_win_rate) > 0
-  ) {
-    const rawWr = Number(recommendation.past_win_rate);
-    const wrPct = rawWr <= 1.0 ? rawWr * 100 : rawWr;
-    winRateDisplay = `${wrPct.toFixed(0)}%`;
+  const swr = recommendation.strategy_win_rate;
+  const strades = recommendation.strategy_trades;
+  if (swr !== null && swr !== undefined && !isNaN(Number(swr)) && strades) {
+    const exp = recommendation.strategy_expectancy_pct;
+    const expText = (exp !== null && exp !== undefined && !isNaN(Number(exp)))
+      ? ` · ${Number(exp) >= 0 ? '+' : ''}${Number(exp).toFixed(2)}%/trade`
+      : '';
+    winRateDisplay = `${Number(swr).toFixed(0)}% of ${strades} trades${expText}`;
   }
 
   const rrVal = recommendation.weighted_rr_honest ?? recommendation.weighted_rr ?? recommendation.risk_reward;
   const rrDisplay = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal)))
-    ? `${Number(rrVal).toFixed(2)}:1 (analytical)`
+    ? `${Number(rrVal).toFixed(2)}:1 (if targets hit)`
     : null;
 
   return (
@@ -215,6 +233,18 @@ export default function StockCard({
       {/* Main information: Targets, Risk & Time */}
       <div className="mt-3.5 pt-3 border-t border-slate-800/60 flex flex-col gap-1.5 text-xs">
         <div className="flex items-baseline justify-between text-slate-300">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Entry & P/E</span>
+          <span className="font-mono text-slate-200">
+            Entry ${entryPrice}
+            {fillPrice && fillPrice !== entryPrice && (
+              <span className="text-slate-500"> (filled ${fillPrice})</span>
+            )}
+            <span className="text-slate-600"> · </span>
+            <span className="text-slate-300">P/E {peDisplay}</span>
+          </span>
+        </div>
+
+        <div className="flex items-baseline justify-between text-slate-300">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Targets</span>
           <span className="font-mono font-medium text-emerald-400">
             {targetsDisplay}
@@ -227,6 +257,9 @@ export default function StockCard({
             Stop ${stop} <span className="text-slate-600">·</span> <span className="text-slate-400">{activeDays}</span>
           </span>
         </div>
+        {stopNote && (
+          <div className="text-right text-[10px] font-medium text-blue-300">{stopNote}</div>
+        )}
       </div>
 
       {/* Supporting Evidence (Rendered only when validated evidence criteria are met) */}
@@ -314,7 +347,7 @@ export default function StockCard({
             <div className="pt-2 border-t border-slate-800/60 grid grid-cols-2 gap-2 text-[11px]">
               <div>
                 <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
-                  Historical Win Rate
+                  Strategy Backtest
                 </span>
                 <span className="text-slate-300 font-mono font-medium">
                   {winRateDisplay}
@@ -323,7 +356,7 @@ export default function StockCard({
               {rrDisplay && (
                 <div>
                   <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
-                    Analytical R:R
+                    Scale-out R:R
                   </span>
                   <span className="text-slate-300 font-mono font-medium">
                     {rrDisplay}

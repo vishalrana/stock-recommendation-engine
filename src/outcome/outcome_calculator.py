@@ -341,10 +341,20 @@ def evaluate_signal_outcome(
     target_3: Optional[float] = None,
     max_holding_days: int = 20,
     ambiguity_policy: str = SAME_DAY_AMBIGUITY_POLICY,
+    return_open: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Evaluate daily OHLC price bars against entry, stop loss, and canonical scale-out targets.
     Directly delegates position accounting and state transitions to PositionScaleOutTracker.
+
+    Same-bar ratchet ambiguity: when a target is reached on a bar, the stop is ratcheted
+    (to breakeven after T1, to T1 after T2). Daily bars cannot tell whether the bar's low
+    came before or after the target touch, so under STOP_FIRST the remaining weight is
+    stopped at the ratcheted level whenever that bar's low also reaches it.
+
+    Censoring: if the bars run out before the trade closes or reaches max_holding_days,
+    the trade is unresolved. It returns None, or with return_open=True a partial result
+    with is_closed=False (realized_return_pct covers only the weight already exited).
     """
     if df is None or df.empty or entry_price <= 0 or not target_1:
         return None
@@ -368,8 +378,26 @@ def evaluate_signal_outcome(
 
     outcome_date_str = ""
     holding_days = 0
+    day_close = None
+    stop_first = ambiguity_policy == "STOP_FIRST"
 
-    for i, (idx, bar) in enumerate(df.iterrows()):
+    def _result(is_closed: bool, exit_reason: Optional[str] = None) -> Dict[str, Any]:
+        return {
+            "exit_reason": exit_reason,  # "stop" | "target" | "expiry" | None while open
+            "outcome": tracker.state.value,
+            "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
+            "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
+            "outcome_date": outcome_date_str,
+            "outcome_holding_days": holding_days,
+            "holding_days": holding_days,
+            "exit_price": float(round(tracker.final_exit_price, 2)),
+            "is_closed": is_closed,
+            "remaining_weight": float(round(tracker.remaining_weight, 6)),
+            "current_stop": float(round(tracker.current_stop, 2)),
+            "last_close": float(day_close) if day_close is not None else None,
+        }
+
+    for idx, bar in df.iterrows():
         try:
             day_open = float(bar[open_col]) if open_col is not None else None
             day_high = float(bar[high_col])
@@ -385,7 +413,7 @@ def evaluate_signal_outcome(
         ):
             continue
 
-        holding_days = i + 1
+        holding_days += 1
 
         if hasattr(idx, "date"):
             outcome_date_str = idx.date().isoformat()
@@ -410,61 +438,43 @@ def evaluate_signal_outcome(
 
         if stop_hit:
             tracker.on_stop_hit(exit_p)
-            return {
-                "outcome": tracker.state.value,
-                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "outcome_date": outcome_date_str,
-                "outcome_holding_days": holding_days,
-                "holding_days": holding_days,
-                "exit_price": float(round(tracker.final_exit_price, 2)),
-            }
+            return _result(True, "stop")
 
-        # 2. TARGET PROGRESSION
+        # 2. TARGET PROGRESSION (with same-bar ratcheted-stop check under STOP_FIRST)
+        # A resting limit order at a target fills at the open when the bar gaps above it.
+        def _target_fill(target: float) -> float:
+            return max(target, day_open) if day_open is not None else target
+
+        closed_by = None
         if tracker.state == PositionState.OPEN and day_high >= tracker.target_1:
-            tracker.on_t1_hit(tracker.target_1)
+            tracker.on_t1_hit(_target_fill(tracker.target_1))
+            closed_by = "target"
+            if stop_first and not tracker.is_closed and day_low <= tracker.current_stop:
+                tracker.on_stop_hit(tracker.current_stop)
+                closed_by = "stop"
 
-        if tracker.state == PositionState.T1_HIT and tracker.target_2 and day_high >= tracker.target_2:
-            tracker.on_t2_hit(tracker.target_2)
+        if (not tracker.is_closed and tracker.state == PositionState.T1_HIT
+                and tracker.target_2 and day_high >= tracker.target_2):
+            tracker.on_t2_hit(_target_fill(tracker.target_2))
+            closed_by = "target"
+            if stop_first and not tracker.is_closed and day_low <= tracker.current_stop:
+                tracker.on_stop_hit(tracker.current_stop)
+                closed_by = "stop"
 
-        if tracker.state == PositionState.T2_HIT and tracker.target_3 and day_high >= tracker.target_3:
-            tracker.on_t3_hit(tracker.target_3)
+        if (not tracker.is_closed and tracker.state == PositionState.T2_HIT
+                and tracker.target_3 and day_high >= tracker.target_3):
+            tracker.on_t3_hit(_target_fill(tracker.target_3))
+            closed_by = "target"
 
         if tracker.is_closed:
-            return {
-                "outcome": tracker.state.value,
-                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "outcome_date": outcome_date_str,
-                "outcome_holding_days": holding_days,
-                "holding_days": holding_days,
-                "exit_price": float(round(tracker.final_exit_price, 2)),
-            }
+            return _result(True, closed_by)
 
         # 3. EXPIRY EVALUATION
         if holding_days >= max_holding_days:
             tracker.on_expired(day_close)
-            return {
-                "outcome": tracker.state.value,
-                "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
-                "outcome_date": outcome_date_str,
-                "outcome_holding_days": holding_days,
-                "holding_days": holding_days,
-                "exit_price": float(round(tracker.final_exit_price, 2)),
-            }
+            return _result(True, "expiry")
 
-    # If all available bars are exhausted and a milestone target was reached
-    if tracker.state in (PositionState.T1_HIT, PositionState.T2_HIT):
-        tracker.on_expired(day_close)
-        return {
-            "outcome": tracker.state.value,
-            "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
-            "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
-            "outcome_date": outcome_date_str,
-            "outcome_holding_days": holding_days,
-            "holding_days": holding_days,
-            "exit_price": float(round(tracker.final_exit_price, 2)),
-        }
-
+    # Bars exhausted before the trade closed: unresolved (censored), never force-closed.
+    if return_open and holding_days > 0:
+        return _result(False)
     return None

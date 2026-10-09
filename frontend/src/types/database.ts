@@ -8,6 +8,14 @@ export interface Recommendation {
   price: number | null;
   entry_price: number | null;
   reference_entry_price?: number | null;
+  entry_fill_price?: number | null;
+  position_state?: string | null;
+  current_stop?: number | null;
+  pe_ratio?: number | null;
+  strategy_win_rate?: number | null;
+  strategy_expectancy_pct?: number | null;
+  strategy_trades?: number | null;
+  reach_prob_source?: string | null;
   stop_loss: number | null;
   exit_price: number | null;
   upside_pct: number | null;

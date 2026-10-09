@@ -97,7 +97,12 @@ class TestFinalProductionBaseline(unittest.TestCase):
             {"id": "test-uuid-1", "ticker": "SMALLCAP_OUTSIDE_SP500", "status": "open", "stop_loss": 10.0, "target_3": 30.0, "scan_date": "2026-10-01"}
         ]
 
-        with patch("jobs.supabase_client.get_latest_bar", return_value={"close": 20.0, "low": 18.0, "high": 22.0}), \
+        import pandas as pd
+        bars = pd.DataFrame(
+            [{"OPEN": 19.0, "HIGH": 22.0, "LOW": 18.0, "CLOSE": 20.0}],
+            index=pd.bdate_range(start="2026-10-02", periods=1),
+        )
+        with patch("jobs.supabase_client.get_bars_after", return_value=bars), \
              patch("jobs.supabase_client.update_signals_status") as mock_status_update:
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,

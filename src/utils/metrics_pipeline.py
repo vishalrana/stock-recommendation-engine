@@ -14,15 +14,14 @@ Guarantees:
 import math
 from typing import Optional, Dict, Any
 from src.quant_config import (
-    STRATEGY_HISTORICAL_EXPECTANCY,
-    SURVIVORSHIP_BIAS_HAIRCUT,
+    BAYESIAN_PRIOR_EXPECTANCY_PCT,
     normalize_strategy_key,
 )
 
 # Canonical Bayesian Shrinkage Parameters
 DEFAULT_SHRINKAGE_ALPHA: float = 5.0
 DEFAULT_PRIOR_WIN_RATE: float = 50.0  # 50.0% neutral prior
-DEFAULT_PRIOR_EXPECTANCY_PCT: float = 1.44  # Baseline historical swing expectancy
+DEFAULT_PRIOR_EXPECTANCY_PCT: float = BAYESIAN_PRIOR_EXPECTANCY_PCT  # 0.0% neutral prior (no assumed edge)
 
 
 def calculate_shrunk_win_rate(
@@ -50,13 +49,15 @@ def calculate_shrunk_expectancy(
     alpha: float = DEFAULT_SHRINKAGE_ALPHA,
 ) -> float:
     """
-    Stabilize historical expectancy against small-sample variance by shrinking
-    towards the strategy's canonical haircut-adjusted historical expectancy.
+    Stabilize historical expectancy against small-sample variance by shrinking toward the
+    strategy's shrunk backtest expectancy (src.strategy_evidence), or the neutral 0% prior
+    when the strategy has no backtest evidence.
     """
-    strat_key = normalize_strategy_key(strategy_name) if strategy_name else "trend_following"
-    canonical_prior = STRATEGY_HISTORICAL_EXPECTANCY.get(
-        strat_key, 0.0169 * SURVIVORSHIP_BIAS_HAIRCUT
-    ) * 100.0  # e.g. 1.44%
+    canonical_prior = DEFAULT_PRIOR_EXPECTANCY_PCT
+    if strategy_name:
+        from src.strategy_evidence import get_strategy_evidence
+        normalize_strategy_key(strategy_name)  # fail closed on unknown strategies
+        canonical_prior = float(get_strategy_evidence(strategy_name).shrunk_expectancy)
 
     if raw_expectancy is None or total_trades <= 0:
         return round(float(canonical_prior), 2)
@@ -143,7 +144,13 @@ def build_hardened_metrics(
         eff_prior = DEFAULT_PRIOR_WIN_RATE
         provenance = "ticker_observed"
         metric_source = "ticker_historical_trades"
-    elif "win_rate" in raw_m and raw_m["win_rate"] is not None:
+    elif (
+        "win_rate" in raw_m and raw_m["win_rate"] is not None
+        and raw_m.get("wins") is None and raw_m.get("losses") is None
+    ):
+        # Legacy records carrying only an aggregate win rate (no win/loss counts).
+        # When counts are present and both zero, the stored win_rate is a 0.0 placeholder
+        # for "no trades", not an observed 0% win rate, so the neutral prior applies.
         try:
             wr_val = float(raw_m["win_rate"])
             if math.isfinite(wr_val) and 0.0 <= wr_val <= 100.0:

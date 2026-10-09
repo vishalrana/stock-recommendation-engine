@@ -15,7 +15,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Canonical Single Source of Truth
-from src.quant_config import SURVIVORSHIP_BIAS_HAIRCUT, REACH_PROB_FALLBACK_HAIRCUT
+from src.quant_config import REACH_PROB_FALLBACK_HAIRCUT
 
 
 # In-memory cache for static delisted tickers
@@ -49,8 +49,13 @@ def get_delisted_tickers_by_sector(sector: str) -> List[str]:
         return []
     sec_lower = str(sector).strip().lower()
     tickers = []
+    if not sec_lower:
+        return []
     for d in load_delisted_tickers():
         d_sec = str(d.get("sector", "")).strip().lower()
+        # An empty registry sector is a substring of every sector; it must never match.
+        if not d_sec:
+            continue
         if sec_lower in d_sec or d_sec in sec_lower:
             tickers.append(d["ticker"])
     return tickers
@@ -76,8 +81,8 @@ def compute_reach_prob_with_survivorship(
     2. Fallback Haircut (0.92): When historical delisted price records for the sector
        are unavailable, active empirical reach probability is discounted by an 8% haircut
        (multiplier 0.92 = REACH_PROB_FALLBACK_HAIRCUT from src.quant_config).
-    3. Expectancy Haircut (0.85): Historical strategy backtest expectancies are discounted
-       by a 15% haircut (multiplier 0.85 = SURVIVORSHIP_BIAS_HAIRCUT from src.quant_config).
+    (No multiplicative haircut is applied to expectancy: scaling a negative expectancy
+    toward zero would make it look better, the opposite of a survivorship correction.)
 
     Returns:
         ReachProbabilityResult (iterable 2-tuple backwards compatible with (adjusted_prob, raw_prob))
@@ -133,6 +138,9 @@ def compute_reach_prob_with_survivorship(
                 sample_count=raw_res.sample_count,
                 delisted_samples=1,
                 as_of_date=raw_res.as_of_date,
+                effective_samples=raw_res.effective_samples,
+                ci_low=raw_res.ci_low,
+                ci_high=raw_res.ci_high,
             )
         except (ValueError, TypeError):
             pass
@@ -151,7 +159,9 @@ def compute_reach_prob_with_survivorship(
                     stop_pct=stop_pct,
                     as_of_date=as_of_date,
                 )
-                if dt_res.status == STATUS_VALID_ESTIMATE and dt_res.raw_prob > 0:
+                # A valid 0% reach rate is real evidence of failed paths; excluding it would
+                # bias the survivorship blend upward, defeating its purpose.
+                if dt_res.status == STATUS_VALID_ESTIMATE:
                     delisted_reaches.append(dt_res.raw_prob)
             except Exception:
                 pass
@@ -167,6 +177,9 @@ def compute_reach_prob_with_survivorship(
                 sample_count=raw_res.sample_count,
                 delisted_samples=len(delisted_reaches),
                 as_of_date=raw_res.as_of_date,
+                effective_samples=raw_res.effective_samples,
+                ci_low=raw_res.ci_low,
+                ci_high=raw_res.ci_high,
             )
 
     # 4. Fallback modeling assumption: flat 8% haircut from canonical quant_config
@@ -179,13 +192,8 @@ def compute_reach_prob_with_survivorship(
         sample_count=raw_res.sample_count,
         delisted_samples=0,
         as_of_date=raw_res.as_of_date,
+        effective_samples=raw_res.effective_samples,
+        ci_low=raw_res.ci_low,
+        ci_high=raw_res.ci_high,
     )
-
-
-def apply_expectancy_haircut(expectancy_pct: float) -> float:
-    """
-    Applies global 15% haircut to strategy historical expectancy.
-    Modeling assumption: SURVIVORSHIP_BIAS_HAIRCUT = 0.85 from src.quant_config.
-    """
-    return round(float(expectancy_pct) * SURVIVORSHIP_BIAS_HAIRCUT, 4)
 

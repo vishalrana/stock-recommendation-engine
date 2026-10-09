@@ -1,0 +1,90 @@
+{
+  "metadata": {
+    "description": "Per-strategy evidence from the production-pipeline backtest (scripts/validate_backtest_pipeline.py), measured on all of each strategy's setups (one open per strategy+ticker), net of costs. Consumed by src/strategy_evidence.py.",
+    "generated_at": "2026-10-09T18:19:51.270384+00:00",
+    "evaluation_window": [
+      "2022-10-21",
+      "2026-10-08"
+    ],
+    "evidence_as_of": "2026-10-08",
+    "net_of_costs_pct_per_side": 0.1,
+    "edge_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
+    "edge_vs_spy_verdict_all": "NEGATIVE_EDGE",
+    "limitations": [
+      "Survivorship: tickers delisted after the start date have no history and are excluded.",
+      "No historical earnings calendar: earnings blackout not applied; PEAD cannot fire.",
+      "No historical context data: context excluded from scores (weights renormalized).",
+      "No VIX history: VIX>40 override not applied.",
+      "Strategy thresholds were hand-tuned beforehand; the late period is not a clean out-of-sample test of them.",
+      "Confidence intervals use a signal-month block bootstrap; trades are not independent."
+    ]
+  },
+  "strategy_evidence": {
+    "mean_reversion": {
+      "trades": 1426,
+      "wins": 853,
+      "sum_return": 592.0070000000005,
+      "t1_hits": 680,
+      "t1_n": 1426,
+      "t2_hits": 3,
+      "t2_n": 36,
+      "t3_hits": 0,
+      "t3_n": 0
+    },
+    "cross_sectional_momentum": {
+      "trades": 6127,
+      "wins": 3418,
+      "sum_return": 2785.6761000000038,
+      "t1_hits": 2609,
+      "t1_n": 6127,
+      "t2_hits": 2,
+      "t2_n": 62,
+      "t3_hits": 0,
+      "t3_n": 0
+    },
+    "pullback_recovery": {
+      "trades": 11027,
+      "wins": 6030,
+      "sum_return": 1423.0983000000028,
+      "t1_hits": 4645,
+      "t1_n": 11027,
+      "t2_hits": 7,
+      "t2_n": 43,
+      "t3_hits": 1,
+      "t3_n": 5
+    },
+    "sector_rotation": {
+      "trades": 486,
+      "wins": 271,
+      "sum_return": 191.64699999999996,
+      "t1_hits": 180,
+      "t1_n": 486,
+      "t2_hits": 9,
+      "t2_n": 55,
+      "t3_hits": 0,
+      "t3_n": 5
+    },
+    "trend_following": {
+      "trades": 7563,
+      "wins": 4108,
+      "sum_return": 5120.506300000031,
+      "t1_hits": 3005,
+      "t1_n": 7563,
+      "t2_hits": 10,
+      "t2_n": 133,
+      "t3_hits": 0,
+      "t3_n": 1
+    },
+    "52w_high_breakout": {
+      "trades": 6956,
+      "wins": 4227,
+      "sum_return": 4559.1764000000085,
+      "t1_hits": 3668,
+      "t1_n": 6956,
+      "t2_hits": 13,
+      "t2_n": 210,
+      "t3_hits": 0,
+      "t3_n": 19
+    }
+  }
+}

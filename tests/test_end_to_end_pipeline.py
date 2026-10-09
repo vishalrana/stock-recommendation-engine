@@ -143,14 +143,17 @@ class TestEndToEndPipeline(unittest.TestCase):
         Strategy: Cross-Sectional Momentum
         Entry: $296.41
         Weights: {'mom': 0.40, 'exp': 0.20, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.10}
-        Historical Expectancy: +1.80% * 0.85 haircut = +1.53% -> S_exp = 30 + 20*1.53 = 60.6
+        Strategy expectancy: shrunk backtest evidence E -> S_exp = 30 + 20*E (no hard-coded prior)
         Bull Regime Score: 85.0
         """
+        from src.strategy_evidence import get_strategy_evidence
         weights = STRATEGY_WEIGHT_VECTORS["cross_sectional_momentum"]
         self.assertEqual(weights, {'mom': 0.40, 'exp': 0.20, 'wr': 0.20, 'reg': 0.10, 'ctx': 0.10})
 
+        ev = get_strategy_evidence("cross_sectional_momentum")
+        expected_s_exp = round(max(0.0, min(100.0, 30.0 + 20.0 * ev.shrunk_expectancy)), 4)
         s_exp = compute_expectancy_score("cross_sectional_momentum")
-        self.assertAlmostEqual(s_exp, 60.6, places=1)
+        self.assertAlmostEqual(s_exp, expected_s_exp, places=4)
 
         crl_candidate = {
             "ticker": "CRL",
@@ -170,7 +173,7 @@ class TestEndToEndPipeline(unittest.TestCase):
         score_crl = res_crl["composite_score"]
         self.assertGreaterEqual(score_crl, 40.0)
         self.assertLessEqual(score_crl, 80.0)
-        self.assertEqual(res_crl["breakdown"]["expectancy"], 60.6)
+        self.assertEqual(res_crl["breakdown"]["expectancy"], expected_s_exp)
         self.assertEqual(res_crl["breakdown"]["regime"], 85.0)
 
 

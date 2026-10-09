@@ -20,16 +20,29 @@ import unittest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
 
+import pandas as pd
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
+def _bars(start_date, *rows):
+    """Daily OHLC bars (business days from start_date) as returned by get_bars_after().
+    Each row is (open, high, low, close)."""
+    idx = pd.bdate_range(start=start_date, periods=len(rows))
+    return pd.DataFrame(
+        [{"OPEN": o, "HIGH": h, "LOW": l, "CLOSE": c} for (o, h, l, c) in rows],
+        index=idx,
+    )
+
+
 class TestRecommendationLifecycle(unittest.TestCase):
 
-    def test_automatic_invalidation_and_future_eligibility(self):
-        """Test 1: Active recommendation no longer qualifying in new scan transitions to invalidated.
-        Also verify ticker remains eligible for future scans."""
+    def test_failing_to_requalify_does_not_close_and_holding_period_expires(self):
+        """Test 1: An idea that no longer qualifies stays open (it is measured as designed);
+        it closes as 'expired' once the strategy holding period (Pullback Recovery: 10 bars) ends,
+        with the return measured from the D+1 open fill. The ticker is never blacklisted."""
         from jobs.generate_signals import reconcile_recommendation_lifecycle, BLACKLIST
         
         mock_supabase = MagicMock()
@@ -49,13 +62,12 @@ class TestRecommendationLifecycle(unittest.TestCase):
             }
         ]
 
-        with patch("jobs.supabase_client.get_latest_bar") as mock_bar, \
+        with patch("jobs.supabase_client.get_bars_after") as mock_bars, \
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
              patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
 
-            # Price at 103.0 (well above stop loss 92.0), but ABC no longer qualifies tonight
-            mock_bar.return_value = {"close": 103.00, "low": 101.50, "high": 104.50}
-
+            # Day 1: price at 103.0 (well above stop 92.0); ABC no longer qualifies tonight -> stays open
+            mock_bars.return_value = _bars("2026-09-02", (101.00, 104.50, 101.50, 103.00))
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,
                 qualified_tickers={"NVDA", "AAPL"},
@@ -64,32 +76,43 @@ class TestRecommendationLifecycle(unittest.TestCase):
                 min_required_scanned=50,
                 disqualification_reasons={"ABC": "ReachProb(T1) 22.0% < StrategyMin.T1 (40.0%)"},
             )
+            mock_update_sig.assert_not_called()
+            mock_update_hist.assert_not_called()
 
-            # 1. Verify status transitioned to 'invalidated' with exact signal_id
+            # Day 10: holding period reached without stop or target -> expired at that close
+            ten_bars = [(101.00, 104.50, 101.50, 103.00)] + [(103.0, 104.0, 102.0, 103.5)] * 8 + [(103.5, 105.0, 103.0, 104.0)]
+            mock_bars.return_value = _bars("2026-09-02", *ten_bars)
+            reconcile_recommendation_lifecycle(
+                supabase=mock_supabase,
+                qualified_tickers=set(),
+                scan_successful=True,
+                scanned_count=500,
+                min_required_scanned=50,
+            )
+
             mock_update_sig.assert_called_once()
             sig_args, sig_kwargs = mock_update_sig.call_args
             self.assertEqual(sig_args[0], "ABC")
-            self.assertEqual(sig_args[1], "invalidated")
-            self.assertEqual(sig_args[2], 103.00)
-            self.assertTrue(sig_args[3])
-            self.assertIn("ReachProb", sig_args[4])
+            self.assertEqual(sig_args[1], "expired")
+            self.assertEqual(sig_args[2], 104.00)
+            self.assertIn("Holding period ended", sig_args[4])
             self.assertEqual(sig_kwargs.get("signal_id"), "uuid-205")
 
-            # 2. Verify history transitioned to 'invalidated' with exact signal_id and scan_date
             mock_update_hist.assert_called_once()
             hist_args, hist_kwargs = mock_update_hist.call_args
-            self.assertEqual(hist_args[0], "ABC")
-            self.assertEqual(hist_args[1], "invalidated")
-            self.assertEqual(hist_args[2], 103.00)
+            self.assertEqual(hist_args[1], "expired")
             self.assertEqual(hist_kwargs.get("signal_id"), "uuid-205")
             self.assertEqual(hist_kwargs.get("scan_date"), "2026-09-01")
+            # Return measured from the D+1 open fill (101.00) to the expiry close (104.00)
+            self.assertEqual(hist_kwargs.get("entry_fill_price"), 101.00)
+            self.assertAlmostEqual(hist_kwargs.get("return_pct"), (104.0 - 101.0) / 101.0 * 100.0, places=3)
+            self.assertEqual(hist_kwargs.get("holding_days"), 10)
 
             # 3. Verify ABC is NOT blacklisted and remains eligible for future scans
             self.assertNotIn("ABC", BLACKLIST)
 
     def test_stop_loss_vs_invalidation_strict_distinction(self):
-        """Test 2: Verify SL reached produces 'stopped', while setup disqualification produces 'invalidated'.
-        The two are never interchanged."""
+        """Test 2: Verify SL reached produces 'stopped', while setup disqualification alone closes nothing."""
         from jobs.generate_signals import reconcile_recommendation_lifecycle
         
         mock_supabase = MagicMock()
@@ -116,16 +139,16 @@ class TestRecommendationLifecycle(unittest.TestCase):
             },
         ]
 
-        def fake_get_latest_bar(ticker):
+        def fake_get_bars_after(ticker, after_date, through_date=None):
             if ticker == "STOPPED_STOCK":
                 # Low breached stop 92.0 -> STOPPED
-                return {"close": 91.50, "low": 91.00, "high": 95.00}
+                return _bars("2026-09-02", (94.00, 95.00, 91.00, 91.50))
             if ticker == "INVALID_STOCK":
                 # Low intact at 101.0 > stop 92.0, but disqualified in scan -> INVALIDATED
-                return {"close": 103.00, "low": 101.00, "high": 104.00}
+                return _bars("2026-09-02", (102.00, 104.00, 101.00, 103.00))
             return None
 
-        with patch("jobs.supabase_client.get_latest_bar", side_effect=fake_get_latest_bar), \
+        with patch("jobs.supabase_client.get_bars_after", side_effect=fake_get_bars_after), \
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
              patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
 
@@ -141,8 +164,8 @@ class TestRecommendationLifecycle(unittest.TestCase):
             self.assertEqual(calls.get("STOPPED_STOCK"), "stopped")
             self.assertNotEqual(calls.get("STOPPED_STOCK"), "invalidated")
 
-            self.assertEqual(calls.get("INVALID_STOCK"), "invalidated")
-            self.assertNotEqual(calls.get("INVALID_STOCK"), "stopped")
+            # Disqualified in tonight's scan but no stop/target/expiry: stays open, never invalidated
+            self.assertNotIn("INVALID_STOCK", calls)
 
     def test_manual_removal_exact_id_targeting(self):
         """Test 3 (Mandatory): Create two historical recommendations for the same ticker:
@@ -299,11 +322,11 @@ class TestRecommendationLifecycle(unittest.TestCase):
             }
         ]
 
-        with patch("jobs.supabase_client.get_latest_bar") as mock_bar, \
+        with patch("jobs.supabase_client.get_bars_after") as mock_bar, \
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
              patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
 
-            mock_bar.return_value = {"close": 52.00, "low": 51.00, "high": 53.00}
+            mock_bar.return_value = _bars("2026-09-02", (51.50, 53.00, 51.00, 52.00))
 
             # Scenario A: scan_successful = False (e.g. unhandled error during scan)
             reconcile_recommendation_lifecycle(
@@ -360,12 +383,12 @@ class TestRecommendationLifecycle(unittest.TestCase):
             }
         ]
 
-        with patch("jobs.supabase_client.get_latest_bar") as mock_bar, \
+        with patch("jobs.supabase_client.get_bars_after") as mock_bar, \
              patch("jobs.supabase_client.update_signals_price") as mock_update_price, \
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig:
 
             # NVDA is still qualified, low is 123.00 > stop 112.00
-            mock_bar.return_value = {"close": 126.50, "low": 123.00, "high": 127.00}
+            mock_bar.return_value = _bars("2026-09-02", (124.00, 127.00, 123.00, 126.50))
 
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,
@@ -377,6 +400,107 @@ class TestRecommendationLifecycle(unittest.TestCase):
 
             mock_update_price.assert_called_once_with("NVDA", 126.50, signal_id="sig-3")
             mock_update_sig.assert_not_called()
+
+    def test_missed_scan_days_are_replayed(self):
+        """A stop hit on a day with no successful nightly scan must still be detected:
+        the whole bar path since the signal date is replayed, not just the latest bar."""
+        from jobs.generate_signals import reconcile_recommendation_lifecycle
+
+        mock_supabase = MagicMock()
+        mock_supabase.table().select().in_().execute.return_value.data = [
+            {"id": "sig-gap", "ticker": "GAPPY", "status": "open", "entry_price": 100.0,
+             "stop_loss": 93.0, "target_1": 110.0, "target_2": 120.0, "target_3": 130.0,
+             "strategy": "Trend Following", "scan_date": "2026-09-01"}
+        ]
+        with patch("jobs.supabase_client.get_bars_after") as mock_bars, \
+             patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
+             patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
+            # Day 2 breaches the stop; by day 3 (latest bar) price has fully recovered.
+            mock_bars.return_value = _bars(
+                "2026-09-02",
+                (100.0, 101.0, 98.0, 99.0),
+                (97.0, 97.5, 92.0, 94.0),
+                (99.0, 104.0, 98.0, 103.0),
+            )
+            reconcile_recommendation_lifecycle(
+                supabase=mock_supabase, qualified_tickers={"GAPPY"}, scan_successful=True,
+                scanned_count=500, min_required_scanned=50, current_scan_date="2026-09-04",
+            )
+            sig_args, sig_kwargs = mock_update_sig.call_args
+            self.assertEqual(sig_args[1], "stopped")
+            self.assertEqual(sig_args[2], 93.0)
+            self.assertEqual(sig_kwargs.get("exit_date"), "2026-09-03")
+            _, hist_kwargs = mock_update_hist.call_args
+            self.assertEqual(hist_kwargs.get("outcome_date"), "2026-09-03")
+            self.assertEqual(hist_kwargs.get("holding_days"), 2)
+            self.assertAlmostEqual(hist_kwargs.get("return_pct"), -7.0, places=3)
+
+    def test_scale_out_before_stop_records_t1_outcome(self):
+        """T1 reached, then the remainder stopped at breakeven: outcome is hit_t1 with the
+        scale-out return (50% at +10%, 50% at 0%) = +5%, never a full stop-loss."""
+        from jobs.generate_signals import reconcile_recommendation_lifecycle
+
+        mock_supabase = MagicMock()
+        mock_supabase.table().select().in_().execute.return_value.data = [
+            {"id": "sig-t1", "ticker": "SCALE", "status": "open", "entry_price": 100.0,
+             "stop_loss": 93.0, "target_1": 110.0, "target_2": 120.0, "target_3": 130.0,
+             "strategy": "Trend Following", "scan_date": "2026-09-01"}
+        ]
+        with patch("jobs.supabase_client.get_bars_after") as mock_bars, \
+             patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
+             patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
+            mock_bars.return_value = _bars(
+                "2026-09-02",
+                (100.0, 111.0, 101.0, 109.0),   # T1 hit, low stays above breakeven
+                (104.0, 105.0, 99.0, 100.5),    # remainder stopped at breakeven (100)
+            )
+            reconcile_recommendation_lifecycle(
+                supabase=mock_supabase, qualified_tickers={"SCALE"}, scan_successful=True,
+                scanned_count=500, min_required_scanned=50, current_scan_date="2026-09-03",
+            )
+            sig_args, _ = mock_update_sig.call_args
+            self.assertEqual(sig_args[1], "hit_t1")
+            _, hist_kwargs = mock_update_hist.call_args
+            self.assertAlmostEqual(hist_kwargs.get("return_pct"), 5.0, places=3)
+
+    def test_open_recommendation_trade_parameters_are_frozen(self):
+        """A still-qualifying recommendation must never have its stop, targets or strategy
+        overwritten by tonight's re-scan; only analytical fields are refreshed."""
+        from jobs.generate_signals import reconcile_recommendation_lifecycle
+
+        mock_supabase = MagicMock()
+        mock_supabase.table().select().in_().execute.return_value.data = [
+            {"id": "sig-frozen", "ticker": "FROZEN", "status": "pending", "entry_price": 100.0,
+             "stop_loss": 93.0, "target_1": 110.0, "target_2": 120.0, "target_3": 130.0,
+             "strategy": "Trend Following", "scan_date": "2026-09-01"}
+        ]
+        tonight = {
+            "stop_loss": 88.0, "target_1": 99.0, "target_2": 104.0, "target_3": 109.0,
+            "strategy": "Mean Reversion", "strategy_name": "Mean Reversion",
+            "reach_prob_t1": 0.9, "composite_score": 71.0, "tier_label": "Buy", "pe_ratio": 22.5,
+        }
+        with patch("jobs.supabase_client.get_bars_after") as mock_bars, \
+             patch("jobs.supabase_client.update_signals_price"), \
+             patch("jobs.supabase_client.update_signals_status") as mock_update_sig:
+            mock_bars.return_value = _bars("2026-09-02", (101.0, 103.0, 97.0, 95.0))
+            reconcile_recommendation_lifecycle(
+                supabase=mock_supabase, qualified_tickers={"FROZEN"}, scan_successful=True,
+                scanned_count=500, min_required_scanned=50, current_scan_date="2026-09-02",
+                updated_analytics={"FROZEN": tonight},
+            )
+            mock_update_sig.assert_not_called()
+            update_calls = [c.args[0] for c in mock_supabase.table.return_value.update.call_args_list
+                            if isinstance(c.args[0], dict) and "position_state" in c.args[0]]
+            self.assertEqual(len(update_calls), 1)
+            fields = update_calls[0]
+            for frozen in ("stop_loss", "target_1", "target_2", "target_3", "strategy",
+                           "strategy_name", "reach_prob_t1", "entry_price"):
+                self.assertNotIn(frozen, fields)
+            self.assertEqual(fields["composite_score"], 71.0)
+            self.assertEqual(fields["pe_ratio"], 22.5)
+            self.assertEqual(fields["status"], "open")
+            self.assertEqual(fields["entry_fill_price"], 101.0)
+            self.assertEqual(fields["entry_date"], "2026-09-02")
 
     def test_production_mode_calls_lifecycle_reconciliation(self):
         """TEST A: Production mode (dry_run=False) actually calls lifecycle reconciliation."""
@@ -669,13 +793,19 @@ class TestRecommendationLifecycle(unittest.TestCase):
             }
         ]
 
-        with patch("jobs.supabase_client.get_latest_bar") as mock_bar, \
+        def fake_bars(ticker, after_date, through_date=None):
+            # The provider only ever returns bars strictly after the signal date.
+            df = _bars("2026-10-07", (88.0, 95.0, 85.0, 88.0))
+            if through_date:
+                df = df[df.index <= pd.Timestamp(through_date)]
+            return df[df.index > pd.Timestamp(after_date)]
+
+        with patch("jobs.supabase_client.get_bars_after", side_effect=fake_bars), \
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
              patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
 
             # Scenario 1: Reconciling on same scan date D ("2026-10-06").
-            # Bar breaches stop (low=85.0 < 92.0), but same-day evaluation must be SKIPPED.
-            mock_bar.return_value = {"close": 88.0, "low": 85.0, "high": 101.0, "date": "2026-10-06"}
+            # Same-day evaluation must be SKIPPED.
 
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,
@@ -690,20 +820,20 @@ class TestRecommendationLifecycle(unittest.TestCase):
             self.assertFalse(mock_update_sig.called, "Same-day candle must not trigger stop loss on scan date D")
             self.assertFalse(mock_update_hist.called, "Same-day candle must not update history outcome on scan date D")
 
-            # Scenario 2: Current scan date is D+1 ("2026-10-07"), but bar date is still D ("2026-10-06")
-            reconcile_recommendation_lifecycle(
-                supabase=mock_supabase,
-                qualified_tickers={"D1_STOCK"},
-                scan_successful=True,
-                scanned_count=100,
-                min_required_scanned=50,
-                current_scan_date="2026-10-07",
-            )
+            # Scenario 2: Price data only reaches D (no bar after the signal date yet)
+            with patch("jobs.supabase_client.get_bars_after", return_value=_bars("2026-10-07").iloc[0:0]):
+                reconcile_recommendation_lifecycle(
+                    supabase=mock_supabase,
+                    qualified_tickers={"D1_STOCK"},
+                    scan_successful=True,
+                    scanned_count=100,
+                    min_required_scanned=50,
+                    current_scan_date="2026-10-07",
+                )
             self.assertFalse(mock_update_sig.called, "Stale candle with bar_date <= scan_date must not trigger outcome")
 
             # Scenario 3: Current scan date is D+1 ("2026-10-07") and bar date is D+1 ("2026-10-07").
-            # Trade activates and stop is hit.
-            mock_bar.return_value = {"open": 88.0, "close": 88.0, "low": 85.0, "high": 95.0, "date": "2026-10-07"}
+            # Trade activates and stop is hit (gap open 88.0 below stop 92.0 -> exit at the open).
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,
                 qualified_tickers={"D1_STOCK"},
@@ -715,6 +845,7 @@ class TestRecommendationLifecycle(unittest.TestCase):
             self.assertTrue(mock_update_sig.called, "D+1 candle must activate and evaluate stop loss")
             sig_args, _ = mock_update_sig.call_args
             self.assertEqual(sig_args[1], "stopped")
+            self.assertEqual(sig_args[2], 88.0)
 
     def test_lifecycle_idempotency(self):
         """Invariant: Repeated lifecycle execution must be idempotent and never alter an already closed trade."""

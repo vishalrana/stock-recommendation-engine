@@ -79,42 +79,25 @@ REGIME_SCORE_MATRIX: Dict[str, Dict[str, float]] = {
 }
 
 # ==============================================================================
-# 3. HISTORICAL STRATEGY EXPECTANCY & HAIRCUTS (Section 9.2 & 10.3)
-# Survivorship bias haircut: 15% reduction (0.85 multiplier) for strategy historical expectancy.
-# Econometric Rationale: Historical equity backtests without survivorship-free databases
-# suffer ~1-2% annualized or ~15% relative upward bias (Brown, Goetzmann, Ibbotson, Ross 1992;
-# Elton, Gruber, Blake 1996). We explicitly isolate raw observed backtest returns from
-# the modeled survivorship-adjusted returns.
+# 3. STRATEGY EVIDENCE (win rate & expectancy)
+# Per-strategy win rate and expectancy come from the production-pipeline backtest
+# (scripts/validate_backtest_pipeline.py -> config/strategy_performance.json), shrunk toward
+# neutral priors (50% win rate, 0% expectancy) by trade count. See src/strategy_evidence.py.
+# There are no hard-coded expectancy assumptions.
 #
-# Reach probability fallback haircut: 8% reduction (0.92 multiplier) when delisted sector proxies are unavailable
-# Formula: S_exp = 30.0 + 20.0 * E_adjusted (E_adjusted in percentage points)
+# Reach probability fallback haircut: 8% reduction (0.92 multiplier) when delisted sector proxies
+# are unavailable (applies only to the ticker base-rate fallback, see survivorship_bias.py).
+# Formula: S_exp = 30.0 + 20.0 * E (E = shrunk per-trade expectancy in percentage points)
 # ==============================================================================
-SURVIVORSHIP_BIAS_HAIRCUT: float = 0.85
 REACH_PROB_FALLBACK_HAIRCUT: float = 0.92
 
-# Raw, unadjusted empirical backtest expectancy per trade (in decimal return)
-STRATEGY_HISTORICAL_EXPECTANCY_RAW: Dict[str, float] = {
-    "trend_following":          0.0169,  # +1.69% empirical mean return
-    "52w_high_breakout":        0.0210,  # +2.10%
-    "pullback_recovery":        0.0145,  # +1.45%
-    "cross_sectional_momentum": 0.0180,  # +1.80%
-    "pead":                     0.0225,  # +2.25%
-    "sector_rotation":          0.0120,  # +1.20%
-    "mean_reversion":           0.0085,  # +0.85%
-}
-
-# Modeled survivorship-adjusted expectancy (raw * 0.85 haircut)
-STRATEGY_HISTORICAL_EXPECTANCY_ADJUSTED: Dict[str, float] = {
-    strat: raw_val * SURVIVORSHIP_BIAS_HAIRCUT
-    for strat, raw_val in STRATEGY_HISTORICAL_EXPECTANCY_RAW.items()
-}
-
-# Active quantitative prior used across scoring pipelines
-STRATEGY_HISTORICAL_EXPECTANCY: Dict[str, float] = STRATEGY_HISTORICAL_EXPECTANCY_ADJUSTED
-
-# Base and multiplier for expectancy scoring: S_exp = EXPECTANCY_BASE + EXPECTANCY_SLOPE * E_adjusted
+# Base and multiplier for expectancy scoring: S_exp = EXPECTANCY_BASE + EXPECTANCY_SLOPE * E
 EXPECTANCY_BASE: float = 30.0
 EXPECTANCY_SLOPE: float = 20.0
+
+# Minimum completed trades of a strategy before its backtest target-hit rates replace the
+# ticker base-rate reach probability (setup-conditional reach probability).
+MIN_STRATEGY_REACH_TRADES: int = 30
 
 # ==============================================================================
 # 4. CONTEXT VETO THRESHOLDS (Section 10.4)
@@ -263,42 +246,18 @@ MIN_REACH_PROB_WINDOWS: int = 20
 
 # ==============================================================================
 # 8. STRATEGY STOP LOSS CONFIGURATION
-# Canonical Strategy-Specific ATR Multipliers & Minimum Percentage Stop Floors
-# Noise Floor: Prevents stops from being placed tighter than the strategy floor.
-# Hard Risk Ceiling: 7.0% maximum risk ceiling enforced downstream in pipeline.
+# Each strategy sets its own structural stop (ATR multiple, swing low, 50 DMA, gap low, ...).
+# That stop is used as issued: no minimum-distance widening and no maximum-risk clamp.
 # ==============================================================================
 STRATEGY_STOP_CONFIG: Dict[str, Dict[str, float]] = {
-    "trend_following": {
-        "atr_multiplier": 2.5,
-        "stop_floor": 0.06,   # 6.0% minimum distance floor
-    },
-    "52w_high_breakout": {
-        "atr_multiplier": 2.0,
-        "stop_floor": 0.05,   # 5.0% minimum distance floor
-    },
-    "pullback_recovery": {
-        "atr_multiplier": 1.5,
-        "stop_floor": 0.04,   # 4.0% minimum distance floor
-    },
-    "pead": {
-        "atr_multiplier": 2.0,
-        "stop_floor": 0.05,   # 5.0% minimum distance floor
-    },
-    "cross_sectional_momentum": {
-        "atr_multiplier": 2.0,
-        "stop_floor": 0.05,   # 5.0% minimum distance floor
-    },
-    "sector_rotation": {
-        "atr_multiplier": 1.8,
-        "stop_floor": 0.045,  # 4.5% minimum distance floor
-    },
-    "mean_reversion": {
-        "atr_multiplier": 1.0,
-        "stop_floor": 0.03,   # 3.0% minimum distance floor
-    },
+    "trend_following": {"atr_multiplier": 2.5},
+    "52w_high_breakout": {"atr_multiplier": 2.0},
+    "pullback_recovery": {"atr_multiplier": 1.5},
+    "pead": {"atr_multiplier": 2.0},
+    "cross_sectional_momentum": {"atr_multiplier": 2.0},
+    "sector_rotation": {"atr_multiplier": 1.8},
+    "mean_reversion": {"atr_multiplier": 1.0},
 }
-
-MAX_STOP_LOSS_PCT: float = 0.07  # 7.0% maximum risk ceiling across all strategies
 
 
 # ==============================================================================
@@ -409,7 +368,7 @@ US_UNIVERSE_DOLLAR_VOLUME_WINDOW: int = 20          # 20 trading sessions for do
 # ==============================================================================
 BAYESIAN_SHRINKAGE_ALPHA: float = 5.0
 BAYESIAN_PRIOR_WIN_RATE: float = 50.0  # 50.0% neutral prior
-BAYESIAN_PRIOR_EXPECTANCY_PCT: float = 1.44  # Baseline historical expectancy
+BAYESIAN_PRIOR_EXPECTANCY_PCT: float = 0.0  # Neutral prior: no assumed edge
 MIN_SAMPLE_SIZE_EVIDENCE: int = 5
 
 # ==============================================================================

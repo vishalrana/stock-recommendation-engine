@@ -73,7 +73,8 @@ class PEADStrategy(StrategyInterface):
         price = df['CLOSE'].iloc[-1]
 
         # === PRE-SCREEN FOR PERFORMANCE: NO CALL TO YFINANCE IF NO GAP ===
-        # Stock must have a close price increase of >= 5% on some day in the last 5 days.
+        # Stock must have a close-to-close increase of >= 2% on some day in the last 5 bars
+        # (same relaxed threshold as the gap gate below).
         has_recent_gap = False
         for days_ago in range(1, 6):
             if len(df) <= days_ago + 1:
@@ -90,10 +91,11 @@ class PEADStrategy(StrategyInterface):
         # Determine reference evaluation date for point-in-time backtesting vs live scan
         if hasattr(df.index[-1], 'date'):
             bar_date = df.index[-1].date()
-        elif isinstance(df.index[-1], (datetime, datetime.date)):
-            bar_date = df.index[-1]
         else:
-            bar_date = datetime.now().date()
+            try:
+                bar_date = pd.Timestamp(df.index[-1]).date()
+            except Exception:
+                bar_date = datetime.now().date()
 
         now_date = datetime.now().date()
         ref_date = now_date if abs((now_date - bar_date).days) <= 4 else bar_date
@@ -114,20 +116,37 @@ class PEADStrategy(StrategyInterface):
         if days_since_earnings < 1 or days_since_earnings > 5:
             return None
 
-        # === GAP GATE ===
-        # Stock must have gapped up >= 5% on earnings (strong reaction)
-        if len(df) <= days_since_earnings + 1:
+        # === REACTION BAR ===
+        # days_since_earnings is in calendar days, so it cannot be used as a bar offset
+        # (weekends/holidays). Locate the reaction bar by date instead. Report timing
+        # (before open vs after close) is unknown, so the reaction is either the bar dated
+        # on the earnings date or the next bar; take the one with the larger move.
+        bar_dates = [
+            d.date() if hasattr(d, 'date') else pd.Timestamp(d).date()
+            for d in df.index
+        ]
+        candidate_positions = [i for i, d in enumerate(bar_dates) if d >= earnings_date and i >= 1][:2]
+        if not candidate_positions:
             return None
-        
-        earnings_close = df['CLOSE'].iloc[-days_since_earnings]
-        earnings_prev_close = df['CLOSE'].iloc[-days_since_earnings - 1]
+        closes_arr = df['CLOSE'].to_numpy(dtype=float)
+
+        def _move(i: int) -> float:
+            prev = closes_arr[i - 1]
+            return abs(closes_arr[i] / prev - 1.0) if prev > 0 else 0.0
+
+        reaction_pos = max(candidate_positions, key=_move)
+
+        # === GAP GATE ===
+        # Stock must have gapped up >= 2% on earnings (relaxed from 5%)
+        earnings_close = closes_arr[reaction_pos]
+        earnings_prev_close = closes_arr[reaction_pos - 1]
         gap_pct = (earnings_close / earnings_prev_close - 1) * 100 if earnings_prev_close > 0 else 0
         if gap_pct < 2:  # Relaxed from 5
             return None
 
         # Stock must still hold >= 30% of gap (relaxed from 50%)
-        gap_high = df['HIGH'].iloc[-days_since_earnings:].max()
-        gap_low = df['LOW'].iloc[-days_since_earnings:].min()
+        gap_high = df['HIGH'].iloc[reaction_pos:].max()
+        gap_low = df['LOW'].iloc[reaction_pos:].min()
         gap_range = gap_high - gap_low
         if gap_range > 0:
             hold_pct = (price - gap_low) / gap_range
@@ -151,7 +170,7 @@ class PEADStrategy(StrategyInterface):
         # === VOLUME GATE ===
         # Volume on earnings day >= 1.5x average (relaxed from 2x)
         volume_avg = df['VOLUME'].rolling(20).mean().iloc[-1]
-        earnings_volume = df['VOLUME'].iloc[-days_since_earnings]
+        earnings_volume = df['VOLUME'].iloc[reaction_pos]
         if earnings_volume < volume_avg * 1.5:
             return None
 

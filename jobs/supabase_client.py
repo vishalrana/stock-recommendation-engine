@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+import pandas as pd
 from supabase import create_client, Client
 
 

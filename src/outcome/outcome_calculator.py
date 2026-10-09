@@ -413,8 +413,10 @@ def evaluate_signal_outcome(
             return {
                 "outcome": tracker.state.value,
                 "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
+                "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
+                "holding_days": holding_days,
                 "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
@@ -432,8 +434,10 @@ def evaluate_signal_outcome(
             return {
                 "outcome": tracker.state.value,
                 "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
+                "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
+                "holding_days": holding_days,
                 "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
@@ -443,8 +447,10 @@ def evaluate_signal_outcome(
             return {
                 "outcome": tracker.state.value,
                 "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
+                "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
                 "outcome_date": outcome_date_str,
                 "outcome_holding_days": holding_days,
+                "holding_days": holding_days,
                 "exit_price": float(round(tracker.final_exit_price, 2)),
             }
 
@@ -454,8 +460,10 @@ def evaluate_signal_outcome(
         return {
             "outcome": tracker.state.value,
             "outcome_return_pct": float(round(tracker.realized_return_pct, 4)),
+            "realized_return_pct": float(round(tracker.realized_return_pct, 4)),
             "outcome_date": outcome_date_str,
             "outcome_holding_days": holding_days,
+            "holding_days": holding_days,
             "exit_price": float(round(tracker.final_exit_price, 2)),
         }
 

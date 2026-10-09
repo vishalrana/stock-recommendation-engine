@@ -51,6 +51,7 @@ TEST_SUITES = [
     "tests/quant_reference/test_property_invariants.py",
     "tests/quant_reference/test_fail_closed_and_canonical_registries.py",
     "tests/test_end_to_end_pipeline.py",
+    "scripts/test_backtest_pipeline.py",
 ]
 
 

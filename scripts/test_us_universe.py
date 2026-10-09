@@ -357,6 +357,39 @@ class TestUSEquityUniverse(unittest.TestCase):
         self.assertIsNotNone(res.support_level)
         self.assertIsNotNone(res.resistance_level)
 
+    def test_12_universe_provenance_and_import_integrity(self):
+        """Verify module import, type hints evaluation, provider instantiation, and get_universe_provenance()."""
+        import typing
+
+        # 1. Verify type hints evaluation on class methods (guards against NameError: name 'Any' is not defined)
+        hints = typing.get_type_hints(USEquitiesUniverseProvider.get_universe_provenance)
+        self.assertIn("return", hints)
+
+        # 2. Instantiate provider using supported repository configuration
+        provider = USEquitiesUniverseProvider()
+        self.assertIsNotNone(provider)
+
+        # 3. Test get_universe_provenance without as_of_date (current universe)
+        prov_current = provider.get_universe_provenance()
+        self.assertIsInstance(prov_current, dict)
+        self.assertIsNone(prov_current["as_of_date"])
+        self.assertFalse(prov_current["is_point_in_time"])
+        self.assertIn("active_ticker_count", prov_current)
+        self.assertIn("delisted_registry_count", prov_current)
+        self.assertIn("tape_coverage_limitations", prov_current)
+
+        # 4. Test get_universe_provenance with point-in-time as_of_date
+        prov_pit = provider.get_universe_provenance(as_of_date="2023-06-15")
+        self.assertIsInstance(prov_pit, dict)
+        self.assertEqual(prov_pit["as_of_date"], "2023-06-15")
+        self.assertTrue(prov_pit["is_point_in_time"])
+        self.assertGreaterEqual(prov_pit["delisted_reconstituted_count"], 0)
+        self.assertGreaterEqual(prov_pit["delisted_prior_excluded_count"], 0)
+        self.assertEqual(
+            prov_pit["delisted_reconstituted_count"] + prov_pit["delisted_prior_excluded_count"],
+            prov_pit["delisted_registry_count"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

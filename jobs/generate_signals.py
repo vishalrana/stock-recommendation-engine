@@ -167,22 +167,10 @@ def load_sp500_nasdaq_universe() -> tuple[list, dict, dict]:
             industries[ticker] = str(row["GICS Sub-Industry"]).strip()
         logger.info("S&P 500: loaded %d tickers from Wikipedia.", len(sp500_set))
     except Exception as e:
-        logger.warning("S&P 500 Wikipedia fetch failed: %s. Loading local fallback...", e)
-        csv_path = os.path.join(PROJECT_ROOT, "outputs", "backtest_summary.csv")
-        if os.path.exists(csv_path):
-            try:
-                summary_df = pd.read_csv(csv_path)
-                for _, row in summary_df.iterrows():
-                    ticker = str(row["ticker"]).strip().upper()
-                    if ticker in BLACKLIST:
-                        continue
-                    tickers.append(ticker)
-                    sp500_set.add(ticker)
-                    industries[ticker] = str(row["industry"]).strip()
-                    company_names[ticker] = ticker
-                logger.info("Loaded %d fallback tickers from local CSV.", len(tickers))
-            except Exception as csv_err:
-                logger.error("Could not load fallback CSV: %s", csv_err)
+        # No substitute list: the old fallback (a 100-row outputs/backtest_summary.csv) silently
+        # shrank the universe. Without the S&P 500 list the benchmark has not loaded.
+        logger.error("S&P 500 Wikipedia fetch failed: %s. Benchmark universe unavailable.", e)
+        return [], {}, {}
 
     sp500_count = len(sp500_set)
     ndx_unique_count = 0
@@ -255,7 +243,7 @@ def load_universe(source: Optional[str] = None) -> tuple[list, dict, dict]:
         records = provider.get_universe()
         if not records or getattr(provider, "is_fallback", False):
             LAST_UNIVERSE_IS_FALLBACK = True
-            logger.warning("[UNIVERSE DEGRADED] USEquitiesUniverseProvider degraded to fallback. Benchmark universe loaded.")
+            logger.warning("[UNIVERSE DEGRADED] USEquitiesUniverseProvider degraded to fallback. Loading the benchmark universe.")
             return load_sp500_nasdaq_universe()
 
         tickers = []
@@ -485,6 +473,38 @@ def _safe_signal_update(supabase, signal_id: str, fields: dict) -> None:
 
 
 PROVIDER_HEALTH: Dict[str, Any] = {}
+
+UNIVERSE_UNAVAILABLE_MESSAGE = (
+    "Neither the broad universe nor the S&P 500 + Nasdaq-100 benchmark loaded; "
+    "no new ideas published, lifecycle tracking of open ideas ran"
+)
+
+
+def open_idea_tickers(supabase) -> List[str]:
+    """Tickers of open / pending ideas (tracked even when no universe loads)."""
+    rows = supabase.table("signals").select("ticker").in_("status", ["open", "pending"]).execute().data or []
+    return sorted({str(r["ticker"]).upper() for r in rows if r.get("ticker")})
+
+
+def record_universe_unavailable(supabase, scan_date: str, regime: str, dry_run: bool, tracked: int) -> Dict[str, Any]:
+    """Log the degraded status of a nightly that could load no universe (no ideas were published)."""
+    row = {
+        "scan_date": scan_date,
+        "tickers_scanned": 0,
+        "signals_generated": 0,
+        "signals_qualified": 0,
+        "signals_recommended": 0,
+        "status": "degraded_universe",
+        "error_message": f"{UNIVERSE_UNAVAILABLE_MESSAGE} ({tracked} open ideas tracked)",
+        "regime": regime,
+    }
+    logger.error("[UNIVERSE UNAVAILABLE] %s", row["error_message"])
+    if not dry_run and supabase is not None:
+        try:
+            supabase.table("scan_log").upsert(row, on_conflict="scan_date").execute()
+        except Exception as e:
+            logger.error("Failed to record degraded scan status: %s", e)
+    return {"status": "degraded_universe", "error_message": row["error_message"], "tracked_open_ideas": tracked}
 
 
 def _github_notice(title: str, message: str) -> None:
@@ -854,6 +874,21 @@ def run_scan(
     logger.info("Active strategies: %s", ", ".join(allowed_strategies))
 
     all_u_tickers, all_u_names, all_u_industries = load_universe(source=universe_source)
+    universe_unavailable = not is_targeted and not all_u_tickers
+    if universe_unavailable:
+        # Neither the broad universe nor the benchmark loaded. Publish nothing new, but keep tracking
+        # open ideas: run the targeted path over them (download, re-evaluate, lifecycle reconcile).
+        logger.error("[UNIVERSE UNAVAILABLE] Neither the broad universe nor the S&P 500 + Nasdaq-100 benchmark "
+                     "loaded. No new ideas will be published; open ideas are still tracked.")
+        _github_notice("Universe unavailable", "No new ideas published; lifecycle of open ideas still ran.")
+        try:
+            target_tickers = open_idea_tickers(get_client())
+        except Exception as open_err:
+            logger.error("Could not read open ideas for lifecycle tracking: %s", open_err)
+            target_tickers = []
+        if not target_tickers:
+            return record_universe_unavailable(None if dry_run else get_client(), signal_date, regime_str, dry_run, 0)
+        is_targeted = True
     if is_targeted:
         clean_targets = []
         for item in target_tickers:
@@ -1711,6 +1746,8 @@ def run_scan(
                 error_msg = f"Lifecycle reconciliation failed: {e}"
 
         report_provider_health()
+        if universe_unavailable:
+            return record_universe_unavailable(supabase, signal_date, regime_str, dry_run, len(tickers))
         return {
             "status": "completed",
             "scanned_count": len(successfully_evaluated_tickers),
@@ -1877,7 +1914,8 @@ def run_scan(
         rsi_breadth_pct,
     )
 
-    if status == "success" and LAST_UNIVERSE_IS_FALLBACK and universe_source == "expanded":
+    effective_universe_source = (universe_source or os.environ.get("UNIVERSE_SOURCE", "expanded")).lower()
+    if status == "success" and LAST_UNIVERSE_IS_FALLBACK and effective_universe_source == "expanded":
         status = "degraded_universe"
     if status == "success" and data_is_stale:
         status = "stale_data"

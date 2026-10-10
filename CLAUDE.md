@@ -47,14 +47,20 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 ## Current status (as of 2026-10-10)
 
 - Import errors in the universe provider and Supabase client were fixed. A project report claims 39 regression suites passed and a benchmark dry run succeeded.
-- The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code. `supabase/migration_2026_10_10_fundamentals.sql` adds those columns and the fundamentals provenance columns, and still has to be applied.
-- Yahoo blocks GitHub's runners, so fundamentals now come from SEC EDGAR first. CI needs the `SEC_USER_AGENT` repository secret (a name and contact email); without it, fundamentals fall back to Yahoo and stay mostly empty in CI. After the next run, check the "Provider health" notice.
-- The backtest universe is the 2025-02-13 cache constituents, but the window starts 2022-10-21. Results before the universe date are survivorship-inflated. The late period (from 2025-04-09) is the cleaner test; its figures are given with the latest backtest below.
+- The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code, and `supabase/migration_2026_10_10_fundamentals.sql` (applied 2026-10-10) adds those columns and the fundamentals provenance columns.
+- Yahoo blocks GitHub's runners, so fundamentals now come from SEC EDGAR first. The `SEC_USER_AGENT` repository secret (a name and contact email) is set; refresh run 38056801266 made 31 of 31 SEC requests successfully. Without it, fundamentals fall back to Yahoo and stay mostly empty in CI.
+- Survivorship in both backtests:
+  - The cache_start run uses the 2025-02-13 cache constituents (516 stocks) from 2022-10-21, so results before the universe date are survivorship-inflated.
+  - The production-universe run applies today's security master to the whole window, so stocks that delisted are missing throughout, which flatters small caps.
+  - The late period (from 2025-04-09) is the cleaner test.
 - Earnings blackout (user-approved 2026-10-10): `EARNINGS_BLACKOUT_DAYS` now counts NYSE trading sessions after the scan date up to and including the report date (`trading_sessions_between` in `src/utils/market_date.py`, which applies the NYSE holiday rules). Before this it counted calendar days. `days_to_earnings` stays in calendar days, because that is what the card shows. The windows are still far shorter than the 5–25-day holding periods, so the card warns when earnings fall inside the holding period. The backtest cannot test the blackout (no historical earnings calendar).
-- **Universe mismatch (open decision):** production scans the broad US universe (5,598 common equities; about 2,750 pass the liquidity filter). The strategy evidence comes from the 516 mostly large-cap stocks of the first cache file. The production-universe backtest (2026-10-10; see "Production-universe backtest" below) found the extra names worse, not better. Recommendation pending the user's decision: switch the nightly to `UNIVERSE_SOURCE=benchmark` (S&P 500 + Nasdaq-100), and keep downloading the tickers of open ideas so their lifecycle keeps updating.
+- **Universe (user decision 2026-10-10): keep the broad universe.** `UNIVERSE_SOURCE` stays `expanded`: 5,598 common equities, about 2,750 of them liquid. Strategy evidence now comes from the production-universe backtest run 38059174571, adopted into `config/strategy_performance.json`, so scores and cards are measured on the universe the scan covers. Delisted stocks are missing from that run, which flatters small caps.
 - CI failed on every push because `get_client()` called `sys.exit()` without secrets. This is fixed: the suite passes 40/40 with and without Supabase credentials.
 - The earlier backtest figures (−0.45% OOS expectancy) came from a harness that did not run the production pipeline, so they are superseded.
-- Latest production-pipeline backtest (2026-10-10, with 52-Week High switched off): 2,984 issued trades.
+- **Evidence basis (adopted 2026-10-10): production-universe run 38059174571.**
+  - 7,261 issued ideas: −0.50%/idea beta-adjusted (CI −1.14 to +0.20), late period −0.32. There is no edge.
+  - All setups, beta-adjusted %/trade: Trend Following −0.77, Pullback −0.48, Cross-Sectional −1.05, Mean Reversion +0.01, Sector Rotation −0.73.
+- Earlier cache_start (516-stock) run (2026-10-10, with 52-Week High switched off): 2,984 issued trades.
   - Net +0.66%/trade (CI +0.05% to +1.29%). That CI excludes zero, but only because the market rose; the raw `edge_verdict_*` therefore reads "positive" and must not be taken as an edge.
   - Excess vs SPY −0.21%/trade (CI −0.71% to +0.31%). Beta-adjusted −0.18%/trade (CI −0.63% to +0.29%), mean β 0.92. Late period (1,110 trades): beta-adjusted −0.26%/trade (CI −1.18% to +0.72%). There is still no selection edge.
   - Before the switch-off (52-Week High on): 4,405 trades, excess −0.52%/trade, beta-adjusted −0.41%/trade (CI −0.90% to +0.04%).
@@ -82,6 +88,14 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
 - News sentiment is the mean over all scored headlines, with neutral headlines counted as 0.
 - D/E display: `negative_equity` (stored with each idea) is True when total equity is zero or negative. The card then shows "Neg. equity", and a D/E above 10 is shown as ">10", with the reason on hover. Yahoo's D/E is never used for a negative-equity company, and an older D/E on an open idea is cleared once equity turns negative.
+- **Strategy evidence on cards:**
+  - Each idea stores `strategy_beta_adjusted_pct` and `strategy_excess_vs_spy_pct` (migration `migration_2026_10_10_strategy_vs_spy.sql`), frozen at issuance like the other `strategy_*` fields.
+  - The card shows "54% of N trades · +0.12%/trade" and, below it in the same type or bolder, "−0.77%/trade vs SPY after beta" (rose when negative). Hovering shows the plain vs-SPY figure.
+  - Tiers and labels are unchanged.
+- **Universe loading:**
+  - The order is the broad universe (`USEquitiesUniverseProvider`), then the S&P 500 + Nasdaq-100 benchmark from Wikipedia (ideas are still published, with status `degraded_universe`). There is no further fallback: the 100-row `outputs/backtest_summary.csv` substitute was removed.
+  - If neither loads, the nightly publishes no new ideas. It re-evaluates the open ideas through the targeted path so lifecycle tracking continues, and logs `degraded_universe` with the reason in `scan_log`.
+  - The degraded check now uses the effective source (the `UNIVERSE_SOURCE` default); passing no source used to skip it.
 - P/E, D/E and current ratio are display-only, refreshed nightly for every open idea, and never used in qualification. This is enforced: fundamentals are left out of `CONTEXT_SCORE_COMPONENTS`, so their points and the D/E–current-ratio distress veto cannot move the score. In the point-in-time test they carried no information at the setup level. Adding them to the score changed issued-trade returns by only +0.05%/trade beta-adjusted (CI −0.08 to +0.19); see Research findings.
 - **Fundamentals source (since 2026-10-10):** SEC EDGAR company facts come first (`src/providers/context/sec_fundamentals.py`). Yahoo `.info` only fills gaps, because Yahoo blocks GitHub's runners.
   - SEC requires a contact User-Agent. Set it in the `SEC_USER_AGENT` repository secret and in the local `.env`, never in a committed file. Without it, SEC is disabled and Yahoo alone is used.
@@ -93,13 +107,16 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - Each scan prints a "Provider health" GitHub notice: SEC and Yahoo success counts, and context and display-fundamentals coverage. It is readable from the run's check annotations without admin rights.
 - `supabase/migration_2026_10_10_fundamentals.sql` adds `eps_ttm`, `fundamentals_source` and `fundamentals_as_of`. It also adds the never-applied `reference_entry_price`, `weighted_scaleout_rr` and `entry_location_zone` columns, and it is idempotent.
 - Inserts drop only the specific unmigrated column the database names (`write_with_missing_column_retry`). If the logs show `[SCHEMA] Wrote without unmigrated column(s)`, apply the missing migration.
-- **Applying migrations:** `supabase/setup_run_migration.sql` was run on 2026-10-10. Since then, `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement, using the service key from `.env` (`--dry-run` lists the statements). Applied: `migration_2026_10_10_fundamentals.sql` and `migration_2026_10_10_negative_equity.sql`. Before the setup, `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement, using the service key from `.env` (`--dry-run` lists the statements). Migration files must be idempotent. Until that setup is done, migrations need the SQL editor.
+- **Applying migrations:** `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement through `public.run_migration`, using the service key from `.env`; `--dry-run` lists the statements.
+  - `public.run_migration` was created once, on 2026-10-10, by running `supabase/setup_run_migration.sql` in the SQL editor.
+  - Migration files must be idempotent.
+  - Applied 2026-10-10: `migration_2026_10_10_fundamentals.sql`, `migration_2026_10_10_negative_equity.sql` and `migration_2026_10_10_strategy_vs_spy.sql`.
 - `get_client()` raises `SupabaseConfigError` instead of exiting, so CI can run tests without secrets.
 
 ## Strategy decisions (user-approved 2026-10-09)
 
 - **Exits:** stop, final target, or the strategy's holding period (`hold_days` in `STRATEGY_TARGET_CONFIG`, counted in trading bars from the fill), which gives `expired`. Failing to requalify in a later scan does not close an idea.
-- **Win rate / expectancy evidence:** per-strategy figures from the production-pipeline backtest (`config/strategy_performance.json`, read by `src/strategy_evidence.py`), shrunk toward 50% / 0%. There are no hard-coded expectancy priors, and per-ticker legacy metrics are not used in scoring.
+- **Win rate / expectancy evidence:** per-strategy figures from the production-universe backtest, shrunk toward 50% / 0%. They live in `config/strategy_performance.json`, adopted from run 38059174571 by `scripts/adopt_strategy_evidence.py`, and are read by `src/strategy_evidence.py`. There are no hard-coded expectancy priors, and per-ticker legacy metrics are not used in scoring. The aggregates also carry beta-adjusted and vs-SPY sums and counts; these are display-only (cards), and scoring never reads them.
 - **Stops:** each strategy's own structural stop is used as issued. There is no minimum floor and no 7% cap.
 - **Momentum sub-score:** rewards strength for trend, breakout, momentum, sector and PEAD strategies. Pullback and Mean Reversion keep the near-average scoring.
 - **Rules:** Pullback needs RSI at least 5 points off its 10-bar low (dip below 50, recovery band 45–67). Mean Reversion needs RSI 3+ points off its 5-bar low on an up-close day. The unused `is_blocked` guardrails are removed.
@@ -137,11 +154,16 @@ Today's security master was applied to Oct 2022 – Oct 2026: 5,598 stocks, 821 
 | Large caps (the 516 backtested) | −0.35 (−0.62 to −0.06) | −0.27 (−0.86 to +0.29) |
 | Rest of the universe | −0.81 (−1.16 to −0.45) | −0.58 (−1.30 to +0.19) |
 
-- In every strategy except Mean Reversion, small- and mid-cap setups are worse than large-cap ones. Cross-Sectional Momentum setups outside the large caps: −1.17 (−1.56 to −0.75).
+- The large-cap vs rest split does **not** show that smaller stocks are worse, because the comparison is confounded:
+  - The 2025-02-13 list of 516 is applied from Oct 2022, so stocks that became large caps count as large caps during the runs that got them there.
+  - Every backtested rule change (trend-quality gates, 52-Week High) was chosen on the 516.
+  - Beta against SPY leaves the size factor in.
+  - By point-in-time 20-day dollar volume, the most liquid ideas did worst: over $100M ADV, −0.68 and −0.75.
+  - The issued-idea CIs overlap: large caps −0.27 (−0.86 to +0.29), rest −0.58 (−1.30 to +0.19).
+  - The gap nearly closes in the late period. Full period: broad run −0.50 vs 516 run −0.18. Late period: −0.32 vs −0.26.
 - Trend Following is 95% of issued ideas (52-Week High off).
-- By 20-day dollar volume at the signal, issued ideas over $100M ADV did worst (−0.68 and −0.75, CIs excluding zero), so liquidity alone is not the explanation.
 - Issued Mean Reversion ideas: +0.45 on 202 ideas, almost all from the 2022 bear market (no late-period trades). At the setup level, Mean Reversion is +0.01 (−0.60 to +0.71), so this is not evidence of an edge.
-- There is no edge in either universe. The broad universe adds about 2.4× the ideas (7.3 vs 3.0 a day) at a lower quality per idea.
+- There is no edge in either universe. The broad universe adds about 2.4× the ideas (7.3 vs 3.0 a day).
 
 ## Research findings (2026-10-10, setup level)
 
@@ -173,12 +195,19 @@ Run while 52-Week High was still active. Method: one pass of `validate_backtest_
 
 ## Backtest
 
-- `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap. Rerun it after any change to strategy, scoring or exit logic, then commit the regenerated `config/strategy_performance.json`.
+- `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap.
+- **Adopting evidence**, after any change to strategy, scoring or exit logic:
+  1. Run `gh workflow run backtest_production_universe.yml` and wait for it.
+  2. Download the artifact: `gh run download <id> -n backtest-production-universe -D outputs/production_universe_run_<id>`.
+  3. Adopt it: `python scripts/adopt_strategy_evidence.py outputs/production_universe_run_<id> --run-id <id>`. This rebuilds `config/strategy_performance.json` from the setup-trades CSV and writes nothing unless every field of the run's own `strategy_performance_production_universe.json` reproduces exactly.
+  4. Commit the result.
+
+  The local cache_start (516-stock) run writes its evidence to `outputs/strategy_performance_cache_start.json` and never touches `config/`.
 - Every trade carries a point-in-time `beta` (252 sessions before the signal) and `beta_adjusted_pct` (net − β × SPY return over the trade window). The stats include `mean_beta_adjusted_pct` with its CI, and the summary includes `edge_beta_adjusted_verdict_*`. Judge selection skill on the beta-adjusted and vs-SPY verdicts, not on `edge_verdict_*` (absolute return).
 - The cached phase-1 scans are keyed by strategy code, indicators, data extent and `REGIME_STRATEGY_MAP`, so switching a strategy on or off forces a rescan.
 - `--universe production` backtests today's broad US security master (about 5,600 tickers) instead of the first cache file's 516 stocks. It fails if the security master is unavailable.
   - Run it on GitHub: the workflow `backtest_production_universe.yml` (manual dispatch, optional `limit` for a smoke test, about 2–4 h) uploads the summary, trades and setups, and `outputs/strategy_performance_production_universe.json` as an artifact.
-  - It never overwrites `config/strategy_performance.json`; adopting that evidence is a decision.
+  - It never writes `config/`; adopting its evidence is the step above.
   - Survivorship: today's list is applied to the whole window, so every period is chosen with hindsight, and small caps are biased upward the most.
   - `--phase1-only` caches the scans. Trades carry `adv20_usd` (20-day dollar volume at the signal) for size tiers.
   - Walk-forward evidence is incremental (`WalkForwardEvidenceBook`) and matches daily re-aggregation exactly.

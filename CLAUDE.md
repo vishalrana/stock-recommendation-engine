@@ -50,7 +50,8 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code. `supabase/migration_2026_10_10_fundamentals.sql` adds those columns and the fundamentals provenance columns, and still has to be applied.
 - Yahoo blocks GitHub's runners, so fundamentals now come from SEC EDGAR first. CI needs the `SEC_USER_AGENT` repository secret (a name and contact email); without it, fundamentals fall back to Yahoo and stay mostly empty in CI. After the next run, check the "Provider health" notice.
 - The backtest universe is the 2025-02-13 cache constituents, but the window starts 2022-10-21. Results before the universe date are survivorship-inflated. The late period (from 2025-04-09) is the cleaner test; its figures are given with the latest backtest below.
-- Open decision: the earnings blackout counts calendar days, while `EARNINGS_BLACKOUT_DAYS` is documented in trading days. Even in trading days it is far shorter than the 5–25-day holding periods, so many ideas hold through an earnings report. The card warns when that happens, and the backtest cannot test it (no historical earnings calendar).
+- Earnings blackout (user-approved 2026-10-10): `EARNINGS_BLACKOUT_DAYS` now counts NYSE trading sessions after the scan date up to and including the report date (`trading_sessions_between` in `src/utils/market_date.py`, which applies the NYSE holiday rules). Before this it counted calendar days. `days_to_earnings` stays in calendar days, because that is what the card shows. The windows are still far shorter than the 5–25-day holding periods, so the card warns when earnings fall inside the holding period. The backtest cannot test the blackout (no historical earnings calendar).
+- **Universe mismatch (open):** production scans the broad US universe (5,598 common equities; about 2,750 pass the liquidity filter). The backtest universe is the 516 mostly large-cap stocks of the first cache file. Strategy evidence and reach probabilities are therefore measured on large caps but applied to small caps too, so treat the evidence as provisional for small caps.
 - CI failed on every push because `get_client()` called `sys.exit()` without secrets. This is fixed: the suite passes 40/40 with and without Supabase credentials.
 - The earlier backtest figures (−0.45% OOS expectancy) came from a harness that did not run the production pipeline, so they are superseded.
 - Latest production-pipeline backtest (2026-10-10, with 52-Week High switched off): 2,984 issued trades.
@@ -80,6 +81,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - The context score is the share of available points earned (earned ÷ available × 100). It counts only components that have data and are listed in `CONTEXT_SCORE_COMPONENTS` (`src/quant_config.py`, default: analyst + news). A missing component is excluded, never scored as 0. Rows carry `context_max_points` so the ranker uses the same denominator.
 - Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
 - News sentiment is the mean over all scored headlines, with neutral headlines counted as 0.
+- D/E display: `negative_equity` (stored with each idea) is True when total equity is zero or negative. The card then shows "Neg. equity", and a D/E above 10 is shown as ">10", with the reason on hover. Yahoo's D/E is never used for a negative-equity company, and an older D/E on an open idea is cleared once equity turns negative.
 - P/E, D/E and current ratio are display-only, refreshed nightly for every open idea, and never used in qualification. This is enforced: fundamentals are left out of `CONTEXT_SCORE_COMPONENTS`, so their points and the D/E–current-ratio distress veto cannot move the score. In the point-in-time test they carried no information at the setup level. Adding them to the score changed issued-trade returns by only +0.05%/trade beta-adjusted (CI −0.08 to +0.19); see Research findings.
 - **Fundamentals source (since 2026-10-10):** SEC EDGAR company facts come first (`src/providers/context/sec_fundamentals.py`). Yahoo `.info` only fills gaps, because Yahoo blocks GitHub's runners.
   - SEC requires a contact User-Agent. Set it in the `SEC_USER_AGENT` repository secret and in the local `.env`, never in a committed file. Without it, SEC is disabled and Yahoo alone is used.
@@ -91,7 +93,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - Each scan prints a "Provider health" GitHub notice: SEC and Yahoo success counts, and context and display-fundamentals coverage. It is readable from the run's check annotations without admin rights.
 - `supabase/migration_2026_10_10_fundamentals.sql` adds `eps_ttm`, `fundamentals_source` and `fundamentals_as_of`. It also adds the never-applied `reference_entry_price`, `weighted_scaleout_rr` and `entry_location_zone` columns, and it is idempotent.
 - Inserts drop only the specific unmigrated column the database names (`write_with_missing_column_retry`). If the logs show `[SCHEMA] Wrote without unmigrated column(s)`, apply the missing migration.
-- **Applying migrations:** once `supabase/setup_run_migration.sql` has been run in the Supabase SQL editor, `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement, using the service key from `.env` (`--dry-run` lists the statements). Migration files must be idempotent. Until that setup is done, migrations need the SQL editor.
+- **Applying migrations:** `supabase/setup_run_migration.sql` was run on 2026-10-10. Since then, `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement, using the service key from `.env` (`--dry-run` lists the statements). Applied: `migration_2026_10_10_fundamentals.sql` and `migration_2026_10_10_negative_equity.sql`. Before the setup, `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement, using the service key from `.env` (`--dry-run` lists the statements). Migration files must be idempotent. Until that setup is done, migrations need the SQL editor.
 - `get_client()` raises `SupabaseConfigError` instead of exiting, so CI can run tests without secrets.
 
 ## Strategy decisions (user-approved 2026-10-09)
@@ -159,7 +161,25 @@ Run while 52-Week High was still active. Method: one pass of `validate_backtest_
 - Every trade carries a point-in-time `beta` (252 sessions before the signal) and `beta_adjusted_pct` (net − β × SPY return over the trade window). The stats include `mean_beta_adjusted_pct` with its CI, and the summary includes `edge_beta_adjusted_verdict_*`. Judge selection skill on the beta-adjusted and vs-SPY verdicts, not on `edge_verdict_*` (absolute return).
 - The cached phase-1 scans are keyed by strategy code, indicators, data extent and `REGIME_STRATEGY_MAP`, so switching a strategy on or off forces a rescan.
 - `--variants all` (or a comma-separated list) evaluates alternatives in the same pass, against identical setups, evidence and execution. Selection variants: `rs_momentum`, `entry_info`, `rs_momentum_entry_info`, `fundamentals_in_score`. Strategy screening variants (`STRATEGY_VARIANTS`, candidate filters): `w52_off`, `w52_original_rules`, `w52_breakout`. They need 52-Week High re-enabled in `REGIME_STRATEGY_MAP`; otherwise they do nothing. A strategy variant keeps that strategy's walk-forward evidence from all its setups, so a winner must be built into the strategy and re-validated with a full run. Each variant keeps its own book, with one active idea per ticker. Results go to `outputs/production_backtest_variants.json`, with paired CIs against production. The switches live in `src/quant_config.py` (`MOMENTUM_MODEL`, `ENTRY_LOCATION_MODE`, `CONTEXT_SCORE_COMPONENTS`) and are read through `SelectionSettings` by both the scan and the backtest. `fundamentals_in_score` uses point-in-time SEC fundamentals: facts filed strictly before the signal date, with the 200-day freshness rule.
-- Known limitations (listed in its output): survivorship, no historical earnings calendar (so PEAD and the earnings blackout cannot be tested), no historical context data, no VIX history, and thresholds that were hand-tuned before the harness existed.
+- Known limitations (listed in its output): survivorship, no historical earnings calendar (so PEAD and the earnings blackout cannot be tested), no historical context data, no VIX history, and thresholds that were hand-tuned before the harness existed. The 516-stock universe is narrower than production's (see Current status).
+
+## Operations (GitHub Actions)
+
+- The repo is public, so GitHub Actions minutes on standard runners are free; the free plan's minute quota applies only to private repos. The GitHub CLI is installed and logged in (`C:\Program Files\GitHub CLI\gh.exe`, scopes repo and workflow). Use it to dispatch workflows (`gh workflow run`), read logs (`gh run view --log`) and manage secrets (`gh secret set`).
+- **Nightly scan timing (2026-10-10, about 8.4 min for the scan step):**
+
+  | Part | Time |
+  |---|---|
+  | Price download (5,598 tickers) | 277 s |
+  | Post-Earnings Drift scan | 110 s |
+  | Indicators and Pullback scan | 47 s |
+  | Scoring and context | 27 s |
+
+  - Drift: the scan answers from the preloaded earnings calendar instead of making one Supabase query per ticker.
+  - Download: it uses 200-ticker chunks with a 0.25 s pause instead of 100-ticker chunks with a 1 s sleep, and re-requests a 7-day overlap so a failed chunk heals the next night (same request count). yfinance throughput did not rise with more threads or concurrent chunks (tested), so those were not changed.
+- **Per-ticker freshness gate:** a ticker whose latest cached bar is older than the market session is never evaluated. Provider health reports `stale_tickers_skipped`.
+- **Refresh Current Ideas** restores the nightly's `data-cache-v2-*` cache and never saves one. It used its own nearly empty `v1` cache, so every idea was skipped for having too few bars and Refresh changed nothing. It now downloads its few tickers up to the market date.
+- If a GitHub run page keeps showing "in progress" after a run finished, check `gh run view <id>`. On 2026-10-10 a 46-second refresh run still showed as running in the browser after 9 minutes.
 
 ## Other docs
 

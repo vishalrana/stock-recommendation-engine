@@ -15,6 +15,7 @@ export interface Recommendation {
   eps_ttm?: number | null;
   fundamentals_source?: string | null;
   fundamentals_as_of?: string | null;
+  negative_equity?: boolean | null;
   strategy_win_rate?: number | null;
   strategy_expectancy_pct?: number | null;
   strategy_trades?: number | null;

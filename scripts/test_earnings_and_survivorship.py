@@ -38,8 +38,8 @@ def run_tests():
     # --------------------------------------------------------------------------
     # Scenario A: Earnings Filter — Trend Following
     # Ticker: AAPL, Next earnings: 2026-09-15, Scan date: 2026-09-10
-    # Strategy: trend_following (blackout = 5 days) -> Days to earnings: 5
-    # Expected: pass = False, reason: "Earnings in 5d (blackout: 5d)"
+    # Strategy: trend_following (blackout = 5 trading days) -> 5 calendar days, 3 sessions (Fri, Mon, Tue)
+    # Expected: pass = False, reason: "Earnings in 3 trading days (blackout: 5 trading days)"
     # --------------------------------------------------------------------------
     print("\n[Scenario A] Earnings Filter -- Trend Following (AAPL)")
     cal_a = {
@@ -52,8 +52,19 @@ def run_tests():
     print(f"  * Result: pass={res_a['pass']}, reason='{res_a['reason']}', days={res_a['days_to_earnings']}")
     assert res_a['pass'] is False, "Scenario A should reject"
     assert res_a['days_to_earnings'] == 5, f"Expected 5 days, got {res_a['days_to_earnings']}"
-    assert "Earnings in 5d (blackout: 5d)" in res_a['reason']
+    assert "Earnings in 3 trading days (blackout: 5 trading days)" in res_a['reason'], res_a['reason']
     print("  --> PASS Scenario A: Pre-earnings blackout correctly triggered.")
+
+    # Scenario A2: the blackout counts trading days, as EARNINGS_BLACKOUT_DAYS documents.
+    # Friday 2026-10-09 -> Friday 2026-10-16 is 7 calendar days but 5 sessions: blocked
+    # (the old calendar-day count let it through). The Monday after is 6 sessions: allowed.
+    cal_a2 = {"AAPL": {"next_earnings_date": "2026-10-16", "last_earnings_date": "2026-07-30"}}
+    res_a2 = earnings_risk_filter("AAPL", datetime.date(2026, 10, 9), "trend_following", cal_a2)
+    assert res_a2['pass'] is False and res_a2['days_to_earnings'] == 7, res_a2
+    cal_a3 = {"AAPL": {"next_earnings_date": "2026-10-19", "last_earnings_date": "2026-07-30"}}
+    res_a3 = earnings_risk_filter("AAPL", datetime.date(2026, 10, 9), "trend_following", cal_a3)
+    assert res_a3['pass'] is True, res_a3
+    print("  --> PASS Scenario A2: blackout measured in trading sessions.")
 
     # --------------------------------------------------------------------------
     # Scenario B: Earnings Filter — PEAD (Allowed)

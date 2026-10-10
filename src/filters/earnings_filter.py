@@ -1230,7 +1230,12 @@ def earnings_risk_filter(
 
     # 5. When upcoming earnings date is known
     if next_dt is not None:
+        # days_to_earnings (calendar days) is what the card shows. The blackout windows in
+        # EARNINGS_BLACKOUT_DAYS are trading days, so the gate counts NYSE sessions after the scan
+        # date up to and including the report date.
         days_to_earnings = (next_dt - scan_date).days
+        from src.utils.market_date import trading_sessions_between
+        sessions_to_earnings = trading_sessions_between(scan_date, next_dt)
         if days_to_earnings < 0:
             if is_neg_catalyst:
                 return _track_and_return({
@@ -1252,12 +1257,12 @@ def earnings_risk_filter(
                 "last_earnings_date": last_dt.isoformat() if last_dt else None,
             })
 
-        if days_to_earnings <= blackout:
+        if sessions_to_earnings <= blackout:
             if is_pos_catalyst:
-                logger.info(f"[EARNINGS RISK GATE] {ticker} ({strategy}): Positive catalyst overrides {days_to_earnings}d blackout")
+                logger.info(f"[EARNINGS RISK GATE] {ticker} ({strategy}): Positive catalyst overrides blackout (earnings in {sessions_to_earnings} trading days)")
                 return _track_and_return({
                     "pass": True,
-                    "reason": f"Positive earnings catalyst overrides {days_to_earnings}d blackout",
+                    "reason": f"Positive earnings catalyst overrides blackout (earnings in {sessions_to_earnings} trading days)",
                     "reason_code": REASON_EARNINGS_POSITIVE_CATALYST_OVERRIDE,
                     "status": EarningsStatus.KNOWN_UPCOMING.value,
                     "days_to_earnings": days_to_earnings,
@@ -1265,7 +1270,7 @@ def earnings_risk_filter(
                     "last_earnings_date": last_dt.isoformat() if last_dt else None,
                 })
             else:
-                reason_msg = f"Earnings in {days_to_earnings}d (blackout: {blackout}d)"
+                reason_msg = f"Earnings in {sessions_to_earnings} trading days (blackout: {blackout} trading days)"
                 reason_cd = REASON_EARNINGS_NEGATIVE_CATALYST_BLOCK if is_neg_catalyst else REASON_EARNINGS_BLACKOUT_BLOCK
                 logger.info(f"[EARNINGS RISK GATE] Rejected {ticker} ({strategy}): {reason_msg}")
                 return _track_and_return({

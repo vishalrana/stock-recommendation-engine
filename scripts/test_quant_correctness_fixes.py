@@ -657,5 +657,91 @@ class TestWeek52HighDecision(unittest.TestCase):
         self.assertFalse(w52_breakout(sig, frame))
 
 
+
+class TestNegativeEquityDisplay(unittest.TestCase):
+    def test_flag_from_sec_equity(self):
+        from src.providers.context.sec_fundamentals import SecFundamentals
+        self.assertTrue(SecFundamentals(total_equity=-5.9e9).negative_equity)
+        self.assertFalse(SecFundamentals(total_equity=7e6).negative_equity)
+        self.assertIsNone(SecFundamentals().negative_equity)
+
+    def test_negative_equity_never_takes_yahoo_de(self):
+        from unittest.mock import MagicMock, patch
+        from src.providers.context.metadata_provider import MetadataProvider
+        from src.providers.context.sec_fundamentals import SecFundamentals
+        sec = MagicMock()
+        sec.available = True
+        sec.fundamentals.return_value = SecFundamentals(eps_ttm=4.0, current_ratio=0.8, debt_to_equity=None,
+                                                        total_debt=70e9, total_equity=-5.9e9, balance_sheet_date="2026-06-30")
+        fake = MagicMock()
+        fake.info = {"debtToEquity": 250.0, "trailingPE": 30.0}
+        with patch("yfinance.Ticker", return_value=fake):
+            f = MetadataProvider(sec_provider=sec).get_fundamentals("NEGQ", price=120.0)
+        self.assertTrue(f.negative_equity)
+        self.assertIsNone(f.debt_to_equity)  # Yahoo's 2.5 must not stand in for an undefined ratio
+        self.assertEqual(f.trailing_pe, 30.0)  # 120 / 4
+
+    def test_yahoo_negative_de_means_negative_equity(self):
+        from unittest.mock import MagicMock, patch
+        from src.providers.context.metadata_provider import MetadataProvider
+        from src.providers.context.sec_fundamentals import SecFundamentalsProvider
+        fake = MagicMock()
+        fake.info = {"debtToEquity": -310.0, "currentRatio": 1.1}
+        with patch("yfinance.Ticker", return_value=fake):
+            f = MetadataProvider(sec_provider=SecFundamentalsProvider(user_agent="")).get_fundamentals("NEGY", price=50.0)
+        self.assertTrue(f.negative_equity)
+        self.assertIsNone(f.debt_to_equity)
+
+    def test_display_fields_carry_flag(self):
+        from jobs.generate_signals import _fundamentals_fields
+        from src.providers.base import FundamentalContext, DataQuality
+        out = _fundamentals_fields(FundamentalContext(current_ratio=0.65, quality=DataQuality.VALID, source="sec",
+                                                      negative_equity=True))
+        self.assertIs(out["negative_equity"], True)
+        self.assertIsNone(out["de_ratio"])
+
+
+class TestTradingDayBlackout(unittest.TestCase):
+    def test_trading_sessions_between(self):
+        from src.utils.market_date import trading_sessions_between as sessions
+        self.assertEqual(sessions(date(2026, 10, 9), date(2026, 10, 14)), 3)   # Fri -> Wed: Mon, Tue, Wed
+        self.assertEqual(sessions(date(2026, 10, 9), date(2026, 10, 16)), 5)   # 7 calendar days
+        self.assertEqual(sessions(date(2026, 11, 24), date(2026, 11, 30)), 3)  # Thanksgiving closed
+        self.assertEqual(sessions(date(2027, 3, 24), date(2027, 3, 29)), 2)    # Good Friday closed
+        self.assertEqual(sessions(date(2026, 7, 2), date(2026, 7, 6)), 1)      # July 4 observed Friday 3rd
+        self.assertEqual(sessions(date(2026, 10, 9), date(2026, 10, 9)), 0)
+
+    def test_blackout_counts_trading_days(self):
+        from src.filters.earnings_filter import earnings_risk_filter
+        cal = {"ZZZ": {"next_earnings_date": "2026-10-16", "last_earnings_date": "2026-07-30"}}
+        res = earnings_risk_filter("ZZZ", date(2026, 10, 9), "trend_following", cal)
+        self.assertFalse(res["pass"])                 # 5 sessions <= 5-day blackout
+        self.assertEqual(res["days_to_earnings"], 7)  # calendar days, as displayed
+        self.assertIn("5 trading days", res["reason"])
+
+
+class TestScanRuntimeFixes(unittest.TestCase):
+    def test_pead_uses_preloaded_calendar_only(self):
+        from unittest.mock import patch
+        from jobs.strategies.pead import get_last_earnings_date
+        cal = {"AAA": {"next_earnings_date": "2026-11-01", "last_earnings_date": None},
+               "BBB": {"last_earnings_date": "2026-10-06"}}
+        with patch("src.utils.earnings_cache.get_ticker_earnings", side_effect=AssertionError("per-ticker lookup")) as fallback:
+            self.assertIsNone(get_last_earnings_date("AAA", as_of_date=date(2026, 10, 9), earnings_calendar=cal))
+            self.assertEqual(get_last_earnings_date("BBB", as_of_date=date(2026, 10, 9), earnings_calendar=cal), date(2026, 10, 6))
+            fallback.assert_not_called()
+
+    def test_refresh_cache_chunking_and_pause(self):
+        from unittest.mock import patch
+        from src.data import cache_manager as cm
+        mgr = cm.CacheManager.__new__(cm.CacheManager)
+        calls = []
+        with patch.object(cm.CacheManager, "download_batch_with_retry", lambda self, t, s, e: calls.append(len(t)) or pd.DataFrame()), \
+             patch.object(cm.time, "sleep") as sleep:
+            mgr.refresh_cache([f"T{i}" for i in range(450)], "2026-10-01", "2026-10-09")
+        self.assertEqual(calls, [200, 200, 50])
+        self.assertTrue(all(c.args[0] == cm.REFRESH_CHUNK_PAUSE_S for c in sleep.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()

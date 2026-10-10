@@ -214,12 +214,14 @@ def test_5_earnings_blackout_windows():
         assert EARNINGS_BLACKOUT_DAYS[strat] == days, f"Blackout days mismatch for {strat}: got {EARNINGS_BLACKOUT_DAYS[strat]}, expected {days}"
 
     # Test blackout evaluation logic via earnings_risk_filter
-    scan_date = datetime.date(2026, 9, 4)
-    cal = {"AAPL": {"next_earnings_date": (scan_date + datetime.timedelta(days=4)).isoformat()}}
-    # Ticker earnings in 4 days:
-    # Trend (5d) -> pass is False (in blackout)
-    # Pullback (3d) -> pass is True (NOT in blackout)
-    # PEAD (0d) -> pass is True (NOT in blackout)
+    # Blackout windows are trading days. Thursday 2026-09-10 -> Wednesday 2026-09-16 is 4 sessions
+    # (Fri, Mon, Tue, Wed); no holiday in between.
+    scan_date = datetime.date(2026, 9, 10)
+    cal = {"AAPL": {"next_earnings_date": "2026-09-16"}}
+    # Ticker earnings in 4 trading days:
+    # Trend (5 sessions) -> pass is False (in blackout)
+    # Pullback (3 sessions) -> pass is True (NOT in blackout)
+    # PEAD (0) -> pass is True (NOT in blackout)
     assert earnings_risk_filter("AAPL", scan_date, "trend_following", earnings_calendar=cal)["pass"] is False
     assert earnings_risk_filter("AAPL", scan_date, "pullback_recovery", earnings_calendar=cal)["pass"] is True
     assert earnings_risk_filter("AAPL", scan_date, "pead", earnings_calendar=cal)["pass"] is True

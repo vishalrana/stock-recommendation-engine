@@ -47,7 +47,7 @@ class TestEarningsFailsafe(unittest.TestCase):
         res = earnings_risk_filter("AAPL", self.scan_date, "trend_following", cal)
         self.assertFalse(res["pass"], "Earnings in 3 days must fail Trend Following blackout (5d)")
         self.assertEqual(res["days_to_earnings"], 3)
-        self.assertIn("blackout: 5d", res["reason"])
+        self.assertIn("blackout: 5 trading days", res["reason"])  # 3 sessions (Wed-Fri) <= 5
 
     def test_2_upcoming_earnings_beyond_blackout_passed(self):
         # Trend Following blackout = 5 days. Earnings in 10 days -> PASSED

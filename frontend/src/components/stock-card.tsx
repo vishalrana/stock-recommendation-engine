@@ -96,12 +96,22 @@ export default function StockCard({
   const isLossMaker = (recommendation.pe_ratio === null || recommendation.pe_ratio === undefined)
     && epsTtm !== null && epsTtm !== undefined && !isNaN(Number(epsTtm)) && Number(epsTtm) <= 0;
   const peDisplay = isLossMaker ? 'Loss' : fmtRatio(recommendation.pe_ratio, 1);
-  const fundamentalsTitle = recommendation.fundamentals_source
-    ? `Source: ${recommendation.fundamentals_source.replace('sec', 'SEC filings').replace('yahoo', 'Yahoo')}`
-      + (recommendation.fundamentals_as_of ? `, balance sheet as of ${recommendation.fundamentals_as_of}` : '')
-      + (isLossMaker ? ' (trailing 12-month EPS is negative, so P/E is not meaningful)' : '')
-    : undefined;
-  const deDisplay = fmtRatio(recommendation.de_ratio, 2);
+  // D/E is not meaningful when equity is negative, or so small (e.g. after large buybacks) that
+  // the ratio explodes; show that instead of a misleading number.
+  const negativeEquity = recommendation.negative_equity === true;
+  const deNum = recommendation.de_ratio !== null && recommendation.de_ratio !== undefined && !isNaN(Number(recommendation.de_ratio))
+    ? Number(recommendation.de_ratio) : null;
+  const deExtreme = !negativeEquity && deNum !== null && deNum > 10;
+  const titleParts: string[] = [];
+  if (recommendation.fundamentals_source) {
+    titleParts.push(`Source: ${recommendation.fundamentals_source.replace('sec', 'SEC filings').replace('yahoo', 'Yahoo')}`
+      + (recommendation.fundamentals_as_of ? `, balance sheet as of ${recommendation.fundamentals_as_of}` : ''));
+  }
+  if (isLossMaker) titleParts.push('Trailing 12-month EPS is negative, so P/E is not meaningful');
+  if (negativeEquity) titleParts.push('Total equity is negative (often after buybacks or losses), so D/E is not meaningful');
+  if (deExtreme && deNum !== null) titleParts.push(`D/E is ${deNum.toFixed(0)}: equity is very small relative to debt, so the ratio is not meaningful`);
+  const fundamentalsTitle = titleParts.length ? titleParts.join('. ') : undefined;
+  const deDisplay = negativeEquity ? 'Neg. equity' : deExtreme ? '>10' : fmtRatio(recommendation.de_ratio, 2);
   const crDisplay = fmtRatio(recommendation.current_ratio, 2);
 
   const t1 = recommendation.target_1 ? Number(recommendation.target_1).toFixed(2) : null;
@@ -193,6 +203,7 @@ export default function StockCard({
   const de = recommendation.de_ratio;
   const cr = recommendation.current_ratio;
   if (
+    !negativeEquity &&
     de !== null &&
     de !== undefined &&
     cr !== null &&

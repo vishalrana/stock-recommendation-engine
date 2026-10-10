@@ -99,6 +99,13 @@ class SecFundamentals:
     def has_data(self) -> bool:
         return any(v is not None for v in (self.eps_ttm, self.current_ratio, self.debt_to_equity))
 
+    @property
+    def negative_equity(self) -> Optional[bool]:
+        """True when total equity is zero or negative (D/E is then undefined); None when unknown."""
+        if self.total_equity is None:
+            return None
+        return self.total_equity <= 0
+
 
 # ----------------------------------------------------------------------------
 # Pure extraction (unit-testable, point-in-time aware)

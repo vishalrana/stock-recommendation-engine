@@ -45,6 +45,7 @@ class FundamentalContext:
     source: Optional[str] = None            # "sec", "yahoo" or "sec+yahoo"
     eps_ttm: Optional[float] = None
     balance_sheet_date: Optional[str] = None
+    negative_equity: Optional[bool] = None  # equity <= 0: D/E undefined (shown as "Neg. equity")
 
 @dataclass
 class EarningsContext:

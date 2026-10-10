@@ -126,6 +126,11 @@ REGIME_STRATEGY_MAP = {
 }
 
 BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
+
+# Incremental downloads re-request the last week as well. Yahoo serves a ticker's whole date
+# range in one request, so the overlap costs no extra requests and refills any bars a failed
+# chunk missed on an earlier run.
+INCREMENTAL_OVERLAP_DAYS = 7
 TOP_N = 3
 
 logging.basicConfig(
@@ -409,18 +414,19 @@ REFRESHABLE_ANALYTICS_FIELDS = (
     "composite_score", "score", "quality_score", "tier_label",
     "current_rsi", "volume_ratio", "adx_value", "macd_histogram", "ema20",
     "pe_ratio", "de_ratio", "current_ratio", "eps_ttm", "fundamentals_source", "fundamentals_as_of",
+    "negative_equity",
 )
 
 # Columns added by migration_lifecycle_replay_and_pe.sql; dropped and retried if not yet migrated.
 OPTIONAL_LIFECYCLE_COLUMNS = ("entry_fill_price", "position_state", "current_stop", "pe_ratio",
-                              "eps_ttm", "fundamentals_source", "fundamentals_as_of")
+                              "eps_ttm", "fundamentals_source", "fundamentals_as_of", "negative_equity")
 
 # Insert columns added by later migrations; dropped and retried if the table is not yet migrated.
 OPTIONAL_INSERT_COLUMNS = (
     "reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "pe_ratio",
     "reach_prob_t1_ci_low", "reach_prob_t1_ci_high", "reach_prob_effective_samples",
     "reach_prob_source", "strategy_win_rate", "strategy_expectancy_pct", "strategy_trades",
-    "eps_ttm", "fundamentals_source", "fundamentals_as_of",
+    "eps_ttm", "fundamentals_source", "fundamentals_as_of", "negative_equity",
 )
 
 # Used only when a recommendation's strategy is unknown (no holding period to apply).
@@ -506,7 +512,8 @@ def report_provider_health() -> str:
 _DISPLAY_METADATA = None
 
 
-DISPLAY_FUNDAMENTAL_FIELDS = ("pe_ratio", "de_ratio", "current_ratio", "eps_ttm", "fundamentals_source", "fundamentals_as_of")
+DISPLAY_FUNDAMENTAL_FIELDS = ("pe_ratio", "de_ratio", "current_ratio", "eps_ttm", "fundamentals_source",
+                              "fundamentals_as_of", "negative_equity")
 
 
 def _fundamentals_fields(f) -> Dict[str, Any]:
@@ -522,6 +529,7 @@ def _fundamentals_fields(f) -> Dict[str, Any]:
             out[key] = None
     out["fundamentals_source"] = f.source
     out["fundamentals_as_of"] = f.balance_sheet_date
+    out["negative_equity"] = f.negative_equity
     return out
 
 
@@ -703,6 +711,8 @@ def reconcile_recommendation_lifecycle(
                 for k, v in fund.items():
                     if k not in update_fields and v is not None:
                         update_fields[k] = v
+                if fund.get("negative_equity") is True:
+                    update_fields["de_ratio"] = None  # an older D/E must not outlive negative equity
             try:
                 _safe_signal_update(supabase, signal_id, update_fields)
             except Exception as ana_err:
@@ -891,9 +901,12 @@ def run_scan(
 
     elif cache_mode == "incremental":
         last_cached = cache_manager.get_last_cached_date()
-        if last_cached:
-            start_date_dt = last_cached + timedelta(days=1)
-            logger.info(f"INCREMENTAL: Downloading from {start_date_dt} to {end_date_dt} (last cached: {last_cached})")
+        if last_cached and last_cached >= end_date_dt:
+            start_date_dt = end_date_dt + timedelta(days=1)  # already current: nothing to download
+            logger.info(f"INCREMENTAL: Cache already covers {end_date_dt}.")
+        elif last_cached:
+            start_date_dt = last_cached - timedelta(days=INCREMENTAL_OVERLAP_DAYS)
+            logger.info(f"INCREMENTAL: Downloading from {start_date_dt} to {end_date_dt} (last cached: {last_cached}, {INCREMENTAL_OVERLAP_DAYS}-day overlap)")
         else:
             start_date_dt = end_date_dt - timedelta(days=500)
             logger.info(f"INCREMENTAL: No cache found. Full download from {start_date_dt} to {end_date_dt}")
@@ -910,9 +923,11 @@ def run_scan(
             logger.info(f"LOCAL: No cache found. Full download from {start_date_dt}...")
             cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
             logger.info(f"Local refresh completed in {time.time() - t_download_start:.1f}s")
-        elif not dry_run and cache_manager.is_stale(max_age_trading_days=2):
-            start_date_dt = last_cached + timedelta(days=1)
-            logger.info(f"LOCAL: Cache stale (last: {last_cached}). Downloading {start_date_dt} to {end_date_dt}...")
+        elif not dry_run and (cache_manager.is_stale(max_age_trading_days=2) or (is_targeted and last_cached < end_date_dt)):
+            # A targeted refresh only needs its few tickers, so it always brings them up to the
+            # market date (the per-ticker freshness gate below would otherwise skip them).
+            start_date_dt = last_cached - timedelta(days=INCREMENTAL_OVERLAP_DAYS)
+            logger.info(f"LOCAL: Cache behind (last: {last_cached}). Downloading {start_date_dt} to {end_date_dt}...")
             cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
             logger.info(f"Local refresh completed in {time.time() - t_download_start:.1f}s")
         else:
@@ -1026,6 +1041,9 @@ def run_scan(
 
     # Indicator cache across strategy passes to prevent redundant DataFrame calculations
     evaluated_dfs: dict = {}
+    # Tickers whose latest cached bar is older than the market session (e.g. a failed download
+    # chunk): never evaluated, so no signal can be issued from stale bars.
+    stale_bar_tickers: Set[str] = set()
 
     for strategy in STRATEGIES:
         if hasattr(strategy, "set_earnings_calendar"):
@@ -1077,6 +1095,11 @@ def run_scan(
                 else:
                     raw = cache_manager.get_ticker_history(ticker, preload_start_str, preload_end_str)
                     if raw is None or raw.empty:
+                        evaluated_dfs[ticker] = None
+                        continue
+
+                    if pd.Timestamp(raw.index[-1]).date() < scan_date_dt:
+                        stale_bar_tickers.add(ticker)
                         evaluated_dfs[ticker] = None
                         continue
 
@@ -1176,6 +1199,12 @@ def run_scan(
         scanned_count,
         signals_qualified,
     )
+    PROVIDER_HEALTH["price_data"] = {"stale_tickers_skipped": len(stale_bar_tickers)}
+    if stale_bar_tickers:
+        logger.warning(
+            "[FRESHNESS] Skipped %d tickers whose latest bar is older than %s: %s",
+            len(stale_bar_tickers), scan_date_dt, ", ".join(sorted(stale_bar_tickers)[:20]),
+        )
 
     ranked_signals: list[dict] = []
     error_msg = None
@@ -1615,6 +1644,7 @@ def run_scan(
                     "eps_ttm": sig.get("eps_ttm"),
                     "fundamentals_source": sig.get("fundamentals_source"),
                     "fundamentals_as_of": sig.get("fundamentals_as_of"),
+                    "negative_equity": sig.get("negative_equity"),
                 }
             )
     else:
@@ -1797,6 +1827,7 @@ def run_scan(
                         "eps_ttm": sig.get("eps_ttm"),
                         "fundamentals_source": sig.get("fundamentals_source"),
                         "fundamentals_as_of": sig.get("fundamentals_as_of"),
+                        "negative_equity": sig.get("negative_equity"),
                     })
                 
                 # Direct persistence with full schema parity and exact instance identity.

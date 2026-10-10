@@ -69,3 +69,44 @@ def get_trading_days_ago(n_days: int, as_of: Optional[datetime.date] = None) -> 
         if current.weekday() < 5:  # Mon-Fri
             days_counted += 1
     return current
+
+
+# ------------------------------------------------------------------------------
+# NYSE trading sessions (for windows measured in trading days)
+# ------------------------------------------------------------------------------
+def _nyse_holidays(start: datetime.date, end: datetime.date) -> list:
+    """NYSE full-day holidays between start and end (inclusive), from the exchange's standing rules."""
+    from pandas.tseries.holiday import (
+        AbstractHolidayCalendar, GoodFriday, Holiday, USLaborDay, USMartinLutherKingJr,
+        USMemorialDay, USPresidentsDay, USThanksgivingDay, nearest_workday, sunday_to_monday,
+    )
+
+    class _NYSECalendar(AbstractHolidayCalendar):
+        rules = [
+            Holiday("NewYearsDay", month=1, day=1, observance=sunday_to_monday),  # no Friday close for a Saturday Jan 1
+            USMartinLutherKingJr,
+            USPresidentsDay,
+            GoodFriday,
+            USMemorialDay,
+            Holiday("Juneteenth", month=6, day=19, start_date="2022-01-01", observance=nearest_workday),
+            Holiday("IndependenceDay", month=7, day=4, observance=nearest_workday),
+            USLaborDay,
+            USThanksgivingDay,
+            Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+        ]
+
+    return [d.date() for d in _NYSECalendar().holidays(start=start, end=end)]
+
+
+def trading_sessions_between(start: datetime.date, end: datetime.date) -> int:
+    """
+    NYSE trading sessions after `start` up to and including `end` (0 when end <= start).
+    Example: from Friday to the following Wednesday is 3 sessions (Mon, Tue, Wed).
+    """
+    import numpy as np
+
+    if end <= start:
+        return 0
+    begin = start + datetime.timedelta(days=1)
+    stop = end + datetime.timedelta(days=1)
+    return int(np.busday_count(begin, stop, holidays=_nyse_holidays(begin, end)))

@@ -17,7 +17,12 @@ def get_last_earnings_date(
     supabase=None,
     allow_network: bool = False,
 ) -> Optional[datetime.date]:
-    """Fetch last earnings date from shared calendar map, local cache, or Supabase. Returns datetime.date or None."""
+    """
+    Fetch last earnings date from shared calendar map, local cache, or Supabase. Returns datetime.date or None.
+    A ticker present in the preloaded calendar map is answered from that record alone: the map is
+    built from the same local cache / Supabase rows, so falling through only repeated one Supabase
+    query per ticker (about 110 s per nightly scan for no new information).
+    """
     ticker_upper = ticker.strip().upper()
     if earnings_calendar and ticker_upper in earnings_calendar:
         rec = earnings_calendar[ticker_upper]
@@ -29,6 +34,7 @@ def get_last_earnings_date(
                     return parsed
             except Exception:
                 pass
+        return None
 
     from src.utils.earnings_cache import get_ticker_earnings
     last_e_str, _ = get_ticker_earnings(ticker_upper, as_of_date=as_of_date, supabase=supabase, allow_network=allow_network)

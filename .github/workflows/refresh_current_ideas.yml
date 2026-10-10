@@ -56,13 +56,17 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Cache Data Files
-        uses: actions/cache@v4
+      # Restore the nightly scan's price and fundamentals cache. Restore only, never save: a
+      # targeted refresh updates a handful of tickers and must not become the cache the nightly
+      # scan restores. (The old separate "v1" cache held almost no history, so every idea was
+      # skipped as having too few bars and the refresh changed nothing.)
+      - name: Restore Data Cache (from nightly scan)
+        uses: actions/cache/restore@v4
         with:
           path: data/cache
-          key: ${{ runner.os }}-data-cache-v1-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-data-cache-v2-refresh-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-data-cache-v1-
+            ${{ runner.os }}-data-cache-v2-
 
       - name: Install Dependencies
         run: |

@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 CACHE_VERSION = "2"
 DEFAULT_BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
+# Bulk refresh tuning. yfinance fetches each ticker separately and its throughput did not rise
+# with more threads or concurrent chunks (tested 2026-10-10), so the gains are fewer chunks and a
+# short pause between them instead of a fixed 1 s sleep. Rate-limited chunks still back off.
+REFRESH_BATCH_SIZE = int(os.environ.get("REFRESH_BATCH_SIZE", "200"))
+REFRESH_CHUNK_PAUSE_S = float(os.environ.get("REFRESH_CHUNK_PAUSE_S", "0.25"))
 
 class CacheManager:
     """Manages date-partitioned price data cache with batch downloads and in-memory preloading."""
@@ -181,8 +186,8 @@ class CacheManager:
 
         logger.info(f"Downloading data for {len(tickers)} tickers from {start_date} to {end_date}...")
         
-        # Primary attempt: Download all tickers at once if small batch
-        if len(tickers) <= 100:
+        # Primary attempt: download the whole chunk at once
+        if len(tickers) <= max(REFRESH_BATCH_SIZE, 100):
             full_df = _fetch(tickers)
             if not full_df.empty:
                 return full_df
@@ -237,7 +242,7 @@ class CacheManager:
             logger.error(f"Failed to transform and cache dataframe: {e}", exc_info=True)
             return 0
 
-    def refresh_cache(self, tickers: List[str], start_date: str, end_date: str, batch_size: int = 100) -> None:
+    def refresh_cache(self, tickers: List[str], start_date: str, end_date: str, batch_size: Optional[int] = None) -> None:
         """
         Fetch data for multiple tickers, transform to MultiIndex, and cache by date.
         Processes in manageable chunks to ensure low memory usage and fault tolerance.
@@ -248,6 +253,7 @@ class CacheManager:
         """
         if not tickers:
             return
+        batch_size = batch_size or REFRESH_BATCH_SIZE
         end_date = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
         # Process in chunks of batch_size
@@ -264,7 +270,7 @@ class CacheManager:
                 logger.info(f"[CACHE SYNC] Chunk {chunk_num}/{total_chunks} ingested ({dates_updated} dates updated).")
             else:
                 logger.warning(f"[CACHE SYNC] Chunk {chunk_num}/{total_chunks} returned no data.")
-            time.sleep(1)
+            time.sleep(REFRESH_CHUNK_PAUSE_S)
 
     def preload_history(self, start_date: str, end_date: str) -> int:
         """

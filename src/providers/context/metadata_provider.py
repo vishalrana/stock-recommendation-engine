@@ -88,6 +88,7 @@ class MetadataProvider:
         """
         de = cr = pe = eps = None
         bs_date = None
+        negative_equity = None
         sources = []
         sec = None
         if self._sec is not None and self._sec.available:
@@ -98,6 +99,7 @@ class MetadataProvider:
                 sec = None
         if sec is not None and sec.has_data():
             de, cr, eps, bs_date = sec.debt_to_equity, sec.current_ratio, sec.eps_ttm, sec.balance_sheet_date
+            negative_equity = sec.negative_equity
             pe = sec.pe_ratio(price)
             sources.append("sec")
             self.stats["sec_ok"] += 1
@@ -107,14 +109,18 @@ class MetadataProvider:
         # Yahoo only for values SEC could not provide. A loss-maker legitimately has no P/E,
         # so a known non-positive EPS is not a gap.
         pe_gap = pe is None and not (eps is not None and eps <= 0)
-        if de is None or cr is None or pe_gap:
+        de_gap = de is None and negative_equity is not True
+        if de_gap or cr is None or pe_gap:
             info = self._get_info(ticker)
             if info is not None:
                 raw_de = _finite(info.get('debtToEquity'))  # Yahoo reports D/E in percent (103.3 -> 1.033)
                 y_cr, y_pe = _finite(info.get('currentRatio')), _finite(info.get('trailingPE'))
                 filled = False
-                if de is None and raw_de is not None:
-                    de, filled = raw_de / 100.0, True
+                if de_gap and raw_de is not None:
+                    if raw_de < 0:  # Yahoo reports negative D/E when equity is negative
+                        negative_equity, filled = True, True
+                    else:
+                        de, filled = raw_de / 100.0, True
                 if cr is None and y_cr is not None:
                     cr, filled = y_cr, True
                 if pe_gap and y_pe is not None:
@@ -132,4 +138,5 @@ class MetadataProvider:
             source="+".join(sources),
             eps_ttm=eps,
             balance_sheet_date=bs_date,
+            negative_equity=negative_equity,
         )

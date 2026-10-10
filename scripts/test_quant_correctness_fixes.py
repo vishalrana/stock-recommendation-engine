@@ -11,6 +11,7 @@ Locks in the fixes from the October 2026 math review:
 7. Reach probability: effective sample size and Wilson interval reflect overlapping windows.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -766,6 +767,265 @@ class TestWalkForwardEvidenceBook(unittest.TestCase):
                          "has_t2": rng.random() < 0.8, "has_t3": rng.random() < 0.5, "exit_date": exit_day}
                 closed.append(trade)
                 book.add(trade)
+
+
+
+class TestStrategyEvidenceVsSpy(unittest.TestCase):
+    def _trades(self):
+        return [
+            {"strategy": "Trend Following", "net_return_pct": 2.0, "outcome": "hit_t1", "has_t2": True, "has_t3": False,
+             "beta_adjusted_pct": 1.0, "excess_vs_spy_pct": 1.5},
+            {"strategy": "Trend Following", "net_return_pct": -1.0, "outcome": "stopped", "has_t2": True, "has_t3": False,
+             "beta_adjusted_pct": -2.0, "excess_vs_spy_pct": float("nan")},
+            {"strategy": "Trend Following", "net_return_pct": 0.5, "outcome": "expired", "has_t2": False, "has_t3": False},
+        ]
+
+    def test_aggregation_adds_display_only_sums(self):
+        from src.strategy_evidence import aggregate_trades, evidence_from_aggregate
+        agg = aggregate_trades(self._trades())["trend_following"]
+        self.assertEqual((agg["trades"], agg["beta_adjusted_n"], agg["excess_vs_spy_n"]), (3, 2, 1))
+        self.assertAlmostEqual(agg["sum_beta_adjusted"], -1.0)
+        self.assertAlmostEqual(agg["sum_excess_vs_spy"], 1.5)
+        ev = evidence_from_aggregate("trend_following", agg)
+        self.assertEqual((ev.raw_beta_adjusted_expectancy, ev.raw_excess_vs_spy_expectancy), (-0.5, 1.5))
+        self.assertAlmostEqual(ev.raw_expectancy, 0.5)
+
+    def test_scoring_ignores_vs_spy_fields(self):
+        from src.strategy_evidence import aggregate_trades, evidence_from_aggregate
+        from src.pipeline_steps import prepare_candidate_scores, composite_score
+        agg = aggregate_trades(self._trades())["trend_following"]
+        tweaked = dict(agg, sum_beta_adjusted=999.0, sum_excess_vs_spy=-999.0)
+        scores = []
+        for a in (agg, tweaked):
+            ev = {"trend_following": evidence_from_aggregate("trend_following", a)}
+            sig = {"ticker": "EVQ", "strategy": "Trend Following", "current_rsi": 60.0, "price": 100.0, "entry_price": 100.0,
+                   "dma_50": 95.0, "volume_ratio": 1.2, "macd_histogram": 0.5, "atr_14": 2.0, "context_available": False}
+            prepare_candidate_scores(sig, "bull", ev)
+            self.assertIsNone(composite_score(sig, "bull", SignalRanker()))
+            scores.append(sig["composite_score"])
+        self.assertEqual(scores[0], scores[1])
+        self.assertEqual(sig["strategy_beta_adjusted_pct"], round(999.0 / 2, 4))  # carried for the card only
+
+    def test_rows_carry_the_new_evidence_fields(self):
+        import ast
+        tree = ast.parse(open(os.path.join(PROJECT_ROOT, "jobs", "generate_signals.py"), encoding="utf-8").read())
+        keys = {"ranked_signals": set(), "history_rows": set()}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "append"
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id in keys
+                    and node.args and isinstance(node.args[0], ast.Dict)):
+                keys[node.func.value.id] |= {k.value for k in node.args[0].keys if isinstance(k, ast.Constant)}
+        for name, found in keys.items():
+            self.assertTrue({"strategy_beta_adjusted_pct", "strategy_excess_vs_spy_pct"} <= found, name)
+
+
+class TestAdoptStrategyEvidence(unittest.TestCase):
+    def _artifact(self, tmp):
+        from src.strategy_evidence import aggregate_trades
+        rows = [
+            {"strategy": "Pullback Recovery", "net_return_pct": 1.25, "outcome": "hit_t1", "has_t2": True, "has_t3": True,
+             "beta_adjusted_pct": 0.5, "excess_vs_spy_pct": 0.25},
+            {"strategy": "Pullback Recovery", "net_return_pct": -0.75, "outcome": "stopped", "has_t2": True, "has_t3": False,
+             "beta_adjusted_pct": None, "excess_vs_spy_pct": -1.0},
+            {"strategy": "Mean Reversion", "net_return_pct": 0.1, "outcome": "expired", "has_t2": False, "has_t3": False,
+             "beta_adjusted_pct": 0.05, "excess_vs_spy_pct": 0.0},
+        ]
+        pd.DataFrame(rows).to_csv(os.path.join(tmp, "production_backtest_setup_trades_production_universe.csv"), index=False)
+        legacy = {k: {f: v[f] for f in ("trades", "wins", "sum_return", "t1_hits", "t1_n", "t2_hits", "t2_n", "t3_hits", "t3_n")}
+                  for k, v in aggregate_trades(rows).items()}
+        doc = {"metadata": {"evidence_as_of": "2026-10-09"}, "strategy_evidence": legacy}
+        with open(os.path.join(tmp, "strategy_performance_production_universe.json"), "w") as f:
+            json.dump(doc, f)
+        return doc
+
+    def test_match_and_write(self):
+        import tempfile
+        import scripts.adopt_strategy_evidence as adopt
+        with tempfile.TemporaryDirectory() as tmp:
+            self._artifact(tmp)
+            out = os.path.join(tmp, "config_out.json")
+            with patch_argv(["adopt", tmp, "--run-id", "123", "--out", out]):
+                self.assertEqual(adopt.main(), 0)
+            written = json.load(open(out))
+            self.assertEqual(written["metadata"]["adopted_from"]["run_id"], "123")
+            pb = written["strategy_evidence"]["pullback_recovery"]
+            self.assertEqual((pb["trades"], pb["beta_adjusted_n"], pb["excess_vs_spy_n"]), (2, 1, 2))
+
+    def test_mismatch_writes_nothing(self):
+        import tempfile
+        import scripts.adopt_strategy_evidence as adopt
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = self._artifact(tmp)
+            doc["strategy_evidence"]["mean_reversion"]["wins"] = 0  # the run's own file disagrees with its CSV
+            with open(os.path.join(tmp, "strategy_performance_production_universe.json"), "w") as f:
+                json.dump(doc, f)
+            out = os.path.join(tmp, "config_out.json")
+            with patch_argv(["adopt", tmp, "--run-id", "123", "--out", out]):
+                self.assertEqual(adopt.main(), 1)
+            self.assertFalse(os.path.exists(out))
+
+    def test_cache_start_run_never_writes_config(self):
+        import scripts.validate_backtest_pipeline as harness
+        self.assertFalse(hasattr(harness, "EVIDENCE_OUT"))
+        src = open(harness.__file__, encoding="utf-8").read()
+        self.assertIn("strategy_performance{suffix or '_cache_start'}.json", src)
+
+
+class TestUniverseFallback(unittest.TestCase):
+    def test_benchmark_has_no_csv_fallback(self):
+        from unittest.mock import patch
+        import jobs.generate_signals as gs
+        with patch.object(gs.requests, "get", side_effect=OSError("wikipedia down")), \
+             patch.object(gs.pd, "read_csv", side_effect=AssertionError("CSV fallback used")):
+            self.assertEqual(gs.load_sp500_nasdaq_universe(), ([], {}, {}))
+
+    def test_neither_universe_loads(self):
+        from unittest.mock import MagicMock, patch
+        import jobs.generate_signals as gs
+        provider = MagicMock()
+        provider.get_universe.return_value = []
+        with patch.object(gs, "USEquitiesUniverseProvider", return_value=provider), \
+             patch.object(gs.requests, "get", side_effect=OSError("wikipedia down")):
+            tickers, _, _ = gs.load_universe("expanded")
+        self.assertEqual(tickers, [])
+        self.assertTrue(gs.LAST_UNIVERSE_IS_FALLBACK)
+
+    def test_degraded_status_is_logged(self):
+        from unittest.mock import MagicMock
+        import jobs.generate_signals as gs
+        client = MagicMock()
+        res = gs.record_universe_unavailable(client, "2026-10-09", "bull", dry_run=False, tracked=3)
+        self.assertEqual(res["status"], "degraded_universe")
+        row = client.table.return_value.upsert.call_args.args[0]
+        self.assertEqual((row["status"], row["signals_recommended"]), ("degraded_universe", 0))
+        client.table.assert_called_with("scan_log")
+
+    def test_open_idea_tickers(self):
+        from unittest.mock import MagicMock
+        import jobs.generate_signals as gs
+        client = MagicMock()
+        client.table.return_value.select.return_value.in_.return_value.execute.return_value.data = [
+            {"ticker": "aaa"}, {"ticker": "BBB"}, {"ticker": "AAA"}]
+        self.assertEqual(gs.open_idea_tickers(client), ["AAA", "BBB"])
+
+
+class _FakeQuery:
+    def __init__(self, store, table):
+        self.store, self.table, self.mode, self.rng, self.counting = store, table, "select", None, False
+
+    def select(self, *_a, count=None):
+        self.counting = count == "exact"
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def order(self, _col):
+        return self
+
+    def range(self, a, b):
+        self.rng = (a, b)
+        return self
+
+    def delete(self):
+        self.mode = "delete"
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, _col, _val):
+        return self
+
+    def execute(self):
+        rows = self.store.setdefault(self.table, [])
+        out = type("Res", (), {})()
+        if self.mode == "delete":
+            self.store.setdefault("_deleted", []).append(self.table)
+            self.store[self.table] = []
+            out.data, out.count = [], 0
+            return out
+        out.count = len(rows) if self.counting else None
+        out.data = rows[self.rng[0]: self.rng[1] + 1] if self.rng else rows[:1]
+        return out
+
+
+class _FakeClient:
+    def __init__(self, store):
+        self.store = store
+
+    def table(self, name):
+        return _FakeQuery(self.store, name)
+
+
+class TestClearAndResetDb(unittest.TestCase):
+    TABLES = {"signals": ["id"], "signals_history": ["id"], "scan_log": ["id"], "context_cache": ["ticker"],
+              "old_unused_table": ["id"], "earnings_calendar": ["ticker"], "ticker_metrics": ["id"],
+              "delisted_tickers": ["ticker"], "other_table": ["id"]}
+
+    def _store(self):
+        return {t: [{"id": i} for i in range(n)] for t, n in
+                (("signals", 2500), ("signals_history", 30), ("scan_log", 4), ("context_cache", 2), ("old_unused_table", 1),
+                 ("earnings_calendar", 7), ("ticker_metrics", 5), ("delisted_tickers", 3), ("other_table", 6))}
+
+    def _run(self, argv, store, tmp):
+        from unittest.mock import patch
+        import scripts.clear_and_reset_db as reset
+        with patch.object(reset, "api_relations", return_value=(dict(self.TABLES), ["a_view"])), \
+             patch.object(reset, "EMPTY_DECOMMISSIONED", ("old_unused_table",)), \
+             patch.object(reset, "still_used", return_value=[]), \
+             patch.object(reset, "PROJECT_ROOT", __import__("pathlib").Path(tmp)), \
+             patch.dict(os.environ, {"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_SERVICE_KEY": "k"}), \
+             patch("jobs.supabase_client.get_client", return_value=_FakeClient(store)), \
+             patch("dotenv.load_dotenv", return_value=False):
+            return reset.main(argv)
+
+    def test_dry_run_changes_nothing(self):
+        import tempfile
+        store = self._store()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run([], store, tmp), 0)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "backups")))
+        self.assertNotIn("_deleted", store)
+        self.assertEqual(len(store["signals"]), 2500)
+
+    def test_yes_backs_up_everything_then_clears_only_targets(self):
+        import tempfile
+        store = self._store()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(["--yes"], store, tmp), 0)
+            backup_dirs = os.listdir(os.path.join(tmp, "backups"))
+            self.assertEqual(len(backup_dirs), 1)
+            bdir = os.path.join(tmp, "backups", backup_dirs[0])
+            self.assertEqual(len(json.load(open(os.path.join(bdir, "signals.json")))), 2500)  # paginated past 1,000
+            self.assertEqual(len(json.load(open(os.path.join(bdir, "other_table.json")))), 6)
+        self.assertEqual(sorted(store["_deleted"]),
+                         sorted(["signals", "signals_history", "scan_log", "context_cache", "old_unused_table"]))
+        for kept, n in (("earnings_calendar", 7), ("ticker_metrics", 5), ("delisted_tickers", 3), ("other_table", 6)):
+            self.assertEqual(len(store[kept]), n)
+
+    def test_decommissioned_table_kept_if_still_used(self):
+        from unittest.mock import patch
+        import scripts.clear_and_reset_db as reset
+        with patch.object(reset, "EMPTY_DECOMMISSIONED", ("old_unused_table",)), \
+             patch.object(reset, "still_used", return_value=["jobs/uses_it.py"]):
+            clear, empty, skipped = reset.plan(dict(self.TABLES))
+        self.assertEqual(empty, [])
+        self.assertIn("old_unused_table", skipped)
+        self.assertEqual(clear, ["signals", "signals_history", "scan_log", "context_cache"])
+
+
+class patch_argv:
+    def __init__(self, argv):
+        self.argv = argv
+
+    def __enter__(self):
+        self.saved = sys.argv
+        sys.argv = self.argv
+
+    def __exit__(self, *exc):
+        sys.argv = self.saved
 
 
 if __name__ == "__main__":

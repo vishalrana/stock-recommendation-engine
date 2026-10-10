@@ -426,6 +426,7 @@ OPTIONAL_INSERT_COLUMNS = (
     "reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "pe_ratio",
     "reach_prob_t1_ci_low", "reach_prob_t1_ci_high", "reach_prob_effective_samples",
     "reach_prob_source", "strategy_win_rate", "strategy_expectancy_pct", "strategy_trades",
+    "strategy_beta_adjusted_pct", "strategy_excess_vs_spy_pct",
     "eps_ttm", "fundamentals_source", "fundamentals_as_of", "negative_equity",
 )
 
@@ -1645,6 +1646,8 @@ def run_scan(
                     "strategy_win_rate": sig.get("strategy_win_rate"),
                     "strategy_expectancy_pct": sig.get("strategy_expectancy_pct"),
                     "strategy_trades": sig.get("strategy_trades"),
+                    "strategy_beta_adjusted_pct": sig.get("strategy_beta_adjusted_pct"),
+                    "strategy_excess_vs_spy_pct": sig.get("strategy_excess_vs_spy_pct"),
                     "pe_ratio": sig.get("pe_ratio"),
                     "eps_ttm": sig.get("eps_ttm"),
                     "fundamentals_source": sig.get("fundamentals_source"),
@@ -1832,6 +1835,8 @@ def run_scan(
                         "strategy_win_rate": sig.get("strategy_win_rate"),
                         "strategy_expectancy_pct": sig.get("strategy_expectancy_pct"),
                         "strategy_trades": sig.get("strategy_trades"),
+                        "strategy_beta_adjusted_pct": sig.get("strategy_beta_adjusted_pct"),
+                        "strategy_excess_vs_spy_pct": sig.get("strategy_excess_vs_spy_pct"),
                         "pe_ratio": sig.get("pe_ratio"),
                         "eps_ttm": sig.get("eps_ttm"),
                         "fundamentals_source": sig.get("fundamentals_source"),

@@ -230,6 +230,16 @@ export default function StockCard({
       : '';
     winRateDisplay = `${Number(swr).toFixed(0)}% of ${strades} trades${expText}`;
   }
+  // Same backtest, measured against SPY held over the same days with the same market risk (beta).
+  // A rising market lifts the absolute figure on its own; this one shows whether the strategy beat it.
+  const fmtPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%/trade`;
+  const sba = recommendation.strategy_beta_adjusted_pct;
+  const sxs = recommendation.strategy_excess_vs_spy_pct;
+  const betaAdjValue = (sba !== null && sba !== undefined && !isNaN(Number(sba))) ? Number(sba) : null;
+  const betaAdjDisplay = betaAdjValue !== null ? `${fmtPct(betaAdjValue)} vs SPY after beta` : null;
+  const betaAdjTitle = (sxs !== null && sxs !== undefined && !isNaN(Number(sxs)))
+    ? `Versus simply holding SPY over the same days: ${fmtPct(Number(sxs))} (before adjusting for market risk)`
+    : undefined;
 
   const rrVal = recommendation.weighted_rr_honest ?? recommendation.weighted_rr ?? recommendation.risk_reward;
   const rrDisplay = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal)))
@@ -411,9 +421,17 @@ export default function StockCard({
                 <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
                   Strategy Backtest
                 </span>
-                <span className="text-slate-300 font-mono font-medium">
+                <span className="text-slate-300 font-mono font-medium block">
                   {winRateDisplay}
                 </span>
+                {betaAdjDisplay && (
+                  <span
+                    className={`font-mono font-semibold block ${betaAdjValue !== null && betaAdjValue < 0 ? 'text-rose-300' : 'text-emerald-300'}`}
+                    title={betaAdjTitle}
+                  >
+                    {betaAdjDisplay}
+                  </span>
+                )}
               </div>
               {rrDisplay && (
                 <div>

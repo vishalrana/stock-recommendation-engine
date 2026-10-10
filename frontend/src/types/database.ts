@@ -19,6 +19,8 @@ export interface Recommendation {
   strategy_win_rate?: number | null;
   strategy_expectancy_pct?: number | null;
   strategy_trades?: number | null;
+  strategy_beta_adjusted_pct?: number | null;
+  strategy_excess_vs_spy_pct?: number | null;
   reach_prob_source?: string | null;
   stop_loss: number | null;
   exit_price: number | null;

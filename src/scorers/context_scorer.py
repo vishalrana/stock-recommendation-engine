@@ -48,20 +48,11 @@ class ContextScorer:
         if ctx.price_volume_signal > 0:
             score += min(15, ctx.price_volume_signal * 10)
         
-        # Fallback: If raw score is still 0 and tech_data provided, use technical heuristic
-        if score == 0 and tech_data:
-            rsi = tech_data.get('rsi', 50)
-            adx = tech_data.get('adx', 20)
-            vol_ratio = tech_data.get('volume_ratio', 1.0)
-            
-            # Simple heuristic to give a small meaningful score (0-15 points)
-            fallback = (
-                max(0, (rsi - 30) / 70) * 5 +   # 0-5 points for RSI momentum
-                max(0, (adx - 10) / 40) * 5 +   # 0-5 points for trend strength
-                max(0, (vol_ratio - 0.5) * 10)  # 0-5 points for volume confirmation
-            )
-            score = max(score, min(15, fallback))
-        
+        # No technical fallback: RSI / ADX / volume are already in the momentum sub-score, and a
+        # context score must reflect context data. When no context data is available the caller
+        # marks context unavailable and the composite renormalizes the other weights instead.
+        # (tech_data is accepted for signature compatibility only.)
+
         # Normalize non-earnings score to 0-100 scale:
         # Maximum unscaled non-earnings components = 80 (excluding pv) / 95 (including pv).
         # Normalization factor: 1.25 (scaled from 80 base ceiling)

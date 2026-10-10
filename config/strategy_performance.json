@@ -1,15 +1,15 @@
 {
   "metadata": {
     "description": "Per-strategy evidence from the production-pipeline backtest (scripts/validate_backtest_pipeline.py), measured on all of each strategy's setups (one open per strategy+ticker), net of costs. Consumed by src/strategy_evidence.py.",
-    "generated_at": "2026-10-09T18:19:51.270384+00:00",
+    "generated_at": "2026-10-10T05:03:24.909138+00:00",
     "evaluation_window": [
       "2022-10-21",
-      "2026-10-08"
+      "2026-10-09"
     ],
-    "evidence_as_of": "2026-10-08",
+    "evidence_as_of": "2026-10-09",
     "net_of_costs_pct_per_side": 0.1,
     "edge_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
-    "edge_vs_spy_verdict_all": "NEGATIVE_EDGE",
+    "edge_vs_spy_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
     "limitations": [
       "Survivorship: tickers delisted after the start date have no history and are excluded.",
       "No historical earnings calendar: earnings blackout not applied; PEAD cannot fire.",
@@ -32,26 +32,26 @@
       "t3_n": 0
     },
     "cross_sectional_momentum": {
-      "trades": 6127,
-      "wins": 3418,
-      "sum_return": 2785.6761000000038,
-      "t1_hits": 2609,
-      "t1_n": 6127,
-      "t2_hits": 2,
-      "t2_n": 62,
+      "trades": 5230,
+      "wins": 2953,
+      "sum_return": 2794.4200000000087,
+      "t1_hits": 2252,
+      "t1_n": 5230,
+      "t2_hits": 1,
+      "t2_n": 44,
       "t3_hits": 0,
       "t3_n": 0
     },
     "pullback_recovery": {
-      "trades": 11027,
-      "wins": 6030,
-      "sum_return": 1423.0983000000028,
-      "t1_hits": 4645,
-      "t1_n": 11027,
-      "t2_hits": 7,
-      "t2_n": 43,
-      "t3_hits": 1,
-      "t3_n": 5
+      "trades": 6605,
+      "wins": 3556,
+      "sum_return": 543.229699999999,
+      "t1_hits": 2716,
+      "t1_n": 6605,
+      "t2_hits": 3,
+      "t2_n": 40,
+      "t3_hits": 0,
+      "t3_n": 1
     },
     "sector_rotation": {
       "trades": 486,
@@ -65,22 +65,22 @@
       "t3_n": 5
     },
     "trend_following": {
-      "trades": 7563,
-      "wins": 4108,
-      "sum_return": 5120.506300000031,
-      "t1_hits": 3005,
-      "t1_n": 7563,
-      "t2_hits": 10,
-      "t2_n": 133,
+      "trades": 6563,
+      "wins": 3546,
+      "sum_return": 4236.422900000013,
+      "t1_hits": 2592,
+      "t1_n": 6563,
+      "t2_hits": 3,
+      "t2_n": 72,
       "t3_hits": 0,
       "t3_n": 1
     },
     "52w_high_breakout": {
-      "trades": 6956,
-      "wins": 4227,
-      "sum_return": 4559.1764000000085,
-      "t1_hits": 3668,
-      "t1_n": 6956,
+      "trades": 6958,
+      "wins": 4228,
+      "sum_return": 4562.862600000008,
+      "t1_hits": 3669,
+      "t1_n": 6958,
       "t2_hits": 13,
       "t2_n": 210,
       "t3_hits": 0,

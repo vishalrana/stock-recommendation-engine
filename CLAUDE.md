@@ -47,9 +47,11 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 ## Current status (as of 2026-10-09)
 
 - Import errors in the universe provider and Supabase client were fixed. A project report claims 39 regression suites passed and a benchmark dry run succeeded.
-- The hosted nightly workflow has not yet had a confirmed successful run. A successful Vercel deploy is not proof that the Python scan completed.
+- The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code. `supabase/migration_reference_entry_price.sql` still has to be applied.
+- CI failed on every push because `get_client()` called `sys.exit()` without secrets. This is fixed: the suite passes 40/40 with and without Supabase credentials.
 - The earlier backtest figures (−0.45% OOS expectancy) came from a harness that did not run the production pipeline, so they are superseded.
-- Production-pipeline backtest (2026-10-09; 516 stocks + 15 ETFs; Oct 2022 – Oct 2026; 4,917 issued trades):
+- Latest production-pipeline backtest (2026-10-10, with the trend-quality gates): 4,405 issued trades. Net +0.39%/trade (CI −0.18% to +0.96%). Excess vs SPY −0.52%/trade (CI −1.13% to +0.05%). There is still no edge, and Pullback setups underperform SPY with a CI that excludes zero.
+- Previous run (2026-10-09; 516 stocks + 15 ETFs; Oct 2022 – Oct 2026; 4,917 issued trades):
   - Net expectancy was +0.39%/trade (95% block-bootstrap CI −0.21% to +0.93%), so **no edge was detected**.
   - Holding SPY over the same windows returned +0.94%/trade, putting **excess vs SPY at −0.55%/trade (CI −1.12% to −0.06%)**. The recommendations underperformed simply holding the index.
   - Almost no trades reach T2 or T3, and most exit at the holding-period limit.
@@ -65,6 +67,16 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - If context data is missing or times out, it is excluded from the composite score and the remaining weights are renormalized. It is not scored as 0.
 - Migration `supabase/migration_lifecycle_replay_and_pe.sql` adds the columns these depend on.
 
+## Data and context conventions (since 2026-10-10)
+
+- `CacheManager.refresh_cache(start, end)` treats `end` as inclusive and adds a day for yfinance, whose `end` is exclusive. Before this, every nightly scan ran one session behind its regime date. If the cache still does not reach the market date after refresh, the scan publishes no new ideas and logs `stale_data`.
+- Context (analyst, fundamentals, news) counts only when the provider actually returned data (`DataQuality.VALID`). Provider failures make context unavailable, so the weights are renormalized. `ContextScorer` has no technical fallback, because RSI, ADX and volume already sit in the momentum score. Failed fetches are never written to `context_cache`.
+- Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
+- News sentiment is the mean over all scored headlines, with neutral headlines counted as 0.
+- P/E, D/E and current ratio are display-only, refreshed nightly for every open idea, and never used in qualification.
+- Inserts drop only the specific unmigrated column the database names (`write_with_missing_column_retry`). If the logs show `[SCHEMA] Wrote without unmigrated column(s)`, apply the missing migration.
+- `get_client()` raises `SupabaseConfigError` instead of exiting, so CI can run tests without secrets.
+
 ## Strategy decisions (user-approved 2026-10-09)
 
 - **Exits:** stop, final target, or the strategy's holding period (`hold_days` in `STRATEGY_TARGET_CONFIG`, counted in trading bars from the fill), which gives `expired`. Failing to requalify in a later scan does not close an idea.
@@ -72,6 +84,11 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - **Stops:** each strategy's own structural stop is used as issued. There is no minimum floor and no 7% cap.
 - **Momentum sub-score:** rewards strength for trend, breakout, momentum, sector and PEAD strategies. Pullback and Mean Reversion keep the near-average scoring.
 - **Rules:** Pullback needs RSI at least 5 points off its 10-bar low (dip below 50, recovery band 45–67). Mean Reversion needs RSI 3+ points off its 5-bar low on an up-close day. The unused `is_blocked` guardrails are removed.
+- **Trend-quality gates (2026-10-10, backtested):**
+  - Pullback requires price > 50-day > 200-day with a rising 200-day in every regime. The bull-regime shortcut "price > 50-day" admitted bounces inside downtrends.
+  - Cross-Sectional Momentum requires price above a rising 200-day.
+  - Trend Following requires a rising 200-day.
+  - Against the same harness and data, issued-trade excess vs SPY went from −0.55% to −0.52%/trade. Cross-Sectional issued trades went from +0.06% to +0.43% net, and Trend Following from −0.46% to −0.23% vs SPY. All differences are within the confidence intervals, so the gates are kept as definitional fixes, not as proven improvements.
 - **Reach probability:** setup-conditional (the strategy's backtest target-hit rate) once the strategy has at least 30 trades. Otherwise it falls back to the ticker base rate. `reach_prob_source` records which one was used.
 
 ## Backtest

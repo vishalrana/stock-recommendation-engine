@@ -241,10 +241,15 @@ class CacheManager:
         """
         Fetch data for multiple tickers, transform to MultiIndex, and cache by date.
         Processes in manageable chunks to ensure low memory usage and fault tolerance.
+
+        end_date is INCLUSIVE (the last market session to cache). yfinance treats `end` as
+        exclusive, so one day is added here; passing the market date straight through left the
+        cache one session behind the regime date on every nightly run.
         """
         if not tickers:
             return
-            
+        end_date = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
         # Process in chunks of batch_size
         total_chunks = (len(tickers) - 1) // batch_size + 1
         logger.info(f"Refreshing cache for {len(tickers)} tickers across {total_chunks} chunks...")

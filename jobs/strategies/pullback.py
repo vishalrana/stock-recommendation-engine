@@ -22,6 +22,7 @@ ADX_MIN = 12.0                 # Relaxed from 18
 VOLUME_MULTIPLIER = 0.8        # Relaxed from 1.0
 LOOKBACK_RSI_DAYS = 10
 SWING_LOW_LOOKBACK = 20
+TREND_SLOPE_BARS = 20           # 200 DMA must be higher than it was this many bars ago
 
 
 def find_swing_low(df_slice: pd.DataFrame) -> float:
@@ -310,12 +311,14 @@ class PullbackRecoveryStrategy(StrategyInterface):
         ):
             return None, "failed_trend_gate"
 
-        if regime_str == "bull":
-            if not (c > d50):
-                return None, "failed_trend_gate"
-        else:
-            if not (c > d50 > d200):
-                return None, "failed_trend_gate"
+        # A pullback is only a buyable dip inside an established uptrend: price > 50 DMA > 200 DMA
+        # with a rising 200 DMA, in every regime. (The old bull-regime shortcut "price > 50 DMA"
+        # admitted bounces inside downtrends, e.g. a falling 50 DMA below the 200 DMA.)
+        if not (c > d50 > d200):
+            return None, "failed_trend_gate"
+        d200_prior = dma200s[t - TREND_SLOPE_BARS] if t >= TREND_SLOPE_BARS else np.nan
+        if np.isnan(d200_prior) or not (d200 > d200_prior):
+            return None, "failed_trend_gate"
 
         price_vs_50dma_pct = (c / d50 - 1) * 100 if d50 > 0 else 0.0
         volume_ratio = round(vol / vma, 2) if vma > 0 else 0.0

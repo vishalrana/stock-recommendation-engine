@@ -26,6 +26,23 @@ function getDaysActive(dateStr?: string | null): string {
   }
 }
 
+// Strategy holding periods in trading days (mirrors STRATEGY_TARGET_CONFIG.hold_days in src/quant_config.py)
+const HOLDING_DAYS: Record<string, number> = {
+  'trend following': 20,
+  '52-week high': 25,
+  '52-week high breakout': 25,
+  'pullback recovery': 10,
+  'post-earnings drift': 5,
+  'cross-sectional momentum': 15,
+  'sector rotation': 20,
+  'mean reversion': 5,
+};
+
+function getHoldingDays(strategy?: string | null): number | null {
+  if (!strategy) return null;
+  return HOLDING_DAYS[strategy.trim().toLowerCase()] ?? null;
+}
+
 function formatEarningsDate(dateStr?: string | null): string {
   if (!dateStr) return '';
   try {
@@ -72,10 +89,12 @@ export default function StockCard({
     ? Number(recommendation.entry_fill_price).toFixed(2)
     : null;
 
-  const peVal = recommendation.pe_ratio;
-  const peDisplay = (peVal !== undefined && peVal !== null && !isNaN(Number(peVal)))
-    ? Number(peVal).toFixed(1)
-    : 'N/A';
+  const fmtRatio = (v: number | null | undefined, digits: number) =>
+    (v !== undefined && v !== null && !isNaN(Number(v))) ? Number(v).toFixed(digits) : 'N/A';
+  // P/E is N/A when trailing earnings are negative (no meaningful P/E), as well as when unknown
+  const peDisplay = fmtRatio(recommendation.pe_ratio, 1);
+  const deDisplay = fmtRatio(recommendation.de_ratio, 2);
+  const crDisplay = fmtRatio(recommendation.current_ratio, 2);
 
   const t1 = recommendation.target_1 ? Number(recommendation.target_1).toFixed(2) : null;
   const t2 = recommendation.target_2 ? Number(recommendation.target_2).toFixed(2) : null;
@@ -139,6 +158,7 @@ export default function StockCard({
   }
 
   // 3. Next earnings date (hide if null / unknown)
+  let earningsInsideHold = false;
   if (recommendation.next_earnings_date && recommendation.next_earnings_date.trim() !== '') {
     const formattedDate = formatEarningsDate(recommendation.next_earnings_date);
     if (formattedDate) {
@@ -149,6 +169,15 @@ export default function StockCard({
         label: 'Next earnings',
         detail: `${formattedDate}${days}`,
       });
+      // Does the report fall before the strategy's holding period ends? (trading days -> ~calendar days)
+      const holdDays = getHoldingDays(recommendation.strategy_name || recommendation.strategy);
+      const start = recommendation.entry_date || recommendation.scan_date;
+      if (holdDays && start) {
+        const startMs = new Date(start.includes('T') ? start : `${start}T00:00:00`).getTime();
+        const earnMs = new Date(`${recommendation.next_earnings_date.slice(0, 10)}T00:00:00`).getTime();
+        const holdEndMs = startMs + Math.ceil(holdDays * 7 / 5) * 86400000;
+        earningsInsideHold = !isNaN(startMs) && !isNaN(earnMs) && earnMs >= startMs && earnMs <= holdEndMs;
+      }
     }
   }
 
@@ -233,14 +262,23 @@ export default function StockCard({
       {/* Main information: Targets, Risk & Time */}
       <div className="mt-3.5 pt-3 border-t border-slate-800/60 flex flex-col gap-1.5 text-xs">
         <div className="flex items-baseline justify-between text-slate-300">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Entry & P/E</span>
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Entry</span>
           <span className="font-mono text-slate-200">
-            Entry ${entryPrice}
+            ${entryPrice}
             {fillPrice && fillPrice !== entryPrice && (
               <span className="text-slate-500"> (filled ${fillPrice})</span>
             )}
+          </span>
+        </div>
+
+        <div className="flex items-baseline justify-between text-slate-300">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Fundamentals</span>
+          <span className="font-mono text-slate-300">
+            P/E {peDisplay}
             <span className="text-slate-600"> · </span>
-            <span className="text-slate-300">P/E {peDisplay}</span>
+            D/E {deDisplay}
+            <span className="text-slate-600"> · </span>
+            CR {crDisplay}
           </span>
         </div>
 
@@ -259,6 +297,11 @@ export default function StockCard({
         </div>
         {stopNote && (
           <div className="text-right text-[10px] font-medium text-blue-300">{stopNote}</div>
+        )}
+        {earningsInsideHold && (
+          <div className="text-right text-[10px] font-medium text-amber-300">
+            Earnings report falls inside the holding period (gap risk)
+          </div>
         )}
       </div>
 

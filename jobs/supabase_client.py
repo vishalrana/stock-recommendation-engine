@@ -30,26 +30,32 @@ if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE)
 
 
+class SupabaseConfigError(RuntimeError):
+    """Supabase credentials are not configured (e.g. CI without secrets)."""
+
+
 def get_client() -> Client:
     """
     Create and return a Supabase client using the service_role key.
 
     Raises:
-        SystemExit: If required environment variables are missing.
+        SupabaseConfigError: If required environment variables are missing. (Raising instead of
+        sys.exit lets importers and tests run without credentials; entry points that need the
+        database still fail with a non-zero exit.)
     """
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
 
     if not url:
-        print("ERROR: SUPABASE_URL is not set.")
-        print("Copy .env.example to .env and fill in your Supabase project URL.")
-        sys.exit(1)
+        raise SupabaseConfigError(
+            "SUPABASE_URL is not set. Copy .env.example to .env and fill in your Supabase project URL."
+        )
 
     if not key:
-        print("ERROR: SUPABASE_SERVICE_KEY is not set.")
-        print("Copy .env.example to .env and fill in your service_role key.")
-        print("Find it at: Supabase Dashboard > Settings > API > service_role")
-        sys.exit(1)
+        raise SupabaseConfigError(
+            "SUPABASE_SERVICE_KEY is not set. Copy .env.example to .env and fill in your service_role key "
+            "(Supabase Dashboard > Settings > API > service_role)."
+        )
 
     return create_client(url, key)
 

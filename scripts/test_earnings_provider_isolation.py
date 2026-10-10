@@ -256,7 +256,9 @@ class TestEarningsProviderIsolation(unittest.TestCase):
 
     def test_09_run_scan_zero_provider_queries_in_dry_run(self):
         """Test 9: run_scan with dry_run / normal scan runs with zero provider queries."""
-        with patch("src.filters.earnings_filter.fetch_single_ticker_provider") as mock_provider:
+        from unittest.mock import MagicMock
+        # Dry run reads (never writes) Supabase; a mock client keeps the test independent of secrets.
+        with patch("src.filters.earnings_filter.fetch_single_ticker_provider") as mock_provider,              patch("jobs.generate_signals.get_client", return_value=MagicMock()):
             res = run_scan(
                 dry_run=True,
                 cache_mode="local",

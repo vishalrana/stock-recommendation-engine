@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import glob
 import time
@@ -44,6 +45,7 @@ from regime import get_regime
 from jobs.supabase_client import get_client
 from jobs.strategies import STRATEGIES
 from src.data.cache_manager import get_cache_manager
+from src.providers.base import DataQuality
 from src.utils.metrics_cache import load_cached_metrics, save_cached_metrics
 from src.strategies.target_calculator import calculate_targets
 from src.filters.earnings_filter import (
@@ -359,7 +361,7 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
 REFRESHABLE_ANALYTICS_FIELDS = (
     "composite_score", "score", "quality_score", "tier_label",
     "current_rsi", "volume_ratio", "adx_value", "macd_histogram", "ema20",
-    "pe_ratio",
+    "pe_ratio", "de_ratio", "current_ratio",
 )
 
 # Columns added by migration_lifecycle_replay_and_pe.sql; dropped and retried if not yet migrated.
@@ -376,18 +378,78 @@ OPTIONAL_INSERT_COLUMNS = (
 NO_EXPIRY_HOLDING_DAYS = 10 ** 9
 
 
+_MISSING_COLUMN_PATTERNS = (
+    re.compile(r"Could not find the '([A-Za-z0-9_]+)' column"),   # PostgREST PGRST204
+    re.compile(r'column "([A-Za-z0-9_]+)"[^"]* does not exist'),  # Postgres 42703
+)
+
+
+def _missing_column(err: Exception) -> Optional[str]:
+    text = str(err)
+    for pattern in _MISSING_COLUMN_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def write_with_missing_column_retry(write, rows, allowed_to_drop, max_retries: int = 20):
+    """
+    Run write(rows), dropping ONLY the column(s) the database reports as missing and retrying.
+    Previously one unmigrated column caused every optional field (P/E, strategy evidence, ...)
+    to be discarded. Only columns in allowed_to_drop may be removed; anything else re-raises.
+    rows: dict or list of dicts (mutated copies are used). Returns the dropped column names.
+    """
+    single = isinstance(rows, dict)
+    payload = [dict(rows)] if single else [dict(r) for r in rows]
+    dropped = []
+    for _ in range(max_retries):
+        try:
+            write(payload[0] if single else payload)
+            if dropped:
+                logger.warning("[SCHEMA] Wrote without unmigrated column(s) %s. Apply the pending Supabase migrations.", dropped)
+            return dropped
+        except Exception as e:
+            col = _missing_column(e)
+            if not col or col not in allowed_to_drop or col in dropped:
+                raise
+            dropped.append(col)
+            for r in payload:
+                r.pop(col, None)
+    raise RuntimeError(f"Too many missing columns: {dropped}")
+
+
 def _safe_signal_update(supabase, signal_id: str, fields: dict) -> None:
-    """Update one signals row by id, retrying without unmigrated optional columns."""
+    """Update one signals row by id, dropping only unmigrated optional columns."""
+    write_with_missing_column_retry(
+        lambda f: supabase.table("signals").update(f).eq("id", signal_id).execute(),
+        fields,
+        allowed_to_drop=set(OPTIONAL_LIFECYCLE_COLUMNS) | set(OPTIONAL_INSERT_COLUMNS),
+    )
+
+
+_DISPLAY_METADATA = None
+
+
+def _display_fundamentals(ticker: str) -> Dict[str, Optional[float]]:
+    """P/E, D/E and current ratio for display on open ideas (never used in scoring)."""
+    global _DISPLAY_METADATA
+    from src.providers.context.metadata_provider import MetadataProvider
+    if _DISPLAY_METADATA is None:
+        _DISPLAY_METADATA = MetadataProvider()
     try:
-        supabase.table("signals").update(fields).eq("id", signal_id).execute()
-    except Exception as e:
-        err = str(e)
-        if "42703" in err or any(c in err for c in OPTIONAL_LIFECYCLE_COLUMNS):
-            reduced = {k: v for k, v in fields.items() if k not in OPTIONAL_LIFECYCLE_COLUMNS}
-            if reduced:
-                supabase.table("signals").update(reduced).eq("id", signal_id).execute()
-        else:
-            raise
+        f = _DISPLAY_METADATA.get_fundamentals(ticker)
+    except Exception:
+        return {}
+    if f.quality != DataQuality.VALID:
+        return {}
+    out = {}
+    for key, val in (("pe_ratio", f.trailing_pe), ("de_ratio", f.debt_to_equity), ("current_ratio", f.current_ratio)):
+        try:
+            out[key] = round(float(val), 4) if val is not None and np.isfinite(float(val)) else None
+        except (TypeError, ValueError):
+            out[key] = None
+    return out
 
 
 def reconcile_recommendation_lifecycle(
@@ -402,6 +464,7 @@ def reconcile_recommendation_lifecycle(
     successfully_evaluated_tickers: Optional[Set[str]] = None,
     universe_is_fallback: bool = False,
     current_scan_date: Optional[str] = None,
+    refresh_fundamentals: bool = False,
 ):
     """
     Reconcile active recommendations against market data.
@@ -420,6 +483,8 @@ def reconcile_recommendation_lifecycle(
        Failing to requalify in a later scan is NOT an exit: the trade is measured as designed.
     6. Still Active: status 'open'; price and lifecycle state are refreshed, plus analytical fields
        when the ticker re-qualified tonight. Entry, stop, targets and strategy stay frozen as issued.
+       With refresh_fundamentals=True, display fundamentals (P/E, D/E, current ratio) are refreshed
+       for every open idea, re-qualified or not.
 
     qualified_tickers / disqualification_reasons / successfully_evaluated_tickers / universe_is_fallback
     no longer drive transitions (kept for call compatibility).
@@ -548,6 +613,11 @@ def reconcile_recommendation_lifecycle(
                 for k in REFRESHABLE_ANALYTICS_FIELDS:
                     if ana.get(k) is not None:
                         update_fields[k] = ana[k]
+            if refresh_fundamentals and any(k not in update_fields for k in ("pe_ratio", "de_ratio", "current_ratio")):
+                fund = _display_fundamentals(ticker)
+                for k, v in fund.items():
+                    if k not in update_fields and v is not None:
+                        update_fields[k] = v
             try:
                 _safe_signal_update(supabase, signal_id, update_fields)
             except Exception as ana_err:
@@ -770,6 +840,20 @@ def run_scan(
     if total_files == 0:
         logger.error("No cached daily files found. Cannot generate signals.")
         sys.exit(1)
+
+    # Freshness guard: signals must be computed on the market session the scan is labelled with.
+    try:
+        _last = cache_manager.get_last_cached_date()
+        last_cached_after_refresh = pd.Timestamp(_last).date() if _last is not None and not pd.isna(_last) else None
+    except Exception:
+        last_cached_after_refresh = None
+    data_is_stale = last_cached_after_refresh is None or last_cached_after_refresh < scan_date_dt
+    if data_is_stale:
+        logger.error(
+            "[STALE DATA] Latest cached session %s is older than market date %s. "
+            "No new recommendations will be published from stale bars; lifecycle tracking still runs.",
+            last_cached_after_refresh, scan_date_dt,
+        )
 
     # ── Supabase Client ───────────────────────────────────────────────
     try:
@@ -1050,6 +1134,8 @@ def run_scan(
                     price_df = ranker._fetch_price_history(t)
                     if price_df is not None and not price_df.empty:
                         ctx = context_aggregator.get_aggregated(t, price_df)
+                        if ctx.quality != DataQuality.VALID:
+                            return (t, None)  # Provider failed: context unavailable, not "weak"
                         tech_data = {
                             'rsi': cand.get("current_rsi", 50),
                             'adx': cand.get("adx_value", 20),
@@ -1058,7 +1144,7 @@ def run_scan(
                         c_score, c_analyst, c_earnings, c_fundamental, c_news = context_scorer.calculate_with_breakdown(
                             ctx, float(cand.get("entry_price") or cand.get("price", 1.0)), tech_data
                         )
-                        if ctx.cached_score is None:
+                        if ctx.cached_score is None and ctx.analyst.target_mean_price is not None:
                             from src.providers.context.aggregator import save_context_to_cache
                             save_context_to_cache(t, c_score, ctx)
                         de_val = ctx.fundamental.debt_to_equity if ctx.fundamental else None
@@ -1074,17 +1160,32 @@ def run_scan(
 
             from concurrent.futures import ThreadPoolExecutor, as_completed
             # Deduplicate by ticker for parallel context fetching
+            # Only candidates that could reach the Buy threshold even with a perfect (100) context
+            # score need context. For the rest it cannot change the outcome: with context missing the
+            # renormalized score non_ctx/(1-w) is never above non_ctx + 100*w. This cuts provider
+            # calls (and Yahoo throttling) from hundreds of tickers to the plausible few.
+            def _best_case_score(cand):
+                probe = dict(cand)
+                probe.update(context_available=True, context_score=100.0, context_analyst=0.0,
+                             context_fundamental=0.0, context_news=0.0)
+                try:
+                    return ranker.compute_composite_score(probe, regime_str)["total"]
+                except Exception:
+                    return 0.0
+
             unique_cands_by_ticker = {}
             for c in candidates:
                 t = c["ticker"]
-                if t not in unique_cands_by_ticker:
+                if t not in unique_cands_by_ticker or _best_case_score(c) > _best_case_score(unique_cands_by_ticker[t]):
                     unique_cands_by_ticker[t] = c
+            ctx_targets = [c for c in unique_cands_by_ticker.values() if _best_case_score(c) >= BUY_THRESHOLD]
+            logger.info(f"[CONTEXT] {len(ctx_targets)}/{len(unique_cands_by_ticker)} tickers can reach the Buy threshold; fetching context for those only.")
 
-            executor = ThreadPoolExecutor(max_workers=10)
+            executor = ThreadPoolExecutor(max_workers=4)
             ctx_map = {}
             try:
-                futures = {executor.submit(_score_ctx, c): c["ticker"] for c in unique_cands_by_ticker.values()}
-                for future in as_completed(futures, timeout=60.0):
+                futures = {executor.submit(_score_ctx, c): c["ticker"] for c in ctx_targets}
+                for future in as_completed(futures, timeout=300.0):
                     try:
                         res_data = future.result(timeout=10.0)
                         if len(res_data) > 2:
@@ -1098,6 +1199,10 @@ def run_scan(
                     executor.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     executor.shutdown(wait=False)
+            logger.info(
+                f"[CONTEXT] Real context data for {len(ctx_map)}/{len(ctx_targets)} tickers; "
+                f"{len(ctx_targets) - len(ctx_map)} unavailable (provider failure/timeout) and excluded from scoring."
+            )
 
             for c in candidates:
                 t = c["ticker"]
@@ -1293,27 +1398,40 @@ def run_scan(
             f"{len(rejected_signals_to_insert)} total rejected/audit logged"
         )
 
-        # Informational P/E ratio for the ideas shown to the user (never used in scoring).
-        # Context scoring already captured it when it ran; fetch the rest directly.
+        if data_is_stale and qualified_recommendations:
+            stale_reason = f"Price data stale (latest session {last_cached_after_refresh} < market date {scan_date_dt}); not published"
+            for s in qualified_recommendations:
+                s["status"] = "rejected"
+                s["rejection_reason"] = stale_reason
+            rejected_signals_to_insert.extend(qualified_recommendations)
+            logger.error("[STALE DATA] Withheld %d qualified recommendations.", len(qualified_recommendations))
+            qualified_recommendations = []
+
+        # Informational fundamentals (P/E, D/E, current ratio) for every idea shown to the user.
+        # Never used in scoring. Context scoring already captured them when it succeeded; fetch the rest.
+        display_targets = list(qualified_recommendations) + list(active_qualified_recommendations.values())
         if not dry_run:
-            pe_targets = [
-                s for s in list(qualified_recommendations) + list(active_qualified_recommendations.values())
-                if s.get("pe_ratio") is None
-            ]
-            if pe_targets:
-                from src.providers.context.metadata_provider import MetadataProvider
-                metadata_provider = MetadataProvider()
-                for s in pe_targets:
+            missing = [s for s in display_targets if s.get("pe_ratio") is None or s.get("de_ratio") is None or s.get("current_ratio") is None]
+            if missing:
+                metadata_provider = context_aggregator.metadata
+                for s in missing:
                     try:
-                        s["pe_ratio"] = metadata_provider.get_fundamentals(s["ticker"]).trailing_pe
+                        f = metadata_provider.get_fundamentals(s["ticker"])
+                        if f.quality == DataQuality.VALID:
+                            for key, val in (("pe_ratio", f.trailing_pe), ("de_ratio", f.debt_to_equity), ("current_ratio", f.current_ratio)):
+                                if s.get(key) is None:
+                                    s[key] = val
                     except Exception as pe_err:
-                        logger.debug("Could not fetch P/E for %s: %s", s.get("ticker"), pe_err)
-        for s in list(qualified_recommendations) + list(active_qualified_recommendations.values()):
-            pe = s.get("pe_ratio")
-            try:
-                s["pe_ratio"] = round(float(pe), 2) if pe is not None and np.isfinite(float(pe)) else None
-            except (TypeError, ValueError):
-                s["pe_ratio"] = None
+                        logger.debug("Could not fetch fundamentals for %s: %s", s.get("ticker"), pe_err)
+                got = sum(1 for s in display_targets if s.get("pe_ratio") is not None or s.get("de_ratio") is not None)
+                logger.info(f"[FUNDAMENTALS] Display fundamentals available for {got}/{len(display_targets)} ideas.")
+        for s in display_targets:
+            for key in ("pe_ratio", "de_ratio", "current_ratio"):
+                v = s.get(key)
+                try:
+                    s[key] = round(float(v), 4) if v is not None and np.isfinite(float(v)) else None
+                except (TypeError, ValueError):
+                    s[key] = None
 
         # Phase 3: Construct final ranked signals list for database insertion
         all_signals_to_save = qualified_recommendations + rejected_signals_to_insert
@@ -1452,6 +1570,7 @@ def run_scan(
                     updated_analytics=updated_analytics,
                     successfully_evaluated_tickers=successfully_evaluated_tickers,
                     current_scan_date=market_data_date,
+                    refresh_fundamentals=True,
                 )
                 logger.info("[TARGETED REFRESH] Reconciled active recommendations for targeted tickers.")
             except Exception as e:
@@ -1486,6 +1605,7 @@ def run_scan(
                 successfully_evaluated_tickers=successfully_evaluated_tickers,
                 universe_is_fallback=LAST_UNIVERSE_IS_FALLBACK,
                 current_scan_date=market_data_date,
+                refresh_fundamentals=True,
             )
             logger.info("Clearing previous rejected audit entries from Supabase...")
             supabase.table("signals").delete().eq("status", "rejected").execute()
@@ -1584,41 +1704,24 @@ def run_scan(
                         "pe_ratio": sig.get("pe_ratio"),
                     })
                 
-                # Direct persistence with full schema parity and exact instance identity
-                try:
-                    supabase.table("signals").insert(ranked_signals).execute()
-                except Exception as sig_err:
-                    err_str = str(sig_err)
-                    if "42703" in err_str or any(c in err_str for c in OPTIONAL_INSERT_COLUMNS):
-                        logger.warning("Unmigrated column in signals table (42703). Retrying insert without new optional columns.")
-                        for s in ranked_signals:
-                            for col in OPTIONAL_INSERT_COLUMNS:
-                                s.pop(col, None)
-                        supabase.table("signals").insert(ranked_signals).execute()
-                    else:
-                        raise sig_err
+                # Direct persistence with full schema parity and exact instance identity.
+                # Unmigrated optional columns are dropped one at a time (only those named by the DB).
+                droppable = set(OPTIONAL_INSERT_COLUMNS)
+                write_with_missing_column_retry(
+                    lambda rows: supabase.table("signals").insert(rows).execute(), ranked_signals, droppable,
+                )
 
-                try:
-                    supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
-                except Exception as hist_err:
-                    hist_err_str = str(hist_err)
-                    if "42703" in hist_err_str or any(c in hist_err_str for c in OPTIONAL_INSERT_COLUMNS):
-                        logger.warning("Unmigrated column in signals_history table (42703). Retrying history upsert without new optional columns.")
-                        for h in history_rows:
-                            for col in OPTIONAL_INSERT_COLUMNS:
-                                h.pop(col, None)
-                        try:
-                            supabase.table("signals_history").upsert(history_rows, on_conflict="signal_id").execute()
-                        except Exception as h_retry_err:
-                            if "42P10" in str(h_retry_err):
-                                supabase.table("signals_history").insert(history_rows).execute()
-                            else:
-                                raise h_retry_err
-                    elif "42P10" in hist_err_str:
-                        logger.warning("PostgREST 42P10 detected (partial index requires predicate). Inserting history records directly.")
-                        supabase.table("signals_history").insert(history_rows).execute()
-                    else:
-                        raise hist_err
+                def _write_history(rows):
+                    try:
+                        supabase.table("signals_history").upsert(rows, on_conflict="signal_id").execute()
+                    except Exception as hist_err:
+                        if "42P10" in str(hist_err):
+                            logger.warning("PostgREST 42P10 detected (partial index requires predicate). Inserting history records directly.")
+                            supabase.table("signals_history").insert(rows).execute()
+                        else:
+                            raise
+
+                write_with_missing_column_retry(_write_history, history_rows, droppable)
                 logger.info("Signals inserted and archived successfully.")
             else:
                 logger.info("No signals to insert.")
@@ -1636,6 +1739,9 @@ def run_scan(
 
     if status == "success" and LAST_UNIVERSE_IS_FALLBACK and universe_source == "expanded":
         status = "degraded_universe"
+    if status == "success" and data_is_stale:
+        status = "stale_data"
+        error_msg = error_msg or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
 
     scan_log_row = {
         "scan_date": signal_date,

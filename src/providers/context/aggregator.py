@@ -2,6 +2,7 @@ from src.providers.context.metadata_provider import MetadataProvider
 from src.providers.context.earnings_provider import EarningsProvider
 from src.providers.context.news_provider import FinBERTNewsProvider
 from src.providers.base import (
+    DataQuality,
     AggregatedContext,
     AnalystContext,
     FundamentalContext,
@@ -43,12 +44,14 @@ class ContextAggregator:
                     now = datetime.now(timezone.utc)
                     age_hours = (now - updated_at).total_seconds() / 3600.0
                     
-                    if age_hours < ttl_hours:
+                    # Only reuse rows that hold real provider data. Rows written while Yahoo was
+                    # failing carry no analyst target and a meaningless score; refetch those.
+                    if age_hours < ttl_hours and cache_row.get("analyst_target") is not None:
                         analyst_target = cache_row.get("analyst_target")
                         news_sentiment = cache_row.get("news_sentiment")
                         earnings_surprise = cache_row.get("earnings_surprise")
                         
-                        analyst = AnalystContext(target_mean_price=analyst_target)
+                        analyst = AnalystContext(target_mean_price=analyst_target, quality=DataQuality.VALID)
                         earnings = EarningsContext()  # Decoupled: not required for initial context score
                         news = NewsContext(headline_sentiment=news_sentiment or 0.0)
                         fundamental = self.metadata.get_fundamentals(ticker)
@@ -59,7 +62,8 @@ class ContextAggregator:
                             fundamental=fundamental,
                             earnings=earnings,
                             news=news,
-                            cached_score=cache_row["context_score"]
+                            cached_score=cache_row["context_score"],
+                            quality=DataQuality.VALID,
                         )
             except Exception as e:
                 logger.warning(f"Failed to query context cache for {ticker}: {e}")
@@ -93,12 +97,21 @@ class ContextAggregator:
                 elif vol_ratio > 1.5 and close_delta > 0.02:
                     pv_signal = 1.0
         
+        # The context score is only meaningful when real context data arrived. If analyst and
+        # fundamental data both failed (e.g. Yahoo throttling the CI runner), the context is
+        # UNAVAILABLE and must be excluded from the composite score, not scored as weak.
+        has_data = (
+            analyst.quality == DataQuality.VALID
+            or fundamental.quality == DataQuality.VALID
+            or news.quality == DataQuality.VALID
+        )
         return AggregatedContext(
             analyst=analyst,
             fundamental=fundamental,
             earnings=earnings,
             news=news,
-            price_volume_signal=pv_signal
+            price_volume_signal=pv_signal,
+            quality=DataQuality.VALID if has_data else DataQuality.UNAVAILABLE,
         )
 
 

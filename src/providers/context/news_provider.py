@@ -1,6 +1,6 @@
 import logging
 import requests
-from src.providers.base import NewsContext
+from src.providers.base import NewsContext, DataQuality
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +73,18 @@ class FinBERTNewsProvider:
                             score = 0.0
                         sentiments.append(score)
             
-            non_neutral = [s for s in sentiments if s != 0.0]
-            if non_neutral:
-                avg_sentiment = sum(non_neutral) / len(non_neutral)
-            else:
-                avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
-            
+            if not sentiments:
+                return NewsContext(headline_sentiment=0.0, article_count=0)
+
+            # Mean over ALL scored headlines (neutral = 0). Averaging only the non-neutral ones
+            # turned one positive headline among nine neutral ones into a +0.9 "very positive" read.
+            avg_sentiment = sum(sentiments) / len(sentiments)
+
             return NewsContext(
                 headline_sentiment=avg_sentiment,
                 article_count=len(sentiments),
-                source_reliability=0.8  # Google News sources are credible
+                source_reliability=0.8,  # Google News sources are credible
+                quality=DataQuality.VALID,
             )
         except Exception as e:
             logger.debug(f"News fetch failed for {ticker}: {e}")

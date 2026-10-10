@@ -64,6 +64,15 @@ class CrossSectionalMomentumStrategy(StrategyInterface):
         if price <= sma50:
             return None
 
+        # 2b. Long-term uptrend: price above a rising 200 DMA. A sharp 3-month rebound inside a
+        #     long-term downtrend ranks high on 63-day return but is not persistent momentum.
+        sma200_series = df['CLOSE'].rolling(200).mean()
+        if len(sma200_series) < 221 or pd.isna(sma200_series.iloc[-21]):
+            return None
+        sma200 = sma200_series.iloc[-1]
+        if not (price > sma200 and sma200 > sma200_series.iloc[-21]):
+            return None
+
         # 3. RSI 40-75 (relaxed from 50-70)
         if current_rsi < 40 or current_rsi > 75:
             return None

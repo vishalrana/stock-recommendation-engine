@@ -248,5 +248,107 @@ class TestStrategyRuleTightening(unittest.TestCase):
         self.assertIsNone(MeanReversionStrategy().scan("MRX", df, "bear", {}))
 
 
+class TestDataAndPersistenceFixes(unittest.TestCase):
+    def test_refresh_cache_end_date_is_inclusive(self):
+        """yfinance's end is exclusive: refresh_cache must request end+1 so the market date is cached."""
+        from unittest.mock import patch
+        from src.data.cache_manager import get_cache_manager
+        cm = get_cache_manager()
+        seen = {}
+        def fake_download(tickers, start, end):
+            seen["start"], seen["end"] = start, end
+            return pd.DataFrame()
+        with patch.object(cm, "download_batch_with_retry", side_effect=fake_download), patch("time.sleep"):
+            cm.refresh_cache(["AAA"], "2026-10-08", "2026-10-09")
+        self.assertEqual(seen["end"], "2026-10-10")
+
+    def test_missing_column_retry_drops_only_the_named_column(self):
+        from jobs.generate_signals import write_with_missing_column_retry
+        written = []
+        def write(rows):
+            if any("reference_entry_price" in r for r in rows):
+                raise Exception("{'code': 'PGRST204', 'message': \"Could not find the 'reference_entry_price' column of 'signals' in the schema cache\"}")
+            written.extend(rows)
+        rows = [{"ticker": "A", "reference_entry_price": 1.0, "pe_ratio": 20.0, "strategy_trades": 50}]
+        dropped = write_with_missing_column_retry(write, rows, {"reference_entry_price", "pe_ratio", "strategy_trades"})
+        self.assertEqual(dropped, ["reference_entry_price"])
+        self.assertEqual(written[0]["pe_ratio"], 20.0)       # kept
+        self.assertEqual(written[0]["strategy_trades"], 50)  # kept
+        # A column outside the allowed set is never silently dropped
+        def write_bad(rows):
+            raise Exception("Could not find the 'ticker' column of 'signals' in the schema cache")
+        with self.assertRaises(Exception):
+            write_with_missing_column_retry(write_bad, rows, {"pe_ratio"})
+
+    def test_get_client_raises_instead_of_exiting(self):
+        import os
+        from unittest.mock import patch
+        from jobs.supabase_client import get_client, SupabaseConfigError
+        with patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_KEY": ""}):
+            with self.assertRaises(SupabaseConfigError):
+                get_client()
+
+
+class TestContextDataQuality(unittest.TestCase):
+    def test_no_technical_fallback_in_context_score(self):
+        from src.scorers.context_scorer import ContextScorer
+        from src.providers.base import AggregatedContext
+        score = ContextScorer().calculate(AggregatedContext(), 100.0, {"rsi": 70, "adx": 40, "volume_ratio": 2.0})
+        self.assertEqual(score, 0.0)
+
+    def test_provider_failure_marks_context_unavailable(self):
+        from unittest.mock import patch
+        from src.providers.context.aggregator import ContextAggregator
+        from src.providers.base import DataQuality, NewsContext
+        agg = ContextAggregator()
+        with patch("jobs.supabase_client.get_client", side_effect=Exception("no db")),              patch.object(agg.metadata, "_get_info", return_value=None),              patch.object(agg.news, "fetch_and_score", return_value=NewsContext()):
+            ctx = agg.get_aggregated("FAILX", None)
+        self.assertEqual(ctx.quality, DataQuality.UNAVAILABLE)
+        self.assertEqual(ctx.fundamental.quality, DataQuality.UNAVAILABLE)
+
+    def test_metadata_single_request_per_ticker(self):
+        from unittest.mock import patch, MagicMock
+        from src.providers.context.metadata_provider import MetadataProvider
+        mp = MetadataProvider()
+        fake = MagicMock(); fake.info = {"trailingPE": 25.0, "debtToEquity": 80.0, "currentRatio": 1.2, "targetMeanPrice": 110.0}
+        with patch("yfinance.Ticker", return_value=fake) as tk:
+            f = mp.get_fundamentals("ONEX"); a = mp.get_analyst_rating("ONEX")
+        self.assertEqual(tk.call_count, 1)
+        self.assertAlmostEqual(f.debt_to_equity, 0.8)
+        self.assertEqual(f.trailing_pe, 25.0)
+        self.assertEqual(a.target_mean_price, 110.0)
+
+
+class TestTrendQualityGates(unittest.TestCase):
+    def _df(self, closes):
+        idx = pd.bdate_range(end="2026-06-30", periods=len(closes))
+        df = pd.DataFrame({"CLOSE": closes, "HIGH": closes * 1.01, "LOW": closes * 0.99, "OPEN": closes,
+                           "VOLUME": 1_000_000.0}, index=idx)
+        df["DMA_50"] = df["CLOSE"].rolling(50).mean()
+        df["DMA_200"] = df["CLOSE"].rolling(200).mean()
+        df["VOLUME_MA_20"] = 1_000_000.0
+        df["RSI_14"] = 55.0; df["ADX_14"] = 25.0; df["MACD_LINE"] = 0.5; df["MACD_SIGNAL"] = 0.3
+        df["MACD_HIST"] = 0.2; df["EMA_20"] = df["CLOSE"]; df["ATR_14"] = 2.0
+        return df
+
+    def test_pullback_rejects_bounce_inside_downtrend_even_in_bull_regime(self):
+        from jobs.strategies.pullback import PullbackRecoveryStrategy
+        # Long decline, then a short bounce above the (falling) 50 DMA: 50 DMA < 200 DMA
+        closes = np.concatenate([np.linspace(150, 100, 240), np.linspace(100, 112, 20)])
+        sig, gate = PullbackRecoveryStrategy()._check_latest_signal("DTX", self._df(closes), "DTX", "X", 0, "bull")
+        self.assertIsNone(sig)
+        self.assertEqual(gate, "failed_trend_gate")
+
+    def test_cross_sectional_rejects_falling_200dma(self):
+        from jobs.strategies.cross_sectional import CrossSectionalMomentumStrategy
+        closes = np.concatenate([np.linspace(160, 90, 200), np.linspace(90, 120, 60)])  # strong 3m rebound
+        self.assertIsNone(CrossSectionalMomentumStrategy().scan("CSX", self._df(closes), "bull", {}))
+
+    def test_trend_following_rejects_falling_200dma(self):
+        from jobs.strategies.trend_following import TrendFollowingStrategy
+        closes = np.concatenate([np.linspace(160, 80, 200), np.linspace(80, 130, 60)])
+        self.assertIsNone(TrendFollowingStrategy().scan("TFX", self._df(closes), "bull", {}))
+
+
 if __name__ == "__main__":
     unittest.main()

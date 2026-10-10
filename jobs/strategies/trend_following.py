@@ -53,6 +53,11 @@ class TrendFollowingStrategy(StrategyInterface):
         # 1. Trend gate: Price > 200 DMA (strong long-term trend)
         if price <= sma200 * 1.02:  # Must be at least 2% above 200 DMA
             return None
+        # 1b. The long-term trend itself must be rising (200 DMA above its level 20 bars ago);
+        #     price above a falling 200 DMA is a rebound, not a trend.
+        sma200_prior = df['CLOSE'].rolling(200).mean().iloc[-21] if len(df) >= 220 else float("nan")
+        if pd.isna(sma200_prior) or not (sma200 > sma200_prior):
+            return None
 
         # 2. Breakout gate: Price within 5% of 20-day high (near breakout)
         pct_vs_high = (price / high_20 - 1) * 100

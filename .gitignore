@@ -41,3 +41,6 @@ scratch/
 *.docx
 *.pkl
 *.zip
+
+# Supabase backups made by scripts/clear_and_reset_db.py (real data; the repo is public)
+backups/

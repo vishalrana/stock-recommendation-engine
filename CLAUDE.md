@@ -55,6 +55,12 @@ Get the maths and recommendation logic right first. Do not add complexity for it
   - The late period (from 2025-04-09) is the cleaner test.
 - Earnings blackout (user-approved 2026-10-10): `EARNINGS_BLACKOUT_DAYS` now counts NYSE trading sessions after the scan date up to and including the report date (`trading_sessions_between` in `src/utils/market_date.py`, which applies the NYSE holiday rules). Before this it counted calendar days. `days_to_earnings` stays in calendar days, because that is what the card shows. The windows are still far shorter than the 5–25-day holding periods, so the card warns when earnings fall inside the holding period. The backtest cannot test the blackout (no historical earnings calendar).
 - **Universe (user decision 2026-10-10): keep the broad universe.** `UNIVERSE_SOURCE` stays `expanded`: 5,598 common equities, about 2,750 of them liquid. Strategy evidence now comes from the production-universe backtest run 38059174571, adopted into `config/strategy_performance.json`, so scores and cards are measured on the universe the scan covers. Delisted stocks are missing from that run, which flatters small caps.
+- **Recommendation data reset (2026-10-10):**
+  - Why: a clean start after adopting the production-universe evidence. The existing ideas had been scored with the 516-stock evidence and the pre-fix pipeline.
+  - How: `scripts/clear_and_reset_db.py --yes`. It first backed up all 8 tables (7,305 rows) to `backups/supabase_20261010T164159Z/`, which is kept locally only, gitignored, and must never be committed.
+  - Cleared: `signals` (611 rows), `signals_history` (3,539), `scan_log` (21), `context_cache` (908) and the decommissioned `portfolio_state` (1).
+  - Kept, unchanged: `earnings_calendar` (1,710), `ticker_metrics` (515), `delisted_tickers` (0). The `recommendations` view rebuilds from the tables.
+  - First scan after the reset: nightly run 38068760022, market date 2026-10-09, status success, 3 ideas (TEVA, SNOW, PBT). Refresh run 38069398766 reconciled all three.
 - CI failed on every push because `get_client()` called `sys.exit()` without secrets. This is fixed: the suite passes 40/40 with and without Supabase credentials.
 - The earlier backtest figures (−0.45% OOS expectancy) came from a harness that did not run the production pipeline, so they are superseded.
 - **Evidence basis (adopted 2026-10-10): production-universe run 38059174571.**

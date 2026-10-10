@@ -42,6 +42,9 @@ class FundamentalContext:
     current_ratio: Optional[float] = None
     trailing_pe: Optional[float] = None
     quality: DataQuality = DataQuality.UNAVAILABLE
+    source: Optional[str] = None            # "sec", "yahoo" or "sec+yahoo"
+    eps_ttm: Optional[float] = None
+    balance_sheet_date: Optional[str] = None
 
 @dataclass
 class EarningsContext:

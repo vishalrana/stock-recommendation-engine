@@ -92,7 +92,15 @@ export default function StockCard({
   const fmtRatio = (v: number | null | undefined, digits: number) =>
     (v !== undefined && v !== null && !isNaN(Number(v))) ? Number(v).toFixed(digits) : 'N/A';
   // P/E is N/A when trailing earnings are negative (no meaningful P/E), as well as when unknown
-  const peDisplay = fmtRatio(recommendation.pe_ratio, 1);
+  const epsTtm = recommendation.eps_ttm;
+  const isLossMaker = (recommendation.pe_ratio === null || recommendation.pe_ratio === undefined)
+    && epsTtm !== null && epsTtm !== undefined && !isNaN(Number(epsTtm)) && Number(epsTtm) <= 0;
+  const peDisplay = isLossMaker ? 'Loss' : fmtRatio(recommendation.pe_ratio, 1);
+  const fundamentalsTitle = recommendation.fundamentals_source
+    ? `Source: ${recommendation.fundamentals_source.replace('sec', 'SEC filings').replace('yahoo', 'Yahoo')}`
+      + (recommendation.fundamentals_as_of ? `, balance sheet as of ${recommendation.fundamentals_as_of}` : '')
+      + (isLossMaker ? ' (trailing 12-month EPS is negative, so P/E is not meaningful)' : '')
+    : undefined;
   const deDisplay = fmtRatio(recommendation.de_ratio, 2);
   const crDisplay = fmtRatio(recommendation.current_ratio, 2);
 
@@ -273,7 +281,7 @@ export default function StockCard({
 
         <div className="flex items-baseline justify-between text-slate-300">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Fundamentals</span>
-          <span className="font-mono text-slate-300">
+          <span className="font-mono text-slate-300" title={fundamentalsTitle}>
             P/E {peDisplay}
             <span className="text-slate-600"> · </span>
             D/E {deDisplay}

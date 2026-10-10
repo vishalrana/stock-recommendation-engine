@@ -44,13 +44,19 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - **Fail correctly**: on incomplete scans, stale or missing data, provider failures or thin samples, never silently publish misleading recommendations or corrupt existing records.
 - **Strategy changes need evidence**: do not change the production strategy without backtest validation.
 
-## Current status (as of 2026-10-09)
+## Current status (as of 2026-10-10)
 
 - Import errors in the universe provider and Supabase client were fixed. A project report claims 39 regression suites passed and a benchmark dry run succeeded.
-- The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code. `supabase/migration_reference_entry_price.sql` still has to be applied.
+- The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code. `supabase/migration_2026_10_10_fundamentals.sql` adds those columns and the fundamentals provenance columns, and still has to be applied.
+- Yahoo blocks GitHub's runners, so fundamentals now come from SEC EDGAR first. CI needs the `SEC_USER_AGENT` repository secret (a name and contact email); without it, fundamentals fall back to Yahoo and stay mostly empty in CI. After the next run, check the "Provider health" notice.
+- The backtest universe is the 2025-02-13 cache constituents, but the window starts 2022-10-21. Results before the universe date are survivorship-inflated. The late period (from 2025-04-09) is the cleaner test; its figures are given with the latest backtest below.
+- Open decision: the earnings blackout counts calendar days, while `EARNINGS_BLACKOUT_DAYS` is documented in trading days. Even in trading days it is far shorter than the 5–25-day holding periods, so many ideas hold through an earnings report. The card warns when that happens, and the backtest cannot test it (no historical earnings calendar).
 - CI failed on every push because `get_client()` called `sys.exit()` without secrets. This is fixed: the suite passes 40/40 with and without Supabase credentials.
 - The earlier backtest figures (−0.45% OOS expectancy) came from a harness that did not run the production pipeline, so they are superseded.
-- Latest production-pipeline backtest (2026-10-10, with the trend-quality gates): 4,405 issued trades. Net +0.39%/trade (CI −0.18% to +0.96%). Excess vs SPY −0.52%/trade (CI −1.13% to +0.05%). There is still no edge, and Pullback setups underperform SPY with a CI that excludes zero.
+- Latest production-pipeline backtest (2026-10-10, with 52-Week High switched off): 2,984 issued trades.
+  - Net +0.66%/trade (CI +0.05% to +1.29%). That CI excludes zero, but only because the market rose; the raw `edge_verdict_*` therefore reads "positive" and must not be taken as an edge.
+  - Excess vs SPY −0.21%/trade (CI −0.71% to +0.31%). Beta-adjusted −0.18%/trade (CI −0.63% to +0.29%), mean β 0.92. Late period (1,110 trades): beta-adjusted −0.26%/trade (CI −1.18% to +0.72%). There is still no selection edge.
+  - Before the switch-off (52-Week High on): 4,405 trades, excess −0.52%/trade, beta-adjusted −0.41%/trade (CI −0.90% to +0.04%).
 - Previous run (2026-10-09; 516 stocks + 15 ETFs; Oct 2022 – Oct 2026; 4,917 issued trades):
   - Net expectancy was +0.39%/trade (95% block-bootstrap CI −0.21% to +0.93%), so **no edge was detected**.
   - Holding SPY over the same windows returned +0.94%/trade, putting **excess vs SPY at −0.55%/trade (CI −1.12% to −0.06%)**. The recommendations underperformed simply holding the index.
@@ -71,9 +77,19 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 
 - `CacheManager.refresh_cache(start, end)` treats `end` as inclusive and adds a day for yfinance, whose `end` is exclusive. Before this, every nightly scan ran one session behind its regime date. If the cache still does not reach the market date after refresh, the scan publishes no new ideas and logs `stale_data`.
 - Context (analyst, fundamentals, news) counts only when the provider actually returned data (`DataQuality.VALID`). Provider failures make context unavailable, so the weights are renormalized. `ContextScorer` has no technical fallback, because RSI, ADX and volume already sit in the momentum score. Failed fetches are never written to `context_cache`.
+- The context score is the share of available points earned (earned ÷ available × 100). It counts only components that have data and are listed in `CONTEXT_SCORE_COMPONENTS` (`src/quant_config.py`, default: analyst + news). A missing component is excluded, never scored as 0. Rows carry `context_max_points` so the ranker uses the same denominator.
 - Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
 - News sentiment is the mean over all scored headlines, with neutral headlines counted as 0.
-- P/E, D/E and current ratio are display-only, refreshed nightly for every open idea, and never used in qualification.
+- P/E, D/E and current ratio are display-only, refreshed nightly for every open idea, and never used in qualification. This is enforced: fundamentals are left out of `CONTEXT_SCORE_COMPONENTS`, so their points and the D/E–current-ratio distress veto cannot move the score. In the point-in-time test they carried no information at the setup level. Adding them to the score changed issued-trade returns by only +0.05%/trade beta-adjusted (CI −0.08 to +0.19); see Research findings.
+- **Fundamentals source (since 2026-10-10):** SEC EDGAR company facts come first (`src/providers/context/sec_fundamentals.py`). Yahoo `.info` only fills gaps, because Yahoo blocks GitHub's runners.
+  - SEC requires a contact User-Agent. Set it in the `SEC_USER_AGENT` repository secret and in the local `.env`, never in a committed file. Without it, SEC is disabled and Yahoo alone is used.
+  - TTM EPS uses the 10-K, then 10-K + current YTD − prior YTD, then the last four quarters. If reported EPS differs from TTM net income ÷ latest diluted shares by more than 35% on the same period end, the net-income figure is used, which catches splits between filings. EPS ≤ 0 means "Loss", with no P/E.
+  - D/E is all borrowings (including current maturities and commercial paper) plus finance and operating leases, divided by total equity including non-controlling interest. If borrowings were tagged in other periods but not on the latest balance sheet, D/E is unknown, never 0.
+  - Data older than 200 days is not used. `fundamentals_source` and `fundamentals_as_of` (balance-sheet date) are stored with each idea.
+  - A holding-company reorganisation starts a new SEC filer with no history: XOM (August 2026), BLK (2024), BG (2023). Until the new filer has a 10-K or four quarters, its TTM EPS (and so P/E) comes only from Yahoo, which means none in CI. D/E and current ratio are unaffected. The value shows as missing, never as a wrong number.
+  - Summaries are cached for 72 hours in `data/cache/fundamentals/`, which the workflows cache.
+- Each scan prints a "Provider health" GitHub notice: SEC and Yahoo success counts, and context and display-fundamentals coverage. It is readable from the run's check annotations without admin rights.
+- `supabase/migration_2026_10_10_fundamentals.sql` adds `eps_ttm`, `fundamentals_source` and `fundamentals_as_of`. It also adds the never-applied `reference_entry_price`, `weighted_scaleout_rr` and `entry_location_zone` columns, and it is idempotent.
 - Inserts drop only the specific unmigrated column the database names (`write_with_missing_column_retry`). If the logs show `[SCHEMA] Wrote without unmigrated column(s)`, apply the missing migration.
 - `get_client()` raises `SupabaseConfigError` instead of exiting, so CI can run tests without secrets.
 
@@ -90,10 +106,58 @@ Get the maths and recommendation logic right first. Do not add complexity for it
   - Trend Following requires a rising 200-day.
   - Against the same harness and data, issued-trade excess vs SPY went from −0.55% to −0.52%/trade. Cross-Sectional issued trades went from +0.06% to +0.43% net, and Trend Following from −0.46% to −0.23% vs SPY. All differences are within the confidence intervals, so the gates are kept as definitional fixes, not as proven improvements.
 - **Reach probability:** setup-conditional (the strategy's backtest target-hit rate) once the strategy has at least 30 trades. Otherwise it falls back to the ticker base rate. `reach_prob_source` records which one was used.
+- **52-Week High switched off (user-approved test-and-fix, 2026-10-10).** It is removed from `REGIME_STRATEGY_MAP` (bull was its only regime). Open 52-Week High ideas keep being tracked to their stop, target or 25-day limit. Re-adding it requires a new backtest. See "52-Week High decision" below.
+
+## 52-Week High decision (2026-10-10)
+
+- **Why:** it produced 72% of issued ideas and the weakest results: −0.48%/trade beta-adjusted (CI −1.03 to +0.04), and −0.75 in the late period. Its rules had been loosened from the original spec (within 2% of the high → 5%, RSI 55–75 → 45–80, ADX ≥ 20 → 15, volume ≥ 1.2× → 0.8×, within 3% of the 20-day high → 5%), so it bought almost any stock near its high in a bull market.
+- **Method:** three alternatives were fixed before any results, plus a rule. An alternative is adopted only if its paired beta-adjusted return per issued idea, over the whole book, beats production in both the full and the late period. If several qualify, the largest full-period gain wins. The screen ran `--variants w52_off,w52_original_rules,w52_breakout` against identical setups.
+
+| Option | Ideas | Ideas / month | Beta-adj. per idea | vs production, full | vs production, late |
+|---|---|---|---|---|---|
+| production (relaxed rules) | 4,405 | 89.9 | −0.41 (CI −0.91 to +0.05) | — | — |
+| **off** | 2,984 | 63.5 | −0.18 (CI −0.63 to +0.29) | **+0.23 (CI +0.02 to +0.45)** | **+0.36 (CI +0.04 to +0.67)** |
+| original (stricter) rules | 3,186 | 65.0 | −0.23 (CI −0.74 to +0.25) | +0.18 (CI −0.00 to +0.38) | +0.25 (CI −0.06 to +0.56) |
+| true breakout (new 52-week closing high on ≥ 1.5× volume) | 3,137 | 65.4 | −0.27 (CI −0.77 to +0.21) | +0.14 (CI −0.04 to +0.33) | +0.14 (CI −0.13 to +0.39) |
+
+- All three passed the rule. "Off" had the largest gain, and its CIs exclude zero in both periods, so it was adopted. The full validation run (scans recomputed, evidence regenerated without 52-Week High) reproduced the screen exactly: 2,984 ideas, beta-adjusted −0.18%/trade. Even under the stricter rules, 52-Week High ideas stayed negative (−0.25 beta-adjusted).
+- Ideas fall only 29%, because many of the same stocks are then issued under Trend Following (964 → 2,550 ideas, −0.19 beta-adjusted). Other strategies' evidence does not depend on 52-Week High, so the screen is exact for this option.
+- The engine is still not positive after adjusting for beta. This removes its worst component; it does not create an edge.
+
+## Research findings (2026-10-10, setup level)
+
+Method: all 27,268 strategy setups from the production-pipeline backtest (Oct 2022 – Oct 2026), point-in-time features, forward net return minus SPY over the same window. Ranking power is measured as the monthly Spearman rank-IC (t-stat over months), with differences given as signal-month block-bootstrap 95% CIs. The sample is almost all bull market, so treat every result as provisional.
+
+- **Momentum sub-score (45–50% of the trend and breakout weights) does not rank stocks.** IC: 52-Week High −0.02 (t −0.8), Cross-Sectional −0.04 (t −2.8), Pullback −0.03, Trend +0.01, Mean Reversion +0.04. It is not reliably positive in either half of the sample, and its quintiles are not monotonic.
+- **The composite ≥ 65 cut adds nothing.** Excess per setup, ≥ 65 vs < 65: 52-Week High −0.44 vs −0.46, Cross-Sectional −0.68 vs −0.17, Trend −0.17 vs −0.35. Pullback setups never reach 65.
+- **12-month return ranks better.** IC: 52-Week High +0.06 (t 1.8), Cross-Sectional +0.06 (t 2.3), Pullback +0.07 (t 3.2), positive in both halves, which matches the documented momentum anomaly. ATR% also "predicts" (IC +0.05 to +0.14), but that is beta in a rising market, not skill.
+- **The entry-location gate keeps the worse setups.** Mean excess: BUY −0.46 (11,626), WAIT −0.26 (14,555), REJECT −0.11 (1,087). For Trend Following, BUY minus blocked is −0.30 (CI −0.60 to −0.03).
+- **Fundamentals carry no information (point-in-time SEC, D/E coverage 82%).** Excess with the trait minus without it: D/E < 1 −0.01 (CI −0.27 to +0.28); current ratio > 1.5 +0.21 (−0.23 to +0.62); distress veto −0.01 (−0.54 to +0.53); P/E below median +0.16 (−0.13 to +0.50). Loss-makers beat profitable companies by +1.13 (+0.44 to +1.85), which is speculative beta in a bull sample, not a quality signal.
+
+## Selection-variant backtest (2026-10-10)
+
+Run while 52-Week High was still active. Method: one pass of `validate_backtest_pipeline.py --variants all`, so every variant sees the same setups, walk-forward evidence and execution. Each row is issued trades. "Beta-adjusted" is net return − β × SPY return over the trade window, with β estimated from the 252 sessions before the signal. Differences are paired block-bootstrap 95% CIs. The late period starts 2025-04-09, after the universe date, so it is the cleaner test.
+
+| Variant | Trades | β | Excess vs SPY | Beta-adj. | Beta-adj. vs production, full | Beta-adj. vs production, late |
+|---|---|---|---|---|---|---|
+| production (technical momentum, entry gate, no fundamentals) | 4,405 | 0.88 | −0.52 | −0.41 | — | — |
+| `rs_momentum` (12-1 month RS percentile) | 4,042 | 1.10 | −0.28 | −0.40 | +0.00 (−0.34 to +0.38) | +0.27 (−0.25 to +0.93) |
+| `entry_info` (entry verdict not a gate) | 5,975 | 0.89 | −0.47 | −0.35 | +0.06 (−0.09 to +0.22) | +0.09 (−0.14 to +0.34) |
+| `rs_momentum_entry_info` | 5,186 | 1.11 | −0.17 | −0.30 | +0.11 (−0.21 to +0.45) | +0.52 (+0.06 to +1.11) |
+| `fundamentals_in_score` | 4,145 | 0.92 | −0.43 | −0.36 | +0.05 (−0.08 to +0.19) | +0.27 (+0.01 to +0.50) |
+
+- **No variant earns a positive beta-adjusted return.** Relative strength improves raw excess only by buying higher-beta stocks (β 1.10 vs 0.88); beta-adjusted over the full period it is identical to production.
+- The two late-period CIs that exclude zero are 2 of 8 comparisons on about 18 monthly blocks, and the full period does not confirm them. They are not evidence for a change.
+- The entry gate blocks about 1,500 trades without changing per-trade quality, so it neither helps nor hurts measurably.
+- Production per strategy, beta-adjusted, full period: 52-Week High −0.48 (CI −1.03 to +0.04; 72% of trades), Trend Following −0.25, Cross-Sectional −0.07, Sector Rotation −0.10, Mean Reversion −0.38 (47 trades). The late period is worse: 52-Week High −0.75.
+- Production defaults are unchanged (technical, gate, fundamentals display-only). The switches remain available for future tests.
 
 ## Backtest
 
 - `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap. Rerun it after any change to strategy, scoring or exit logic, then commit the regenerated `config/strategy_performance.json`.
+- Every trade carries a point-in-time `beta` (252 sessions before the signal) and `beta_adjusted_pct` (net − β × SPY return over the trade window). The stats include `mean_beta_adjusted_pct` with its CI, and the summary includes `edge_beta_adjusted_verdict_*`. Judge selection skill on the beta-adjusted and vs-SPY verdicts, not on `edge_verdict_*` (absolute return).
+- The cached phase-1 scans are keyed by strategy code, indicators, data extent and `REGIME_STRATEGY_MAP`, so switching a strategy on or off forces a rescan.
+- `--variants all` (or a comma-separated list) evaluates alternatives in the same pass, against identical setups, evidence and execution. Selection variants: `rs_momentum`, `entry_info`, `rs_momentum_entry_info`, `fundamentals_in_score`. Strategy screening variants (`STRATEGY_VARIANTS`, candidate filters): `w52_off`, `w52_original_rules`, `w52_breakout`. They need 52-Week High re-enabled in `REGIME_STRATEGY_MAP`; otherwise they do nothing. A strategy variant keeps that strategy's walk-forward evidence from all its setups, so a winner must be built into the strategy and re-validated with a full run. Each variant keeps its own book, with one active idea per ticker. Results go to `outputs/production_backtest_variants.json`, with paired CIs against production. The switches live in `src/quant_config.py` (`MOMENTUM_MODEL`, `ENTRY_LOCATION_MODE`, `CONTEXT_SCORE_COMPONENTS`) and are read through `SelectionSettings` by both the scan and the backtest. `fundamentals_in_score` uses point-in-time SEC fundamentals: facts filed strictly before the signal date, with the 200-day freshness rule.
 - Known limitations (listed in its output): survivorship, no historical earnings calendar (so PEAD and the earnings blackout cannot be tested), no historical context data, no VIX history, and thresholds that were hand-tuned before the harness existed.
 
 ## Other docs

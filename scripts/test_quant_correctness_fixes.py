@@ -309,7 +309,8 @@ class TestContextDataQuality(unittest.TestCase):
     def test_metadata_single_request_per_ticker(self):
         from unittest.mock import patch, MagicMock
         from src.providers.context.metadata_provider import MetadataProvider
-        mp = MetadataProvider()
+        from src.providers.context.sec_fundamentals import SecFundamentalsProvider
+        mp = MetadataProvider(sec_provider=SecFundamentalsProvider(user_agent=""))  # SEC off: Yahoo path only
         fake = MagicMock(); fake.info = {"trailingPE": 25.0, "debtToEquity": 80.0, "currentRatio": 1.2, "targetMeanPrice": 110.0}
         with patch("yfinance.Ticker", return_value=fake) as tk:
             f = mp.get_fundamentals("ONEX"); a = mp.get_analyst_rating("ONEX")
@@ -348,6 +349,312 @@ class TestTrendQualityGates(unittest.TestCase):
         from jobs.strategies.trend_following import TrendFollowingStrategy
         closes = np.concatenate([np.linspace(160, 80, 200), np.linspace(80, 130, 60)])
         self.assertIsNone(TrendFollowingStrategy().scan("TFX", self._df(closes), "bull", {}))
+
+
+
+def _fact(val, end, filed, start=None, form="10-Q", fp="Q2"):
+    f = {"val": val, "end": end, "filed": filed, "form": form, "fp": fp}
+    if start:
+        f["start"] = start
+    return f
+
+
+def _company(gaap):
+    return {"facts": {"us-gaap": {tag: {"units": units} for tag, units in gaap.items()}}}
+
+
+class TestSecFundamentals(unittest.TestCase):
+    """SEC EDGAR extraction on synthetic filings (no network)."""
+
+    def _base(self):
+        return {
+            "EarningsPerShareDiluted": {"USD/shares": [
+                _fact(10.0, "2025-12-31", "2026-02-20", start="2025-01-01", form="10-K", fp="FY"),
+                _fact(2.0, "2025-06-30", "2025-07-30", start="2025-01-01"),   # prior-year H1
+                _fact(3.0, "2026-06-30", "2026-07-30", start="2026-01-01"),   # current H1
+            ]},
+            "AssetsCurrent": {"USD": [_fact(300.0, "2026-06-30", "2026-07-30")]},
+            "LiabilitiesCurrent": {"USD": [_fact(200.0, "2026-06-30", "2026-07-30")]},
+            "StockholdersEquity": {"USD": [_fact(1000.0, "2026-06-30", "2026-07-30")]},
+            "LongTermDebt": {"USD": [_fact(400.0, "2026-06-30", "2026-07-30")]},
+            "ShortTermBorrowings": {"USD": [_fact(100.0, "2026-06-30", "2026-07-30")]},
+            "OperatingLeaseLiability": {"USD": [_fact(50.0, "2026-06-30", "2026-07-30")]},
+        }
+
+    def test_ttm_eps_pe_de_cr(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        f = extract_fundamentals(_company(self._base()), reference_date=date(2026, 10, 1))
+        self.assertAlmostEqual(f.eps_ttm, 11.0)            # 10 + 3 - 2
+        self.assertEqual(f.eps_period_end, "2026-06-30")
+        self.assertAlmostEqual(f.pe_ratio(220.0), 20.0)
+        self.assertAlmostEqual(f.current_ratio, 1.5)
+        self.assertAlmostEqual(f.debt_to_equity, 0.55)     # (400 + 100 + 50 leases) / 1000
+        self.assertIsNone(f.pe_ratio(None))
+
+    def test_loss_maker_has_no_pe(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        g = self._base()
+        g["EarningsPerShareDiluted"]["USD/shares"][2]["val"] = -11.0
+        f = extract_fundamentals(_company(g), reference_date=date(2026, 10, 1))
+        self.assertLess(f.eps_ttm, 0)
+        self.assertIsNone(f.pe_ratio(100.0))
+
+    def test_point_in_time_excludes_later_filings(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        g = self._base()
+        # As of 2026-07-15 the H1-2026 10-Q (filed 2026-07-30) does not exist yet
+        f = extract_fundamentals(_company(g), as_of=date(2026, 7, 15), reference_date=date(2026, 7, 15))
+        self.assertEqual(f.eps_period_end, "2025-12-31")
+        self.assertAlmostEqual(f.eps_ttm, 10.0)
+        self.assertIsNone(f.current_ratio)  # no balance sheet filed yet as of that date
+
+    def test_split_between_filings_uses_net_income(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        g = self._base()
+        # 10:1 split after the 10-K: annual EPS pre-split (10.0), YTD EPS post-split (0.3 / 0.2)
+        g["EarningsPerShareDiluted"]["USD/shares"][1]["val"] = 0.2
+        g["EarningsPerShareDiluted"]["USD/shares"][2]["val"] = 0.3
+        g["NetIncomeLoss"] = {"USD": [
+            _fact(1000.0, "2025-12-31", "2026-02-20", start="2025-01-01", form="10-K", fp="FY"),
+            _fact(200.0, "2025-06-30", "2025-07-30", start="2025-01-01"),
+            _fact(300.0, "2026-06-30", "2026-07-30", start="2026-01-01"),
+        ]}
+        g["WeightedAverageNumberOfDilutedSharesOutstanding"] = {"shares": [
+            _fact(1000.0, "2026-06-30", "2026-07-30", start="2026-04-01"),  # post-split share count
+        ]}
+        f = extract_fundamentals(_company(g), reference_date=date(2026, 10, 1))
+        self.assertAlmostEqual(f.eps_ttm, 1.1)  # (1000 + 300 - 200) / 1000, not 10 + 0.3 - 0.2
+        self.assertIn("split-check", f.eps_method)
+
+    def test_unknown_borrowings_are_never_zero(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        g = self._base()
+        # Debt was tagged in an older period but not on the latest balance-sheet date
+        g["LongTermDebt"]["USD"][0]["end"] = "2025-12-31"
+        g["ShortTermBorrowings"]["USD"][0]["end"] = "2025-12-31"
+        f = extract_fundamentals(_company(g), reference_date=date(2026, 10, 1))
+        self.assertIsNone(f.debt_to_equity)
+        # A company that never tagged borrowings: only leases count
+        del g["LongTermDebt"]
+        del g["ShortTermBorrowings"]
+        f2 = extract_fundamentals(_company(g), reference_date=date(2026, 10, 1))
+        self.assertAlmostEqual(f2.debt_to_equity, 0.05)
+
+    def test_reit_style_debt_tags(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        g = self._base()
+        del g["LongTermDebt"]
+        del g["ShortTermBorrowings"]
+        g["SecuredDebt"] = {"USD": [_fact(700.0, "2026-06-30", "2026-07-30")]}
+        g["UnsecuredDebt"] = {"USD": [_fact(300.0, "2026-06-30", "2026-07-30")]}
+        f = extract_fundamentals(_company(g), reference_date=date(2026, 10, 1))
+        self.assertAlmostEqual(f.debt_to_equity, 1.05)  # (700 + 300 + 50) / 1000
+
+    def test_stale_filer_returns_nothing(self):
+        from src.providers.context.sec_fundamentals import extract_fundamentals
+        f = extract_fundamentals(_company(self._base()), reference_date=date(2027, 6, 1))
+        self.assertIsNone(f.eps_ttm)
+        self.assertIsNone(f.current_ratio)
+
+    def test_metadata_prefers_sec_and_fills_gaps_from_yahoo(self):
+        from unittest.mock import MagicMock, patch
+        from src.providers.context.metadata_provider import MetadataProvider
+        from src.providers.context.sec_fundamentals import SecFundamentals
+        sec = MagicMock()
+        sec.available = True
+        sec.fundamentals.return_value = SecFundamentals(eps_ttm=5.0, debt_to_equity=0.4, current_ratio=None, balance_sheet_date="2026-06-30")
+        mp = MetadataProvider(sec_provider=sec)
+        fake = MagicMock()
+        fake.info = {"trailingPE": 99.0, "debtToEquity": 300.0, "currentRatio": 2.0}
+        with patch("yfinance.Ticker", return_value=fake):
+            f = mp.get_fundamentals("GAPX", price=100.0)
+        self.assertEqual(f.trailing_pe, 20.0)      # SEC: 100 / 5
+        self.assertEqual(f.debt_to_equity, 0.4)    # SEC wins
+        self.assertEqual(f.current_ratio, 2.0)     # gap filled by Yahoo
+        self.assertEqual(f.source, "sec+yahoo")
+
+    def test_yahoo_non_finite_values_are_missing(self):
+        from unittest.mock import MagicMock, patch
+        from src.providers.context.metadata_provider import MetadataProvider
+        from src.providers.context.sec_fundamentals import SecFundamentalsProvider
+        mp = MetadataProvider(sec_provider=SecFundamentalsProvider(user_agent=""))  # SEC off: Yahoo path only
+        fake = MagicMock()
+        fake.info = {"trailingPE": "Infinity", "debtToEquity": float("nan"), "currentRatio": 1.4, "targetMeanPrice": "n/a"}
+        with patch("yfinance.Ticker", return_value=fake):
+            f = mp.get_fundamentals("JUNK", price=10.0)
+            a = mp.get_analyst_rating("JUNK")
+        self.assertIsNone(f.trailing_pe)
+        self.assertIsNone(f.debt_to_equity)
+        self.assertEqual(f.current_ratio, 1.4)
+        self.assertIsNone(a.target_mean_price)
+
+
+class TestContextNormalization(unittest.TestCase):
+    def test_missing_analyst_is_excluded_not_zero(self):
+        from src.scorers.context_scorer import ContextScorer
+        from src.providers.base import AggregatedContext, FundamentalContext, DataQuality
+        ctx = AggregatedContext(fundamental=FundamentalContext(debt_to_equity=0.5, current_ratio=2.0, quality=DataQuality.VALID))
+        total, a, f, n, avail = ContextScorer().calculate_with_components(ctx, 100.0, ("analyst", "fundamental", "news"))
+        self.assertEqual((a, f, avail), (0.0, 20.0, 20.0))
+        self.assertEqual(total, 100.0)   # perfect fundamentals, no analyst data: 100, not 25
+
+    def test_fundamentals_are_display_only_by_default(self):
+        from src.scorers.context_scorer import ContextScorer
+        from src.providers.base import AggregatedContext, AnalystContext, FundamentalContext, DataQuality
+        from src.quant_config import CONTEXT_SCORE_COMPONENTS
+        self.assertNotIn("fundamental", CONTEXT_SCORE_COMPONENTS)
+        fund_only = AggregatedContext(fundamental=FundamentalContext(debt_to_equity=0.5, current_ratio=2.0, quality=DataQuality.VALID))
+        self.assertIsNone(ContextScorer().calculate_with_components(fund_only, 100.0)[0])  # unavailable, not 100
+        both = AggregatedContext(
+            analyst=AnalystContext(target_mean_price=120.0, recommendation="buy", quality=DataQuality.VALID),
+            fundamental=FundamentalContext(debt_to_equity=5.0, current_ratio=0.5, quality=DataQuality.VALID),
+        )
+        total, a, f, n, avail = ContextScorer().calculate_with_components(both, 100.0)
+        self.assertEqual((total, a, f, avail), (100.0, 40.0, 0.0, 40.0))  # weak balance sheet does not count
+
+    def test_no_component_means_unavailable(self):
+        from src.scorers.context_scorer import ContextScorer
+        from src.providers.base import AggregatedContext
+        total = ContextScorer().calculate_with_components(AggregatedContext(), 100.0)[0]
+        self.assertIsNone(total)
+
+    def test_ranker_uses_available_points(self):
+        from src.ranker import compute_context_score
+        self.assertEqual(compute_context_score(fundamental_pts=10.0, max_points=20.0), 50.0)
+        # legacy rows without max_points keep the old scale
+        self.assertEqual(compute_context_score(fundamental_pts=10.0), 12.5)
+
+
+
+class TestSelectionSettings(unittest.TestCase):
+    """Selection switches shared by the nightly scan and the backtest."""
+
+    def test_defaults_and_validation(self):
+        from src.pipeline_steps import SelectionSettings, selection_settings
+        st = selection_settings()
+        self.assertEqual((st.momentum_model, st.entry_location_mode), ("technical", "gate"))
+        self.assertTrue(st.blocks_entry("WAIT") and st.blocks_entry("REJECT"))
+        self.assertFalse(st.blocks_entry("BUY"))
+        info = SelectionSettings("technical", "info", ())
+        self.assertFalse(info.blocks_entry("WAIT") or info.blocks_entry("REJECT"))
+        with self.assertRaises(ValueError):
+            SelectionSettings("rsi_only", "gate", ())
+        with self.assertRaises(ValueError):
+            SelectionSettings("technical", "gate", ("earnings",))
+
+    def test_relative_strength_percentiles(self):
+        from src.pipeline_steps import relative_strength_percentiles
+        idx = pd.bdate_range("2024-01-01", periods=10)
+        # A doubles, B flat, C halves between t-4 and t-1; the latest bar (t) is skipped
+        closes = pd.DataFrame({
+            "A": [10, 10, 10, 10, 10, 10, 20, 20, 20, 99],
+            "B": [10] * 9 + [1],
+            "C": [10, 10, 10, 10, 10, 10, 5, 5, 5, 99],
+        }, index=idx, dtype=float)
+        rs = relative_strength_percentiles(closes, lookback=4, skip=1)
+        last = rs.iloc[-1]
+        np.testing.assert_allclose([last["A"], last["B"], last["C"]], [100.0, 200 / 3, 100 / 3])
+        self.assertTrue(rs.iloc[:4].isna().all().all())  # not enough history yet
+        # Ineligible tickers leave the cross-section
+        elig = pd.DataFrame(True, index=idx, columns=closes.columns)
+        elig["C"] = False
+        last2 = relative_strength_percentiles(closes, eligible=elig, lookback=4, skip=1).iloc[-1]
+        self.assertEqual((last2["A"], last2["B"]), (100.0, 50.0))
+        self.assertTrue(np.isnan(last2["C"]))
+
+    def test_rs_momentum_uses_percentile_and_fails_closed(self):
+        from src.pipeline_steps import SelectionSettings, prepare_candidate_scores, composite_score
+        rs_settings = SelectionSettings("relative_strength_12m", "gate", ())
+        base = {"ticker": "RSX", "strategy": "Trend Following", "current_rsi": 60.0, "price": 100.0,
+                "entry_price": 100.0, "dma_50": 95.0, "volume_ratio": 1.2, "macd_histogram": 0.5, "atr_14": 2.0,
+                "context_available": False}
+        sig = dict(base, rs_percentile_12m=87.5)
+        prepare_candidate_scores(sig, "bull", settings=rs_settings)
+        self.assertEqual(sig["momentum_score"], 87.5)
+        self.assertIsNone(composite_score(sig, "bull", SignalRanker()))
+        self.assertEqual(sig["score_breakdown"]["momentum"], 87.5)
+        missing = dict(base, rs_percentile_12m=None)
+        prepare_candidate_scores(missing, "bull", settings=rs_settings)
+        self.assertIn("relative strength", composite_score(missing, "bull", SignalRanker()))
+
+    def test_live_relative_strength_ranks_whole_universe(self):
+        from jobs.generate_signals import attach_relative_strength
+        idx = pd.bdate_range("2024-01-01", periods=300)
+
+        def hist(growth):
+            close = 50.0 * np.power(growth, np.arange(300))
+            return pd.DataFrame({"OPEN": close, "HIGH": close, "LOW": close, "CLOSE": close,
+                                 "VOLUME": 1e6}, index=idx)
+
+        class FakeCache:
+            data = {"AAA": hist(1.002), "BBB": hist(1.001), "CCC": hist(1.0), "XLK": hist(1.001), "XLF": hist(1.0)}
+
+            def get_ticker_history(self, t, start, end):
+                return self.data.get(t)
+
+        cands = [{"ticker": "BBB"}, {"ticker": "XLK"}]
+        n = attach_relative_strength(cands, FakeCache(), ["AAA", "BBB", "CCC"], ["XLK", "XLF"],
+                                     str(idx[0].date()), str(idx[-1].date()))
+        self.assertEqual(n, 5)
+        self.assertAlmostEqual(cands[0]["rs_percentile_12m"], 200 / 3)  # middle of 3 stocks
+        self.assertEqual(cands[1]["rs_percentile_12m"], 100.0)           # best of 2 sector ETFs
+
+
+class TestBacktestSecPointInTime(unittest.TestCase):
+    def test_lookup_uses_only_earlier_fresh_filings(self):
+        from scripts.validate_backtest_pipeline import sec_fundamentals_on
+        table = {"AAA": (["2025-02-20", "2025-05-01"], [(0.8, 1.6, "2024-12-31"), (1.2, 1.1, "2025-03-31")])}
+        self.assertEqual(sec_fundamentals_on(table, "AAA", "2025-02-20"), (None, None))  # filed that day: not yet known
+        self.assertEqual(sec_fundamentals_on(table, "AAA", "2025-03-03"), (0.8, 1.6))
+        self.assertEqual(sec_fundamentals_on(table, "AAA", "2025-05-02"), (1.2, 1.1))
+        self.assertEqual(sec_fundamentals_on(table, "AAA", "2026-01-15"), (None, None))  # balance sheet > 200 days old
+        self.assertEqual(sec_fundamentals_on(table, "ZZZ", "2025-05-02"), (None, None))
+        no_bs = {"AAA": (["2025-02-20"], [(float("nan"), float("nan"), float("nan"))])}  # as read back from parquet
+        self.assertEqual(sec_fundamentals_on(no_bs, "AAA", "2025-03-03"), (None, None))
+
+    def test_context_only_when_fundamentals_are_scored(self):
+        from scripts.validate_backtest_pipeline import apply_backtest_context
+        from jobs.generate_signals import _mark_context_unavailable
+        from src.pipeline_steps import SelectionSettings
+        from src.scorers.context_scorer import ContextScorer
+        table = {"AAA": (["2025-02-20"], [(3.0, 0.8, "2024-12-31")])}
+        sig = {"ticker": "AAA", "entry_price": 50.0}
+        apply_backtest_context(sig, SelectionSettings("technical", "gate", ("analyst", "news")), table,
+                               ContextScorer(), "2025-03-03", _mark_context_unavailable)
+        self.assertFalse(sig["context_available"])
+        apply_backtest_context(sig, SelectionSettings("technical", "gate", ("analyst", "fundamental", "news")), table,
+                               ContextScorer(), "2025-03-03", _mark_context_unavailable)
+        self.assertTrue(sig["context_available"])
+        self.assertEqual((sig["context_score"], sig["context_max_points"], sig["de_ratio"]), (0.0, 20.0, 3.0))
+
+
+
+class TestWeek52HighDecision(unittest.TestCase):
+    def test_52_week_high_is_switched_off(self):
+        # Backtest decision 2026-10-10 (CLAUDE.md "52-Week High decision"): re-enabling needs a new backtest.
+        from jobs.generate_signals import REGIME_STRATEGY_MAP
+        for regime, active in REGIME_STRATEGY_MAP.items():
+            self.assertNotIn("52-Week High", active, regime)
+        self.assertIn("Trend Following", REGIME_STRATEGY_MAP["bull"])
+
+    def test_screening_features_match_strategy_windows(self):
+        from scripts.validate_backtest_pipeline import _w52_features, w52_breakout, w52_original_rules
+        n = 300
+        close = np.linspace(50.0, 80.0, n)
+        frame = pd.DataFrame({
+            "CLOSE": close, "HIGH": close * 1.01, "VOLUME": np.full(n, 1e6),
+            "RSI_14": np.full(n, 60.0), "ADX_14": np.full(n, 25.0),
+        }, index=pd.bdate_range("2024-01-01", periods=n))
+        frame.iloc[-1, frame.columns.get_loc("VOLUME")] = 2.6e6  # breakout-day volume
+        f = _w52_features(frame, n - 1)
+        self.assertTrue(f["new_52w_close"])                        # highest close of the last 252 sessions
+        self.assertAlmostEqual(f["volume_ratio"], 2.6e6 / ((19 * 1e6 + 2.6e6) / 20))
+        self.assertAlmostEqual(f["pct_vs_52w"], (1 / 1.01 - 1) * 100)  # close vs intraday 52-week high
+        sig = {"_loc": n - 1}
+        self.assertTrue(w52_breakout(sig, frame) and w52_original_rules(sig, frame))
+        frame.iloc[-1, frame.columns.get_loc("CLOSE")] = close[-2] * 0.99  # pulls back: no new closing high
+        self.assertFalse(_w52_features(frame, n - 1)["new_52w_close"])
+        self.assertFalse(w52_breakout(sig, frame))
 
 
 if __name__ == "__main__":

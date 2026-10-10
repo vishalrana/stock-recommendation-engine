@@ -95,6 +95,7 @@ def compute_context_score(
     target_consensus: Optional[float] = None,
     price: Optional[float] = None,
     base_score: Optional[float] = None,
+    max_points: Optional[float] = None,
 ) -> float:
     """
     Master Spec Context Score (Earnings Decoupled):
@@ -109,6 +110,11 @@ def compute_context_score(
     """
     if base_score is not None:
         raw = min(100.0, max(0.0, float(base_score)))
+    elif max_points is not None and float(max_points) > 0:
+        # Share of the points AVAILABLE for this stock (components with data), so a missing
+        # component (e.g. no analyst coverage) is excluded rather than scored as zero.
+        earned = float(analyst_pts or 0.0) + float(fundamental_pts or 0.0) + float(news_pts or 0.0)
+        raw = min(100.0, max(0.0, earned / float(max_points) * 100.0))
     else:
         raw_non_earnings = float(analyst_pts or 0.0) + float(fundamental_pts or 0.0) + float(news_pts or 0.0)
         # Normalize non-earnings components: unscaled ceiling is 80 (Analyst 40, Fundamental 20, News 20)
@@ -413,8 +419,21 @@ class SignalRanker:
             float(row.get(k) or 0.0) > 0
             for k in ("context_analyst", "context_fundamental", "context_news")
         )
+        context_max_points = row.get("context_max_points")
 
-        if not has_breakdown and "context_score" in row and row["context_score"] is not None:
+        if context_max_points is not None and float(context_max_points) > 0:
+            context_score = compute_context_score(
+                analyst_pts=c_analyst,
+                fundamental_pts=c_fundamental,
+                news_pts=c_news,
+                de_ratio=row.get("de_ratio"),
+                current_ratio=row.get("current_ratio"),
+                finbert_sentiment=row.get("finbert_sentiment"),
+                target_consensus=row.get("target_consensus"),
+                price=row.get("price") or row.get("entry_price"),
+                max_points=context_max_points,
+            )
+        elif not has_breakdown and "context_score" in row and row["context_score"] is not None:
             # If only raw context_score was passed, apply veto gates directly to that base score
             context_score = compute_context_score(
                 base_score=float(row["context_score"]),

@@ -21,6 +21,13 @@ class ContextAggregator:
         self.news = FinBERTNewsProvider()
     
     def get_aggregated(self, ticker: str, price_df: pd.DataFrame) -> AggregatedContext:
+        last_close = None
+        try:
+            if price_df is not None and not price_df.empty:
+                col = next(c for c in price_df.columns if str(c).upper() == "CLOSE")
+                last_close = float(price_df[col].dropna().iloc[-1])
+        except Exception:
+            last_close = None
         # Check database cache first if supabase settings exist
         from jobs.supabase_client import get_client
         import os
@@ -54,7 +61,7 @@ class ContextAggregator:
                         analyst = AnalystContext(target_mean_price=analyst_target, quality=DataQuality.VALID)
                         earnings = EarningsContext()  # Decoupled: not required for initial context score
                         news = NewsContext(headline_sentiment=news_sentiment or 0.0)
-                        fundamental = self.metadata.get_fundamentals(ticker)
+                        fundamental = self.metadata.get_fundamentals(ticker, price=last_close)
                         
                         logger.info(f"Context cache HIT for {ticker} (age: {age_hours:.1f}h). Reusing cached score: {cache_row['context_score']}")
                         return AggregatedContext(
@@ -70,7 +77,7 @@ class ContextAggregator:
 
         # Cache miss: Run non-earnings providers
         analyst = self.metadata.get_analyst_rating(ticker)
-        fundamental = self.metadata.get_fundamentals(ticker)
+        fundamental = self.metadata.get_fundamentals(ticker, price=last_close)
         earnings = EarningsContext()  # Decoupled: zero network calls to earnings provider during initial scoring
         news = self.news.fetch_and_score(ticker)
         

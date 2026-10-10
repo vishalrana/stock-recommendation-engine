@@ -1,17 +1,19 @@
 {
   "metadata": {
     "description": "Per-strategy evidence from the production-pipeline backtest (scripts/validate_backtest_pipeline.py), measured on all of each strategy's setups (one open per strategy+ticker), net of costs. Consumed by src/strategy_evidence.py.",
-    "generated_at": "2026-10-10T05:03:24.909138+00:00",
+    "generated_at": "2026-10-10T10:28:57.126166+00:00",
     "evaluation_window": [
       "2022-10-21",
       "2026-10-09"
     ],
     "evidence_as_of": "2026-10-09",
     "net_of_costs_pct_per_side": 0.1,
-    "edge_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
+    "edge_verdict_all": "POSITIVE_EDGE_SUPPORTED",
     "edge_vs_spy_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
+    "edge_beta_adjusted_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
+    "verdict_note": "edge_verdict_* tests absolute net return, which a rising market lifts on its own. Selection skill is judged by the vs-SPY and beta-adjusted verdicts.",
     "limitations": [
-      "Survivorship: tickers delisted after the start date have no history and are excluded.",
+      "Survivorship: the universe is the 2025-02-13 cache constituents; before that date it is chosen with hindsight (survivors only). The late period from 2025-04-09 is the cleaner test.",
       "No historical earnings calendar: earnings blackout not applied; PEAD cannot fire.",
       "No historical context data: context excluded from scores (weights renormalized).",
       "No VIX history: VIX>40 override not applied.",
@@ -74,17 +76,6 @@
       "t2_n": 72,
       "t3_hits": 0,
       "t3_n": 1
-    },
-    "52w_high_breakout": {
-      "trades": 6958,
-      "wins": 4228,
-      "sum_return": 4562.862600000008,
-      "t1_hits": 3669,
-      "t1_n": 6958,
-      "t2_hits": 13,
-      "t2_n": 210,
-      "t3_hits": 0,
-      "t3_n": 19
     }
   }
 }

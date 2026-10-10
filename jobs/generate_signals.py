@@ -105,7 +105,10 @@ REGIME_STRATEGY_MAP = {
         "Trend Following",
         "Sector Rotation",
         "Post-Earnings Drift",
-        "52-Week High",
+        # "52-Week High" switched off 2026-10-10: 72% of issued ideas and the weakest strategy.
+        # Without it, beta-adjusted return per idea improved by +0.23%/trade (CI +0.02 to +0.45) over
+        # the full backtest and +0.36 (CI +0.04 to +0.67) in the late period; stricter 52-week rules
+        # did less well (CLAUDE.md, "52-Week High decision"). Re-adding it requires a new backtest.
         "Cross-Sectional Momentum",
     ],
     "sideways": [
@@ -334,6 +337,7 @@ def _mark_context_unavailable(c: dict) -> None:
     """
     c["context_available"] = False
     c["context_score"] = None
+    c["context_max_points"] = None
     c["context_analyst"] = 0.0
     c["context_earnings"] = 0.0
     c["context_fundamental"] = 0.0
@@ -343,6 +347,49 @@ def _mark_context_unavailable(c: dict) -> None:
     c["earnings_surprise_pct"] = None
     c["finbert_sentiment"] = None
     c["target_consensus"] = None
+
+
+def attach_relative_strength(candidates: list, cache_manager, stock_universe: list, etf_tickers: list,
+                             start: str, end: str) -> int:
+    """
+    12-1 month relative-strength percentile (MOMENTUM_MODEL "relative_strength_12m") for each
+    candidate on the scan date: stocks ranked among the liquid universe stocks, sector ETFs among
+    sector ETFs. Uses the cached history of the whole universe, so a targeted refresh ranks against
+    the same cross-section as the nightly scan. Returns the size of the ranked cross-section.
+    """
+    from src.pipeline_steps import relative_strength_percentiles
+    etfs = {t.upper() for t in etf_tickers}
+
+    def _closes(tickers, liquid_only):
+        cols = {}
+        for t in tickers:
+            raw = cache_manager.get_ticker_history(t, start, end)
+            if raw is None or raw.empty:
+                continue
+            if liquid_only:
+                ok, _, _ = evaluate_point_in_time_liquidity(
+                    raw, as_of_date=end, min_price=US_UNIVERSE_MIN_PRICE,
+                    min_dollar_volume=US_UNIVERSE_MIN_DOLLAR_VOLUME,
+                    min_history_days=US_UNIVERSE_MIN_HISTORY_DAYS,
+                    dollar_volume_window=US_UNIVERSE_DOLLAR_VOLUME_WINDOW,
+                )
+                if not ok:
+                    continue
+            close_col = "CLOSE" if "CLOSE" in raw.columns else "Close"
+            cols[t.upper()] = raw[close_col]
+        return pd.DataFrame(cols).sort_index()
+
+    rs: Dict[str, float] = {}
+    stocks = [t.upper() for t in stock_universe if t.upper() not in etfs and t.upper() not in BLACKLIST]
+    for tickers, liquid_only in ((stocks, True), (sorted(etfs), False)):
+        closes = _closes(tickers, liquid_only)
+        if closes.empty:
+            continue
+        last = relative_strength_percentiles(closes).iloc[-1]
+        rs.update({t: float(v) for t, v in last.items() if np.isfinite(v)})
+    for c in candidates:
+        c["rs_percentile_12m"] = rs.get(str(c.get("ticker", "")).upper())
+    return len(rs)
 
 
 def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
@@ -361,17 +408,19 @@ def deduplicate_by_ticker(signals: list[dict]) -> list[dict]:
 REFRESHABLE_ANALYTICS_FIELDS = (
     "composite_score", "score", "quality_score", "tier_label",
     "current_rsi", "volume_ratio", "adx_value", "macd_histogram", "ema20",
-    "pe_ratio", "de_ratio", "current_ratio",
+    "pe_ratio", "de_ratio", "current_ratio", "eps_ttm", "fundamentals_source", "fundamentals_as_of",
 )
 
 # Columns added by migration_lifecycle_replay_and_pe.sql; dropped and retried if not yet migrated.
-OPTIONAL_LIFECYCLE_COLUMNS = ("entry_fill_price", "position_state", "current_stop", "pe_ratio")
+OPTIONAL_LIFECYCLE_COLUMNS = ("entry_fill_price", "position_state", "current_stop", "pe_ratio",
+                              "eps_ttm", "fundamentals_source", "fundamentals_as_of")
 
 # Insert columns added by later migrations; dropped and retried if the table is not yet migrated.
 OPTIONAL_INSERT_COLUMNS = (
     "reference_entry_price", "weighted_scaleout_rr", "entry_location_zone", "pe_ratio",
     "reach_prob_t1_ci_low", "reach_prob_t1_ci_high", "reach_prob_effective_samples",
     "reach_prob_source", "strategy_win_rate", "strategy_expectancy_pct", "strategy_trades",
+    "eps_ttm", "fundamentals_source", "fundamentals_as_of",
 )
 
 # Used only when a recommendation's strategy is unknown (no holding period to apply).
@@ -428,28 +477,64 @@ def _safe_signal_update(supabase, signal_id: str, fields: dict) -> None:
     )
 
 
+PROVIDER_HEALTH: Dict[str, Any] = {}
+
+
+def _github_notice(title: str, message: str) -> None:
+    """Emit a GitHub Actions annotation (readable via the public check-runs API)."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        safe = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::notice title={title}::{safe}", flush=True)
+
+
+def report_provider_health() -> str:
+    """One-line summary of data-provider health for logs and the GitHub run page."""
+    from src.providers.context.sec_fundamentals import get_sec_provider
+    sec = get_sec_provider()
+    parts = [f"SEC {'on' if sec.available else 'OFF (set SEC_USER_AGENT)'} req={sec.stats['requests']} ok={sec.stats['ok']} "
+             f"failed={sec.stats['failed']} cache={sec.stats['cache_hits']} no_cik={sec.stats['no_cik']}"]
+    if _DISPLAY_METADATA is not None:
+        PROVIDER_HEALTH["open_ideas_metadata"] = dict(_DISPLAY_METADATA.stats)
+    for name, stats in PROVIDER_HEALTH.items():
+        parts.append(f"{name}: " + " ".join(f"{k}={v}" for k, v in stats.items()))
+    line = " | ".join(parts)
+    logger.info("[PROVIDER HEALTH] %s", line)
+    _github_notice("Provider health", line)
+    return line
+
+
 _DISPLAY_METADATA = None
 
 
-def _display_fundamentals(ticker: str) -> Dict[str, Optional[float]]:
-    """P/E, D/E and current ratio for display on open ideas (never used in scoring)."""
+DISPLAY_FUNDAMENTAL_FIELDS = ("pe_ratio", "de_ratio", "current_ratio", "eps_ttm", "fundamentals_source", "fundamentals_as_of")
+
+
+def _fundamentals_fields(f) -> Dict[str, Any]:
+    """Display fields from a FundamentalContext (never used in scoring)."""
+    if f is None or f.quality != DataQuality.VALID:
+        return {}
+    out: Dict[str, Any] = {}
+    for key, val in (("pe_ratio", f.trailing_pe), ("de_ratio", f.debt_to_equity),
+                     ("current_ratio", f.current_ratio), ("eps_ttm", f.eps_ttm)):
+        try:
+            out[key] = round(float(val), 4) if val is not None and np.isfinite(float(val)) else None
+        except (TypeError, ValueError):
+            out[key] = None
+    out["fundamentals_source"] = f.source
+    out["fundamentals_as_of"] = f.balance_sheet_date
+    return out
+
+
+def _display_fundamentals(ticker: str, price: Optional[float] = None) -> Dict[str, Any]:
+    """P/E, D/E, current ratio (+ EPS, source, as-of) for open ideas. SEC first, Yahoo for gaps."""
     global _DISPLAY_METADATA
     from src.providers.context.metadata_provider import MetadataProvider
     if _DISPLAY_METADATA is None:
         _DISPLAY_METADATA = MetadataProvider()
     try:
-        f = _DISPLAY_METADATA.get_fundamentals(ticker)
+        return _fundamentals_fields(_DISPLAY_METADATA.get_fundamentals(ticker, price=price))
     except Exception:
         return {}
-    if f.quality != DataQuality.VALID:
-        return {}
-    out = {}
-    for key, val in (("pe_ratio", f.trailing_pe), ("de_ratio", f.debt_to_equity), ("current_ratio", f.current_ratio)):
-        try:
-            out[key] = round(float(val), 4) if val is not None and np.isfinite(float(val)) else None
-        except (TypeError, ValueError):
-            out[key] = None
-    return out
 
 
 def reconcile_recommendation_lifecycle(
@@ -613,8 +698,8 @@ def reconcile_recommendation_lifecycle(
                 for k in REFRESHABLE_ANALYTICS_FIELDS:
                     if ana.get(k) is not None:
                         update_fields[k] = ana[k]
-            if refresh_fundamentals and any(k not in update_fields for k in ("pe_ratio", "de_ratio", "current_ratio")):
-                fund = _display_fundamentals(ticker)
+            if refresh_fundamentals:
+                fund = _display_fundamentals(ticker, close_price)
                 for k, v in fund.items():
                     if k not in update_fields and v is not None:
                         update_fields[k] = v
@@ -1121,12 +1206,20 @@ def run_scan(
 
         # P0-2: Momentum, strategy-evidence (win rate / expectancy from the production-pipeline
         # backtest, shrunk by trade count) and regime sub-scores. Shared with the backtest.
-        from src.pipeline_steps import prepare_candidate_scores, composite_score, build_trade_plan, BUY_THRESHOLD
+        from src.pipeline_steps import prepare_candidate_scores, composite_score, build_trade_plan, BUY_THRESHOLD, selection_settings
+        settings = selection_settings()
+        logger.info(
+            "[SELECTION] momentum=%s | entry location=%s | context in score=%s",
+            settings.momentum_model, settings.entry_location_mode, ",".join(settings.context_components) or "none",
+        )
+        if settings.momentum_model == "relative_strength_12m":
+            n_rs = attach_relative_strength(candidates, cache_manager, all_u_tickers, etf_tickers, preload_start_str, preload_end_str)
+            logger.info("[RELATIVE STRENGTH] 12-1 month percentiles over %d tickers", n_rs)
         for sig in candidates:
-            prepare_candidate_scores(sig, regime_str)
+            prepare_candidate_scores(sig, regime_str, settings=settings)
 
         # Context Scoring with breakdown (P0-2)
-        if not skip_nlp and candidates:
+        if not skip_nlp and candidates and settings.context_components:
             logger.info(f"Computing context scoring for {len(candidates)} candidates in parallel...")
             def _score_ctx(cand):
                 t = cand["ticker"]
@@ -1136,24 +1229,23 @@ def run_scan(
                         ctx = context_aggregator.get_aggregated(t, price_df)
                         if ctx.quality != DataQuality.VALID:
                             return (t, None)  # Provider failed: context unavailable, not "weak"
-                        tech_data = {
-                            'rsi': cand.get("current_rsi", 50),
-                            'adx': cand.get("adx_value", 20),
-                            'volume_ratio': cand.get("volume_ratio", 1.0),
-                        }
-                        c_score, c_analyst, c_earnings, c_fundamental, c_news = context_scorer.calculate_with_breakdown(
-                            ctx, float(cand.get("entry_price") or cand.get("price", 1.0)), tech_data
+                        c_score, c_analyst, c_fundamental, c_news, c_max_points = context_scorer.calculate_with_components(
+                            ctx, float(cand.get("entry_price") or cand.get("price", 1.0)), settings.context_components
                         )
+                        if c_score is None:
+                            return (t, None)  # No context component had data: unavailable, not zero
                         if ctx.cached_score is None and ctx.analyst.target_mean_price is not None:
                             from src.providers.context.aggregator import save_context_to_cache
                             save_context_to_cache(t, c_score, ctx)
-                        de_val = ctx.fundamental.debt_to_equity if ctx.fundamental else None
-                        cr_val = ctx.fundamental.current_ratio if ctx.fundamental else None
-                        earn_surp = None  # Decoupled: earnings surprise not part of initial score
-                        finbert = ctx.news.headline_sentiment if ctx.news else None
-                        target_c = ctx.analyst.target_mean_price if ctx.analyst else None
-                        pe_val = ctx.fundamental.trailing_pe if ctx.fundamental else None
-                        return (t, c_score, c_analyst, 0.0, c_fundamental, c_news, de_val, cr_val, None, finbert, target_c, pe_val)
+                        # Veto inputs only for components that count in the score (the ranker's
+                        # distress / news / analyst-downside gates read these fields).
+                        scored = set(settings.context_components)
+                        de_val = ctx.fundamental.debt_to_equity if ("fundamental" in scored and ctx.fundamental) else None
+                        cr_val = ctx.fundamental.current_ratio if ("fundamental" in scored and ctx.fundamental) else None
+                        finbert = ctx.news.headline_sentiment if ("news" in scored and ctx.news) else None
+                        target_c = ctx.analyst.target_mean_price if ("analyst" in scored and ctx.analyst) else None
+                        pe_val = ctx.fundamental.trailing_pe if ctx.fundamental else None  # display only
+                        return (t, c_score, c_analyst, 0.0, c_fundamental, c_news, de_val, cr_val, None, finbert, target_c, pe_val, c_max_points)
                 except Exception as ctx_err:
                     logger.warning(f"Context scoring failed for {t}: {ctx_err}")
                 return (t, None)  # Context unavailable (not a genuine zero score)
@@ -1199,6 +1291,8 @@ def run_scan(
                     executor.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     executor.shutdown(wait=False)
+            PROVIDER_HEALTH["context"] = {"targets": len(ctx_targets), "with_data": len(ctx_map)}
+            PROVIDER_HEALTH["metadata"] = dict(context_aggregator.metadata.stats)
             logger.info(
                 f"[CONTEXT] Real context data for {len(ctx_map)}/{len(ctx_targets)} tickers; "
                 f"{len(ctx_targets) - len(ctx_map)} unavailable (provider failure/timeout) and excluded from scoring."
@@ -1207,7 +1301,9 @@ def run_scan(
             for c in candidates:
                 t = c["ticker"]
                 if t in ctx_map:
-                    c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"], c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"], c["pe_ratio"] = ctx_map[t]
+                    (c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"],
+                     c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"],
+                     c["pe_ratio"], c["context_max_points"]) = ctx_map[t]
                     c["context_available"] = True
                 else:
                     _mark_context_unavailable(c)
@@ -1346,22 +1442,21 @@ def run_scan(
             is_already_active = t_upper in open_tickers
 
             if not is_already_active:
-                if loc_res.state == "WAIT":
+                if settings.blocks_entry(loc_res.state) and loc_res.state == "WAIT":
                     logger.info(f"[ENTRY LOCATION WAIT] Candidate {ticker} ({strategy_name}): {loc_res.reason}")
                     sig["status"] = "rejected"
                     sig["rejection_reason"] = f"WAIT: {loc_res.reason}"
                     rejected_signals_to_insert.append(sig)
                     continue
-                elif loc_res.state == "REJECT":
+                elif settings.blocks_entry(loc_res.state):
                     logger.info(f"[ENTRY LOCATION REJECT] Candidate {ticker} ({strategy_name}): {loc_res.reason}")
                     sig["status"] = "rejected"
                     sig["rejection_reason"] = f"Rejected location: {loc_res.reason}"
                     rejected_signals_to_insert.append(sig)
                     continue
-                else:
-                    # Update narrative with objective market structure confirmation
-                    if loc_res.reason:
-                        sig["narrative"] = f"{sig.get('narrative', '')} | {loc_res.reason}".strip(" |")
+                elif loc_res.reason:
+                    # Market-structure note (in "info" mode this includes WAIT / REJECT verdicts)
+                    sig["narrative"] = f"{sig.get('narrative', '')} | {loc_res.reason}".strip(" |")
 
             # Candidate passes all filters and qualifies!
             if t_upper in seen_qualified_strategy_tickers:
@@ -1407,31 +1502,24 @@ def run_scan(
             logger.error("[STALE DATA] Withheld %d qualified recommendations.", len(qualified_recommendations))
             qualified_recommendations = []
 
-        # Informational fundamentals (P/E, D/E, current ratio) for every idea shown to the user.
-        # Never used in scoring. Context scoring already captured them when it succeeded; fetch the rest.
+        # Informational fundamentals (P/E, D/E, current ratio, EPS) for every idea shown to the user.
+        # Never used in scoring. SEC filings first (cached across runs), Yahoo only for gaps.
         display_targets = list(qualified_recommendations) + list(active_qualified_recommendations.values())
-        if not dry_run:
-            missing = [s for s in display_targets if s.get("pe_ratio") is None or s.get("de_ratio") is None or s.get("current_ratio") is None]
-            if missing:
-                metadata_provider = context_aggregator.metadata
-                for s in missing:
-                    try:
-                        f = metadata_provider.get_fundamentals(s["ticker"])
-                        if f.quality == DataQuality.VALID:
-                            for key, val in (("pe_ratio", f.trailing_pe), ("de_ratio", f.debt_to_equity), ("current_ratio", f.current_ratio)):
-                                if s.get(key) is None:
-                                    s[key] = val
-                    except Exception as pe_err:
-                        logger.debug("Could not fetch fundamentals for %s: %s", s.get("ticker"), pe_err)
-                got = sum(1 for s in display_targets if s.get("pe_ratio") is not None or s.get("de_ratio") is not None)
-                logger.info(f"[FUNDAMENTALS] Display fundamentals available for {got}/{len(display_targets)} ideas.")
-        for s in display_targets:
-            for key in ("pe_ratio", "de_ratio", "current_ratio"):
-                v = s.get(key)
+        if not dry_run and display_targets:
+            metadata_provider = context_aggregator.metadata
+            for s in display_targets:
                 try:
-                    s[key] = round(float(v), 4) if v is not None and np.isfinite(float(v)) else None
-                except (TypeError, ValueError):
-                    s[key] = None
+                    fields = _fundamentals_fields(
+                        metadata_provider.get_fundamentals(s["ticker"], price=s.get("price") or s.get("entry_price"))
+                    )
+                    for key, val in fields.items():
+                        if val is not None or key not in s:
+                            s[key] = val
+                except Exception as pe_err:
+                    logger.debug("Could not fetch fundamentals for %s: %s", s.get("ticker"), pe_err)
+            got = sum(1 for s in display_targets if s.get("pe_ratio") is not None or s.get("de_ratio") is not None)
+            PROVIDER_HEALTH["display_fundamentals"] = {"ideas": len(display_targets), "with_data": got}
+            logger.info(f"[FUNDAMENTALS] Display fundamentals available for {got}/{len(display_targets)} ideas.")
 
         # Phase 3: Construct final ranked signals list for database insertion
         all_signals_to_save = qualified_recommendations + rejected_signals_to_insert
@@ -1524,6 +1612,9 @@ def run_scan(
                     "strategy_expectancy_pct": sig.get("strategy_expectancy_pct"),
                     "strategy_trades": sig.get("strategy_trades"),
                     "pe_ratio": sig.get("pe_ratio"),
+                    "eps_ttm": sig.get("eps_ttm"),
+                    "fundamentals_source": sig.get("fundamentals_source"),
+                    "fundamentals_as_of": sig.get("fundamentals_as_of"),
                 }
             )
     else:
@@ -1577,6 +1668,7 @@ def run_scan(
                 logger.error("Failed to reconcile targeted lifecycle: %s", e)
                 error_msg = f"Lifecycle reconciliation failed: {e}"
 
+        report_provider_health()
         return {
             "status": "completed",
             "scanned_count": len(successfully_evaluated_tickers),
@@ -1702,6 +1794,9 @@ def run_scan(
                         "strategy_expectancy_pct": sig.get("strategy_expectancy_pct"),
                         "strategy_trades": sig.get("strategy_trades"),
                         "pe_ratio": sig.get("pe_ratio"),
+                        "eps_ttm": sig.get("eps_ttm"),
+                        "fundamentals_source": sig.get("fundamentals_source"),
+                        "fundamentals_as_of": sig.get("fundamentals_as_of"),
                     })
                 
                 # Direct persistence with full schema parity and exact instance identity.
@@ -1787,6 +1882,7 @@ def run_scan(
         sys.exit(1)
 
     logger.info(GLOBAL_EARNINGS_TRACKER.format_summary())
+    report_provider_health()
 
     logger.info("=" * 60)
     logger.info("Strategy 1.3 Rev B signal generation complete.")

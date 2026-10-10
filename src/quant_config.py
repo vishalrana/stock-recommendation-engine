@@ -100,6 +100,27 @@ EXPECTANCY_SLOPE: float = 20.0
 MIN_STRATEGY_REACH_TRADES: int = 30
 
 # ==============================================================================
+# SELECTION SWITCHES (shared by the nightly scan and the backtest)
+# ==============================================================================
+# Momentum sub-score model:
+#   "technical"              RSI / 50-DMA proximity / volume / MACD blend (original)
+#   "relative_strength_12m"  percentile (0-100) of the 12-1 month return (t-252 -> t-21) among
+#                            liquid US stocks on the same date (sector ETFs among ETFs)
+MOMENTUM_MODEL: str = "technical"
+RS_LOOKBACK_BARS: int = 252
+RS_SKIP_BARS: int = 21
+
+# Entry-location filter: "gate" blocks WAIT / REJECT verdicts; "info" records the verdict for
+# display without blocking.
+ENTRY_LOCATION_MODE: str = "gate"
+
+# Context components that count toward the context score (and their veto gates). A component
+# left out is still fetched and displayed but cannot move the composite score. Fundamentals (D/E,
+# current ratio) are display-only: in the point-in-time SEC test their points and the distress
+# veto carried no information about forward returns. () = no context in the score.
+CONTEXT_SCORE_COMPONENTS: tuple = ("analyst", "news")
+
+# ==============================================================================
 # 4. CONTEXT VETO THRESHOLDS (Section 10.4)
 # Balance Sheet Distress: D/E > 2.5 AND Current Ratio < 1.0 -> cap context at 30.0
 # Negative News Sentiment: FinBERT < -0.30 -> cap context at 40.0

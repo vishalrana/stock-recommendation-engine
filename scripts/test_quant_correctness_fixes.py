@@ -743,5 +743,30 @@ class TestScanRuntimeFixes(unittest.TestCase):
         self.assertTrue(all(c.args[0] == cm.REFRESH_CHUNK_PAUSE_S for c in sleep.call_args_list))
 
 
+
+class TestWalkForwardEvidenceBook(unittest.TestCase):
+    def test_matches_reaggregating_every_day(self):
+        import random
+        from src.strategy_evidence import WalkForwardEvidenceBook, aggregate_trades, evidence_from_aggregate
+        rng = random.Random(7)
+        days = [f"2025-{m:02d}-{d:02d}" for m in range(1, 7) for d in range(1, 29)]
+        book, closed = WalkForwardEvidenceBook(), []
+        strategies = ("Trend Following", "Pullback Recovery", "Cross-Sectional Momentum")
+        for i, day in enumerate(days):
+            batch = {k: evidence_from_aggregate(k, v, source="walk_forward", as_of=day)
+                     for k, v in aggregate_trades([t for t in closed if t["exit_date"] < day]).items()}
+            incremental = book.evidence_as_of(day)
+            self.assertEqual(set(batch), set(incremental), day)
+            for k in batch:
+                self.assertEqual(batch[k], incremental[k], (day, k))
+            for _ in range(rng.randint(0, 4)):  # trades opened today exit 1-30 days later
+                exit_day = days[min(len(days) - 1, i + rng.randint(1, 30))]
+                trade = {"strategy": rng.choice(strategies), "net_return_pct": rng.uniform(-8, 8),
+                         "outcome": rng.choice(["stop", "expired", "t1", "t2", "t3"]),
+                         "has_t2": rng.random() < 0.8, "has_t3": rng.random() < 0.5, "exit_date": exit_day}
+                closed.append(trade)
+                book.add(trade)
+
+
 if __name__ == "__main__":
     unittest.main()

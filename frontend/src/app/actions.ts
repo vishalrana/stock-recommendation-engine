@@ -256,8 +256,13 @@ export interface WorkflowRunStatusResult {
   status: 'queued' | 'in_progress' | 'completed' | 'unknown';
   conclusion: 'success' | 'failure' | 'cancelled' | 'timed_out' | null;
   runId?: number;
+  runUrl?: string;
   error?: string;
 }
+
+// Every active idea is refreshed (the old cap of 30 silently skipped the rest). The workflow
+// spends ~2 s per idea, well inside its job timeout even at this limit.
+const MAX_REFRESH_TICKERS = 200;
 
 /**
  * Server action to trigger GitHub Actions workflow for targeted current-idea refresh.
@@ -294,7 +299,7 @@ export async function triggerRefreshCurrentIdeasAction(
           .map((t) => (typeof t === 'string' ? t.trim().toUpperCase() : ''))
           .filter((t) => /^[A-Z0-9.\-_]{1,10}$/.test(t))
       )
-    ).slice(0, 30);
+    ).slice(0, MAX_REFRESH_TICKERS);
 
     if (sanitizedTickers.length === 0) {
       return {
@@ -530,6 +535,7 @@ export async function checkRefreshCurrentIdeasStatusAction(
       status: status || 'in_progress',
       conclusion,
       runId: targetRun.id,
+      runUrl: targetRun.html_url,
     };
   } catch (error: any) {
     console.error('Error checking workflow status:', error);

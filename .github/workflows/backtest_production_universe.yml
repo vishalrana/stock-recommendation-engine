@@ -1,0 +1,80 @@
+name: Backtest (production universe)
+
+# Production-pipeline backtest on the universe the nightly scan actually uses (broad US common
+# equities, ~5,600 tickers), run on GitHub's servers because it needs more memory and time than a
+# laptop. Results are uploaded as an artifact; adopting the evidence in
+# config/strategy_performance.json is a separate, deliberate step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Smoke test: only the first N stocks (empty = full universe; outputs are not written in smoke tests)'
+        required: false
+        default: ''
+
+concurrency:
+  group: backtest-production-universe
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    name: Production-universe backtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
+      LIMIT_ARG: ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r jobs/requirements.txt
+
+      # Price history (5 years per ticker) is reused across runs; only missing tickers download
+      - name: Restore price history
+        uses: actions/cache/restore@v4
+        with:
+          path: data/backtest_history/*.parquet
+          key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-backtest-history-
+
+      - name: Phase 1 - strategy scans
+        run: python scripts/validate_backtest_pipeline.py --universe production --workers 4 --phase1-only $LIMIT_ARG
+
+      - name: Save price history
+        if: always() && inputs.limit == ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/backtest_history/*.parquet
+          key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
+
+      - name: Phase 2 - replay and statistics
+        run: python scripts/validate_backtest_pipeline.py --universe production --workers 4 $LIMIT_ARG
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-production-universe
+          path: |
+            outputs/production_backtest_summary_production_universe.json
+            outputs/production_backtest_trades_production_universe.csv
+            outputs/production_backtest_setup_trades_production_universe.csv
+            outputs/strategy_performance_production_universe.json
+          if-no-files-found: warn
+          retention-days: 30

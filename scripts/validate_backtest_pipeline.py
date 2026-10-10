@@ -180,6 +180,23 @@ def start_universe() -> Tuple[List[str], List[str]]:
     return stocks, etfs
 
 
+def production_universe() -> Tuple[List[str], List[str]]:
+    """
+    The universe the nightly scan uses today (broad US common equities), split stocks / sector ETFs.
+    Fails rather than silently testing the benchmark list when the security master is unavailable.
+    Survivorship: today's list, applied to the whole window (see the limitations in the output).
+    """
+    from jobs.strategies.sector_rotation import SECTOR_ETFS
+    import jobs.generate_signals as gs
+    tickers, _, _ = gs.load_universe("expanded")
+    if gs.LAST_UNIVERSE_IS_FALLBACK:
+        raise RuntimeError("Production security master unavailable (fell back to the benchmark list).")
+    stocks = sorted({t.upper() for t in tickers if t.upper() not in SECTOR_ETFS})
+    etfs = sorted(SECTOR_ETFS.keys())
+    logger.info("Production universe (today's security master): %d stocks, %d sector ETFs", len(stocks), len(etfs))
+    return stocks, etfs
+
+
 def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.DataFrame]:
     """Daily adjusted OHLCV per ticker, downloaded once and stored under data/backtest_history/."""
     import yfinance as yf
@@ -346,6 +363,8 @@ def simulate(sig: Dict[str, Any], frame: pd.DataFrame, loc: int, evidence, d_str
         "holding_days": res["holding_days"],
         "raw_return_pct": round(float(res["realized_return_pct"]), 4),
         "net_return_pct": round(net, 4),
+        "adv20_usd": round(float((frame["CLOSE"].iloc[max(0, loc - 19): loc + 1]
+                                  * frame["VOLUME"].iloc[max(0, loc - 19): loc + 1]).mean()), 0),
     }
 
 
@@ -562,7 +581,7 @@ def edge_verdict(stats: Dict[str, Any], ci_key: str = "net_expectancy_ci95_block
 # Main
 # ----------------------------------------------------------------------------
 def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = None, write_outputs: bool = True,
-        variants: Optional[List[str]] = None) -> Dict[str, Any]:
+        variants: Optional[List[str]] = None, universe: str = "cache_start", phase1_only: bool = False) -> Dict[str, Any]:
     t0 = time.time()
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     from src.ranker import SignalRanker, assign_tier
@@ -571,13 +590,18 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         prepare_candidate_scores, composite_score, build_trade_plan, holding_days_for, BUY_THRESHOLD, selection_settings,
     )
     from src.scorers.context_scorer import ContextScorer
-    from src.strategy_evidence import aggregate_trades, evidence_from_aggregate
+    from src.strategy_evidence import aggregate_trades, WalkForwardEvidenceBook
     from src.outcome.outcome_calculator import evaluate_signal_outcome, SAME_DAY_AMBIGUITY_POLICY
     from src.strategies.target_calculator import reset_reach_prob_cache
     from jobs.generate_signals import _mark_context_unavailable
 
-    stocks, etfs = start_universe()
-    universe_date = os.path.basename(sorted(glob.glob(os.path.join(CACHE_BY_DATE, "*.parquet")))[0])[:10]
+    if universe == "production":
+        stocks, etfs = production_universe()
+        universe_date = datetime.now(timezone.utc).date().isoformat()
+    else:
+        stocks, etfs = start_universe()
+        universe_date = os.path.basename(sorted(glob.glob(os.path.join(CACHE_BY_DATE, "*.parquet")))[0])[:10]
+    suffix = "_production_universe" if universe == "production" else ""
     if limit:
         stocks = stocks[:limit]  # smoke-test mode only
     raw = load_history(stocks + etfs + ["SPY"], refresh=refresh_data)
@@ -595,6 +619,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     }
 
     frames = {t: prepare_frame(df) for t, df in raw.items() if t != "SPY" and len(df) > WARMUP_BARS + 5}
+    del raw  # the frames hold everything needed from here on (keeps the 5,600-ticker run in memory)
     stock_frames = {t: f for t, f in frames.items() if t not in SECTOR_ETFS}
 
     # Cross-sectional screen: top 15% of 63-day returns across the stock universe each date
@@ -637,6 +662,9 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     for c in candidates:
         raw_by_strategy[c["strategy"]] += 1
     logger.info("Raw candidates by strategy: %s", dict(raw_by_strategy))
+    if phase1_only:
+        logger.info("Phase 1 only: candidates cached at %s", phase1_path)
+        return {"phase1_path": phase1_path, "raw_candidates_by_strategy": dict(raw_by_strategy)}
 
     production = selection_settings()
     settings_list = [production]
@@ -665,7 +693,8 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     ranker = SignalRanker()
     context_scorer = ContextScorer()
     shadow_trades: List[Dict[str, Any]] = []    # every strategy setup (evidence)
-    shadow_by_exit: List[Dict[str, Any]] = []   # shadow trades ordered by exit date
+    # Walk-forward evidence: a shadow trade counts from the first evaluation date after its exit
+    evidence_book = WalkForwardEvidenceBook()
     shadow_active_until: Dict[Tuple[str, str], pd.Timestamp] = {}
     # One book per selection setting: issued recommendations (what the user would see)
     books = {v.name: {"trades": [], "active_until": {}, "censored": 0, "funnel": defaultdict(int)} for v in settings_list}
@@ -676,9 +705,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         if not day:
             continue
         d_str = d.date().isoformat()
-        prior = [t for t in shadow_by_exit if t["exit_date"] < d_str]
-        agg = aggregate_trades(prior)
-        evidence = {k: evidence_from_aggregate(k, v, source="walk_forward", as_of=d_str) for k, v in agg.items()}
+        evidence = evidence_book.evidence_as_of(d_str)
 
         # Shadow trades: every setup that passed its strategy's rules (one open per strategy+ticker)
         shadow_results: Dict[Tuple[str, str], Tuple[str, Optional[Dict[str, Any]]]] = {}
@@ -690,12 +717,10 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
             shadow_results[key] = (status, res)
             if status == "closed":
                 shadow_trades.append(res)
-                shadow_by_exit.append(res)
+                evidence_book.add(res)
                 shadow_active_until[key] = pd.Timestamp(res["exit_date"])
             elif status == "censored":
                 shadow_active_until[key] = pd.Timestamp.max
-        if shadow_results:
-            shadow_by_exit.sort(key=lambda t: t["exit_date"])
 
         entry_states: Dict[Tuple[str, str], str] = {}  # entry location reads only price structure
         for settings in settings_list:
@@ -810,8 +835,10 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         "runtime_seconds": round(time.time() - t0, 1),
         "evaluation_window": [eval_dates[0].date().isoformat(), eval_dates[-1].date().isoformat()],
         "evaluation_sessions": len(eval_dates),
-        "universe": f"{len(stocks)} stocks + {len(etfs)} sector ETFs present on the first cache date ({universe_date}); "
-                    f"{len(missing_stocks)} stocks had no downloadable history (likely delisted)",
+        "universe": (f"{len(stocks)} stocks from today's production security master ({universe_date}) + {len(etfs)} sector ETFs; "
+                     if universe == "production" else
+                     f"{len(stocks)} stocks + {len(etfs)} sector ETFs present on the first cache date ({universe_date}); ")
+                    + f"{len(missing_stocks)} stocks had no downloadable history (likely delisted)",
         "transaction_cost_pct_per_side": TRANSACTION_COST_PCT_PER_SIDE,
         "execution": "Fill at next bar open; STOP_FIRST; ratcheted stops; gap fills at open; expiry at strategy hold_days",
         "split": {"early_period_before": split_date, "late_period_from": embargo_end, "embargo_sessions": EMBARGO_DAYS},
@@ -821,6 +848,10 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         "funnel": dict(funnel),
         "evidence_as_of": evidence_as_of,
         "limitations": [
+            f"Survivorship: the universe is today's ({universe_date}) security master applied to the whole window, so "
+            f"every period is chosen with hindsight (stocks that delisted are missing). Results are biased upward, "
+            f"most for small caps, which delist more often."
+            if universe == "production" else
             f"Survivorship: the universe is the {universe_date} cache constituents; before that date it "
             f"is chosen with hindsight (survivors only). The late period from {embargo_end} is the cleaner test."
             if universe_date > eval_dates[0].date().isoformat() else
@@ -886,12 +917,12 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         return summary
 
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    with open(os.path.join(OUTPUTS_DIR, "production_backtest_summary.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(OUTPUTS_DIR, f"production_backtest_summary{suffix}.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     if trades:
-        pd.DataFrame(trades).to_csv(os.path.join(OUTPUTS_DIR, "production_backtest_trades.csv"), index=False)
+        pd.DataFrame(trades).to_csv(os.path.join(OUTPUTS_DIR, f"production_backtest_trades{suffix}.csv"), index=False)
     if shadow_trades:
-        pd.DataFrame(shadow_trades).to_csv(os.path.join(OUTPUTS_DIR, "production_backtest_setup_trades.csv"), index=False)
+        pd.DataFrame(shadow_trades).to_csv(os.path.join(OUTPUTS_DIR, f"production_backtest_setup_trades{suffix}.csv"), index=False)
     if "selection_variants" in summary:
         with open(os.path.join(OUTPUTS_DIR, "production_backtest_variants.json"), "w", encoding="utf-8") as f:
             json.dump({"metadata": {"generated_at": metadata["generated_at"],
@@ -919,15 +950,22 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         },
         "strategy_evidence": evidence_agg,
     }
-    with open(EVIDENCE_OUT, "w", encoding="utf-8") as f:
+    # The production-universe evidence is written next to the outputs; adopting it in
+    # config/strategy_performance.json is a separate, deliberate step.
+    evidence_out = os.path.join(OUTPUTS_DIR, "strategy_performance_production_universe.json") if suffix else EVIDENCE_OUT
+    with open(evidence_out, "w", encoding="utf-8") as f:
         json.dump(evidence_doc, f, indent=2)
-    logger.info("Wrote %s and outputs/ (%.0fs total)", EVIDENCE_OUT, time.time() - t0)
+    logger.info("Wrote %s and outputs/ (%.0fs total)", evidence_out, time.time() - t0)
     return summary
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Production-pipeline backtest")
     parser.add_argument("--refresh-data", action="store_true", help="Re-download the backtest price history")
+    parser.add_argument("--universe", choices=("cache_start", "production"), default="cache_start",
+                        help="cache_start: constituents of the first local cache file (default); "
+                             "production: today's broad US universe used by the nightly scan")
+    parser.add_argument("--phase1-only", action="store_true", help="Run and cache the strategy scans, then stop")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None, help="Smoke test on the first N stocks (outputs not written)")
     all_variants = list(VARIANT_PRESETS) + list(STRATEGY_VARIANTS)
@@ -938,7 +976,10 @@ if __name__ == "__main__":
     if unknown:
         parser.error(f"Unknown variants {unknown}; choose from {all_variants}")
     s = run(refresh_data=args.refresh_data, workers=args.workers, limit=args.limit, write_outputs=args.limit is None,
-            variants=chosen)
+            variants=chosen, universe=args.universe, phase1_only=args.phase1_only)
+    if args.phase1_only:
+        print(json.dumps(s, indent=2))
+        sys.exit(0)
     print(json.dumps({k: s[k] for k in ("edge_verdict_all", "edge_verdict_late_period",
                                         "edge_vs_spy_verdict_all", "edge_vs_spy_verdict_late_period",
                                         "edge_beta_adjusted_verdict_all", "edge_beta_adjusted_verdict_late_period",

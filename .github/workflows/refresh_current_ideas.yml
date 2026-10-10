@@ -16,7 +16,7 @@ jobs:
   refresh-ideas:
     name: Evaluate Current Ideas
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20  # ~2 s per idea; the site refreshes up to 200 ideas
 
     steps:
       - name: Log Start Time

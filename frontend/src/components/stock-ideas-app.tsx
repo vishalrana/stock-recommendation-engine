@@ -57,6 +57,20 @@ export default function StockIdeasApp({
   const [activeIdeas, setActiveIdeas] = useState<Recommendation[]>(initialActiveIdeas || []);
   const [closedIdeas, setClosedIdeas] = useState<Recommendation[]>(initialClosedIdeas || []);
 
+  // useState only reads its initial value once. After a refresh, router.refresh() delivers new
+  // server data as new props; adopt it (React's "adjust state when a prop changes" pattern), or
+  // the cards keep showing the pre-refresh list.
+  const [syncedActive, setSyncedActive] = useState(initialActiveIdeas);
+  const [syncedClosed, setSyncedClosed] = useState(initialClosedIdeas);
+  if (initialActiveIdeas !== syncedActive) {
+    setSyncedActive(initialActiveIdeas);
+    setActiveIdeas(initialActiveIdeas || []);
+  }
+  if (initialClosedIdeas !== syncedClosed) {
+    setSyncedClosed(initialClosedIdeas);
+    setClosedIdeas(initialClosedIdeas || []);
+  }
+
   // Expanded Active Idea (Card tap target)
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -74,6 +88,7 @@ export default function StockIdeasApp({
   const [isRefreshingIdeas, setIsRefreshingIdeas] = useState(false);
   const [ideasStatus, setIdeasStatus] = useState<'idle' | 'updating' | 'updated' | 'error'>('idle');
   const [ideasStatusText, setIdeasStatusText] = useState<string | null>(null);
+  const [ideasRunUrl, setIdeasRunUrl] = useState<string | null>(null);
 
   const toggleExpand = (id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
@@ -194,7 +209,8 @@ export default function StockIdeasApp({
 
     setIsRefreshingIdeas(true);
     setIdeasStatus('updating');
-    setIdeasStatusText('Refreshing current ideas...');
+    setIdeasStatusText('Starting refresh...');
+    setIdeasRunUrl(null);
 
     try {
       // 1. Dispatch targeted GitHub Actions workflow from server action
@@ -209,36 +225,51 @@ export default function StockIdeasApp({
       let runId = triggerRes.runId;
       const dispatchedAt = triggerRes.dispatchedAt;
 
-      // 2. Poll workflow run status every 3.5s (max 5 minutes = 85 attempts)
-      const maxAttempts = 85;
-      let attempt = 0;
-      let completedSuccessfully = false;
+      // 2. Poll the GitHub Actions run every 5 s for up to 15 minutes. GitHub can queue a run for
+      //    minutes, and the run grows with the number of ideas, so the old 5-minute limit reported
+      //    failure for refreshes that later succeeded.
+      const pollMs = 5000;
+      const maxWaitMs = 15 * 60 * 1000;
+      const startedAt = Date.now();
+      let conclusion: string | null = null;
+      let finished = false;
 
-      while (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 3500));
-        attempt++;
+      while (Date.now() - startedAt < maxWaitMs) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
 
         const statusRes = await checkRefreshCurrentIdeasStatusAction(runId, dispatchedAt);
         if (statusRes.runId && !runId) {
           runId = statusRes.runId;
         }
+        if (statusRes.runUrl) {
+          setIdeasRunUrl(statusRes.runUrl);
+        }
 
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        const clock = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`;
         if (statusRes.status === 'completed') {
-          if (statusRes.conclusion === 'success') {
-            completedSuccessfully = true;
-          }
+          conclusion = statusRes.conclusion;
+          finished = true;
           break;
         }
+        setIdeasStatusText(
+          statusRes.status === 'in_progress'
+            ? `Re-evaluating ${tickers.length} ideas on GitHub... ${clock}`
+            : `Waiting for GitHub to start the refresh... ${clock}`
+        );
       }
 
-      if (completedSuccessfully) {
+      if (finished && conclusion === 'success') {
         await completeRefreshCurrentIdeasAction();
         setIdeasStatus('updated');
-        setIdeasStatusText('Current ideas updated just now');
+        setIdeasStatusText(`${tickers.length} ideas updated just now`);
         router.refresh();
+      } else if (finished) {
+        setIdeasStatus('error');
+        setIdeasStatusText(`Refresh ${conclusion === 'cancelled' ? 'was cancelled' : conclusion === 'timed_out' ? 'timed out' : 'failed'} on GitHub. Ideas were not changed.`);
       } else {
         setIdeasStatus('error');
-        setIdeasStatusText('Unable to refresh current ideas.');
+        setIdeasStatusText('Still running on GitHub after 15 minutes. Reload the page later to see the results.');
       }
     } catch (err) {
       console.error('Failed to refresh current ideas:', err);
@@ -250,6 +281,23 @@ export default function StockIdeasApp({
   };
 
   const lastScanDate = formatScanDateHeader(latestScanLog?.scan_date);
+
+  // Header status line: live refresh progress first, then the last result
+  const headerStatusText = ideasStatus === 'updating'
+    ? ideasStatusText || 'Refreshing current ideas...'
+    : priceStatus === 'updating'
+    ? 'Updating prices...'
+    : ideasStatusText || priceStatusText;
+  const headerStatusClass = ideasStatus === 'error' || priceStatus === 'error'
+    ? 'text-rose-400'
+    : ideasStatus === 'updating' || priceStatus === 'updating'
+    ? 'text-blue-400'
+    : 'text-slate-400';
+  const runLink = ideasRunUrl && ideasStatus !== 'idle' ? (
+    <a href={ideasRunUrl} target="_blank" rel="noopener noreferrer" className="ml-1.5 underline decoration-dotted hover:text-white">
+      View run
+    </a>
+  ) : null;
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col antialiased selection:bg-blue-500 selection:text-white pb-24 md:pb-12">
@@ -334,21 +382,10 @@ export default function StockIdeasApp({
 
           {/* Actions: Refresh Prices and Refresh Current Ideas */}
           <div className="flex items-center gap-2">
-            {(priceStatusText || ideasStatusText) && (
-              <span
-                className={`hidden lg:inline text-[11px] font-medium transition-all ${
-                  ideasStatus === 'error' || priceStatus === 'error'
-                    ? 'text-rose-400'
-                    : ideasStatus === 'updating' || priceStatus === 'updating'
-                    ? 'text-blue-400'
-                    : 'text-slate-400'
-                }`}
-              >
-                {ideasStatus === 'updating'
-                  ? 'Refreshing current ideas...'
-                  : priceStatus === 'updating'
-                  ? 'Updating prices...'
-                  : ideasStatusText || priceStatusText}
+            {headerStatusText && (
+              <span className={`hidden lg:inline text-[11px] font-medium transition-all ${headerStatusClass}`}>
+                {headerStatusText}
+                {runLink}
               </span>
             )}
 
@@ -383,6 +420,13 @@ export default function StockIdeasApp({
             </button>
           </div>
         </div>
+        {/* Small screens: the status line sits under the header row (it is hidden beside the buttons) */}
+        {headerStatusText && (
+          <div className={`lg:hidden max-w-6xl mx-auto mt-2 text-[11px] font-medium ${headerStatusClass}`}>
+            {headerStatusText}
+            {runLink}
+          </div>
+        )}
       </header>
 
       {/* Main Content Area */}

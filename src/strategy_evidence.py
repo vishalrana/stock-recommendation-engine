@@ -59,25 +59,54 @@ def aggregate_trades(trades: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, An
     """
     agg: Dict[str, Dict[str, Any]] = {}
     for t in trades:
-        key = normalize_strategy_key(t["strategy"])
-        a = agg.setdefault(key, {
-            "trades": 0, "wins": 0, "sum_return": 0.0,
-            "t1_hits": 0, "t1_n": 0, "t2_hits": 0, "t2_n": 0, "t3_hits": 0, "t3_n": 0,
-        })
-        ret = float(t["net_return_pct"])
-        outcome = str(t.get("outcome", ""))
-        a["trades"] += 1
-        a["wins"] += 1 if ret > 0 else 0
-        a["sum_return"] += ret
-        a["t1_n"] += 1
-        a["t1_hits"] += 1 if outcome in T1_REACHED else 0
-        if t.get("has_t2"):
-            a["t2_n"] += 1
-            a["t2_hits"] += 1 if outcome in T2_REACHED else 0
-        if t.get("has_t3"):
-            a["t3_n"] += 1
-            a["t3_hits"] += 1 if outcome in T3_REACHED else 0
+        add_trade_to_aggregate(agg, t)
     return agg
+
+
+def add_trade_to_aggregate(agg: Dict[str, Dict[str, Any]], t: Dict[str, Any]) -> None:
+    """Add one closed trade to per-strategy sufficient statistics (in place; order-independent)."""
+    key = normalize_strategy_key(t["strategy"])
+    a = agg.setdefault(key, {
+        "trades": 0, "wins": 0, "sum_return": 0.0,
+        "t1_hits": 0, "t1_n": 0, "t2_hits": 0, "t2_n": 0, "t3_hits": 0, "t3_n": 0,
+    })
+    ret = float(t["net_return_pct"])
+    outcome = str(t.get("outcome", ""))
+    a["trades"] += 1
+    a["wins"] += 1 if ret > 0 else 0
+    a["sum_return"] += ret
+    a["t1_n"] += 1
+    a["t1_hits"] += 1 if outcome in T1_REACHED else 0
+    if t.get("has_t2"):
+        a["t2_n"] += 1
+        a["t2_hits"] += 1 if outcome in T2_REACHED else 0
+    if t.get("has_t3"):
+        a["t3_n"] += 1
+        a["t3_hits"] += 1 if outcome in T3_REACHED else 0
+
+
+class WalkForwardEvidenceBook:
+    """
+    Walk-forward strategy evidence for a chronological replay: a closed trade counts from the first
+    evaluation date after its exit date. Equivalent to re-aggregating every trade that exited before
+    each date, but each trade is added once (a heap by exit date), so large universes stay linear.
+    """
+
+    def __init__(self):
+        self._pending: list = []
+        self._agg: Dict[str, Dict[str, Any]] = {}
+        self._seq = 0
+
+    def add(self, trade: Dict[str, Any]) -> None:
+        import heapq
+        heapq.heappush(self._pending, (trade["exit_date"], self._seq, trade))
+        self._seq += 1
+
+    def evidence_as_of(self, d_str: str) -> Dict[str, "StrategyEvidence"]:
+        import heapq
+        while self._pending and self._pending[0][0] < d_str:
+            add_trade_to_aggregate(self._agg, heapq.heappop(self._pending)[2])
+        return {k: evidence_from_aggregate(k, v, source="walk_forward", as_of=d_str) for k, v in self._agg.items()}
 
 
 def evidence_from_aggregate(

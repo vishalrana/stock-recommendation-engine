@@ -2,7 +2,8 @@
 Strategy Evidence
 =================
 Per-strategy win rate, expectancy and target-hit rates measured by the production-pipeline
-backtest (scripts/validate_backtest_pipeline.py), which writes config/strategy_performance.json.
+backtest on the production universe (workflow backtest_production_universe.yml), adopted into
+config/strategy_performance.json by scripts/adopt_strategy_evidence.py.
 
 These replace hard-coded expectancy assumptions and per-ticker metrics from an unrelated
 legacy backtest. Raw values are shrunk toward neutral priors by trade count:
@@ -16,6 +17,7 @@ closed before that date count, so the evidence is never forward-looking.
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -46,6 +48,10 @@ class StrategyEvidence:
     raw_expectancy: Optional[float] = None     # percent per trade (net of costs)
     shrunk_win_rate: float = BAYESIAN_PRIOR_WIN_RATE
     shrunk_expectancy: float = BAYESIAN_PRIOR_EXPECTANCY_PCT
+    # Display only (cards), never read by scoring: mean net return minus beta x SPY over each trade's
+    # window, and minus SPY itself, over the trades that had a benchmark return.
+    raw_beta_adjusted_expectancy: Optional[float] = None
+    raw_excess_vs_spy_expectancy: Optional[float] = None
     # target -> (hits, trades where that target existed)
     target_hits: Dict[str, Tuple[int, int]] = field(default_factory=dict)
     source: str = "no_evidence"
@@ -63,13 +69,33 @@ def aggregate_trades(trades: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return agg
 
 
+def _finite(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def add_trade_to_aggregate(agg: Dict[str, Dict[str, Any]], t: Dict[str, Any]) -> None:
-    """Add one closed trade to per-strategy sufficient statistics (in place; order-independent)."""
+    """
+    Add one closed trade to per-strategy sufficient statistics (in place; order-independent).
+    The beta-adjusted and vs-SPY sums are display-only (cards); scoring never reads them.
+    """
     key = normalize_strategy_key(t["strategy"])
     a = agg.setdefault(key, {
         "trades": 0, "wins": 0, "sum_return": 0.0,
         "t1_hits": 0, "t1_n": 0, "t2_hits": 0, "t2_n": 0, "t3_hits": 0, "t3_n": 0,
+        "beta_adjusted_n": 0, "sum_beta_adjusted": 0.0, "excess_vs_spy_n": 0, "sum_excess_vs_spy": 0.0,
     })
+    beta_adj = _finite(t.get("beta_adjusted_pct"))
+    if beta_adj is not None:
+        a["beta_adjusted_n"] = a.get("beta_adjusted_n", 0) + 1
+        a["sum_beta_adjusted"] = a.get("sum_beta_adjusted", 0.0) + beta_adj
+    excess = _finite(t.get("excess_vs_spy_pct"))
+    if excess is not None:
+        a["excess_vs_spy_n"] = a.get("excess_vs_spy_n", 0) + 1
+        a["sum_excess_vs_spy"] = a.get("sum_excess_vs_spy", 0.0) + excess
     ret = float(t["net_return_pct"])
     outcome = str(t.get("outcome", ""))
     a["trades"] += 1
@@ -122,6 +148,7 @@ def evidence_from_aggregate(
     n = int(agg["trades"])
     wins = int(agg["wins"])
     mean_ret = float(agg["sum_return"]) / n
+    ba_n, ex_n = int(agg.get("beta_adjusted_n", 0) or 0), int(agg.get("excess_vs_spy_n", 0) or 0)
     return StrategyEvidence(
         strategy=key,
         trades=n,
@@ -130,6 +157,8 @@ def evidence_from_aggregate(
         raw_expectancy=round(mean_ret, 4),
         shrunk_win_rate=round((wins * 100.0 + alpha * BAYESIAN_PRIOR_WIN_RATE) / (n + alpha), 2),
         shrunk_expectancy=round((n * mean_ret + alpha * BAYESIAN_PRIOR_EXPECTANCY_PCT) / (n + alpha), 4),
+        raw_beta_adjusted_expectancy=round(float(agg["sum_beta_adjusted"]) / ba_n, 4) if ba_n else None,
+        raw_excess_vs_spy_expectancy=round(float(agg["sum_excess_vs_spy"]) / ex_n, 4) if ex_n else None,
         target_hits={
             "t1": (int(agg.get("t1_hits", 0)), int(agg.get("t1_n", 0))),
             "t2": (int(agg.get("t2_hits", 0)), int(agg.get("t2_n", 0))),
@@ -183,6 +212,8 @@ def apply_evidence_to_candidate(sig: Dict[str, Any], ev: StrategyEvidence) -> No
     sig["strategy_win_rate"] = ev.raw_win_rate
     sig["strategy_expectancy_pct"] = ev.raw_expectancy
     sig["strategy_trades"] = ev.trades
+    sig["strategy_beta_adjusted_pct"] = ev.raw_beta_adjusted_expectancy   # display only
+    sig["strategy_excess_vs_spy_pct"] = ev.raw_excess_vs_spy_expectancy   # display only
     sig["completed_trades"] = ev.trades
     sig["win_rate_provenance"] = ev.source
     sig["metric_source"] = f"strategy_{ev.source}"

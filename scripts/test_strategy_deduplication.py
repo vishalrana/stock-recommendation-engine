@@ -45,6 +45,7 @@ class TestStrategyDeduplication(unittest.TestCase):
             "context_earnings": 15.0,
             "context_fundamental": 15.0,
             "context_news": 10.0,
+            "expectancy_pct": 1.0,  # pinned: the dedup scenario must not depend on the adopted evidence file
             "quality_score": 75.0,  # Lower local quality score
         }
 
@@ -63,6 +64,7 @@ class TestStrategyDeduplication(unittest.TestCase):
             "context_earnings": 10.0,
             "context_fundamental": 10.0,
             "context_news": 10.0,
+            "expectancy_pct": 1.0,  # pinned: the dedup scenario must not depend on the adopted evidence file
             "quality_score": 95.0,  # Higher local quality score!
         }
 
@@ -81,6 +83,7 @@ class TestStrategyDeduplication(unittest.TestCase):
             "context_earnings": 15.0,
             "context_fundamental": 15.0,
             "context_news": 10.0,
+            "expectancy_pct": 1.0,  # pinned: the dedup scenario must not depend on the adopted evidence file
             "quality_score": 70.0,
         }
 

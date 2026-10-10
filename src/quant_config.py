@@ -81,7 +81,8 @@ REGIME_SCORE_MATRIX: Dict[str, Dict[str, float]] = {
 # ==============================================================================
 # 3. STRATEGY EVIDENCE (win rate & expectancy)
 # Per-strategy win rate and expectancy come from the production-pipeline backtest
-# (scripts/validate_backtest_pipeline.py -> config/strategy_performance.json), shrunk toward
+# on the production universe (backtest_production_universe.yml, adopted into
+# config/strategy_performance.json by scripts/adopt_strategy_evidence.py), shrunk toward
 # neutral priors (50% win rate, 0% expectancy) by trade count. See src/strategy_evidence.py.
 # There are no hard-coded expectancy assumptions.
 #

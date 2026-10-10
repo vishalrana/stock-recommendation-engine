@@ -52,7 +52,9 @@ before the signal date; the only context with history).
 Outputs:
   outputs/production_backtest_summary.json   statistics
   outputs/production_backtest_trades.csv     every simulated trade
-  config/strategy_performance.json           per-strategy evidence used by production scoring
+  outputs/strategy_performance_<universe>.json  per-strategy evidence of this run. Production scoring reads
+                                                config/strategy_performance.json, which is adopted only from a
+                                                production-universe run (scripts/adopt_strategy_evidence.py)
   outputs/production_backtest_variants.json  variant statistics and paired differences (with --variants)
 
 Usage:
@@ -98,7 +100,6 @@ logger = logging.getLogger("validate_backtest_pipeline")
 CACHE_BY_DATE = os.path.join(PROJECT_ROOT, "data", "cache", "by_date")
 BACKTEST_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "backtest_history")
 OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "outputs")
-EVIDENCE_OUT = os.path.join(PROJECT_ROOT, "config", "strategy_performance.json")
 
 HISTORY_PERIOD = "5y"
 SCAN_WINDOW_BARS = 260          # >= 252 needed by the 52-week strategy
@@ -950,9 +951,10 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         },
         "strategy_evidence": evidence_agg,
     }
-    # The production-universe evidence is written next to the outputs; adopting it in
-    # config/strategy_performance.json is a separate, deliberate step.
-    evidence_out = os.path.join(OUTPUTS_DIR, "strategy_performance_production_universe.json") if suffix else EVIDENCE_OUT
+    # Every run writes its evidence next to its outputs. config/strategy_performance.json (read by
+    # production scoring) is adopted only from a production-universe run, as a separate step
+    # (scripts/adopt_strategy_evidence.py), so a cache_start (516-stock) run never replaces it.
+    evidence_out = os.path.join(OUTPUTS_DIR, f"strategy_performance{suffix or '_cache_start'}.json")
     with open(evidence_out, "w", encoding="utf-8") as f:
         json.dump(evidence_doc, f, indent=2)
     logger.info("Wrote %s and outputs/ (%.0fs total)", evidence_out, time.time() - t0)

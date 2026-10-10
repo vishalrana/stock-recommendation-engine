@@ -1,81 +1,107 @@
 {
   "metadata": {
     "description": "Per-strategy evidence from the production-pipeline backtest (scripts/validate_backtest_pipeline.py), measured on all of each strategy's setups (one open per strategy+ticker), net of costs. Consumed by src/strategy_evidence.py.",
-    "generated_at": "2026-10-10T10:28:57.126166+00:00",
+    "generated_at": "2026-10-10T15:03:06.971448+00:00",
     "evaluation_window": [
       "2022-10-21",
       "2026-10-09"
     ],
     "evidence_as_of": "2026-10-09",
     "net_of_costs_pct_per_side": 0.1,
-    "edge_verdict_all": "POSITIVE_EDGE_SUPPORTED",
+    "edge_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
     "edge_vs_spy_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
     "edge_beta_adjusted_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
     "verdict_note": "edge_verdict_* tests absolute net return, which a rising market lifts on its own. Selection skill is judged by the vs-SPY and beta-adjusted verdicts.",
     "limitations": [
-      "Survivorship: the universe is the 2025-02-13 cache constituents; before that date it is chosen with hindsight (survivors only). The late period from 2025-04-09 is the cleaner test.",
+      "Survivorship: the universe is today's (2026-10-10) security master applied to the whole window, so every period is chosen with hindsight (stocks that delisted are missing). Results are biased upward, most for small caps, which delist more often.",
       "No historical earnings calendar: earnings blackout not applied; PEAD cannot fire.",
       "No historical context data: context excluded from scores (weights renormalized).",
       "No VIX history: VIX>40 override not applied.",
       "Strategy thresholds were hand-tuned beforehand; the late period is not a clean out-of-sample test of them.",
       "Confidence intervals use a signal-month block bootstrap; trades are not independent."
-    ]
+    ],
+    "adopted_from": {
+      "workflow": "backtest_production_universe.yml",
+      "run_id": "38059174571",
+      "universe": "production (today's broad US security master; delisted stocks missing)",
+      "rebuilt_from": "production_backtest_setup_trades_production_universe.csv"
+    }
   },
   "strategy_evidence": {
     "mean_reversion": {
-      "trades": 1426,
-      "wins": 853,
-      "sum_return": 592.0070000000005,
-      "t1_hits": 680,
-      "t1_n": 1426,
-      "t2_hits": 3,
-      "t2_n": 36,
+      "trades": 5289,
+      "wins": 3140,
+      "sum_return": 2518.887300000003,
+      "t1_hits": 2513,
+      "t1_n": 5289,
+      "t2_hits": 4,
+      "t2_n": 51,
       "t3_hits": 0,
-      "t3_n": 0
-    },
-    "cross_sectional_momentum": {
-      "trades": 5230,
-      "wins": 2953,
-      "sum_return": 2794.4200000000087,
-      "t1_hits": 2252,
-      "t1_n": 5230,
-      "t2_hits": 1,
-      "t2_n": 44,
-      "t3_hits": 0,
-      "t3_n": 0
+      "t3_n": 0,
+      "beta_adjusted_n": 5289,
+      "sum_beta_adjusted": 50.823900000002,
+      "excess_vs_spy_n": 5289,
+      "sum_excess_vs_spy": 218.03000000000446
     },
     "pullback_recovery": {
-      "trades": 6605,
-      "wins": 3556,
-      "sum_return": 543.229699999999,
-      "t1_hits": 2716,
-      "t1_n": 6605,
-      "t2_hits": 3,
-      "t2_n": 40,
+      "trades": 26254,
+      "wins": 14030,
+      "sum_return": -791.8051999999833,
+      "t1_hits": 11258,
+      "t1_n": 26254,
+      "t2_hits": 0,
+      "t2_n": 34,
       "t3_hits": 0,
-      "t3_n": 1
+      "t3_n": 1,
+      "beta_adjusted_n": 26254,
+      "sum_beta_adjusted": -12520.029200000063,
+      "excess_vs_spy_n": 26254,
+      "sum_excess_vs_spy": -12744.847200000007
+    },
+    "cross_sectional_momentum": {
+      "trades": 23116,
+      "wins": 12101,
+      "sum_return": -3151.2211999999713,
+      "t1_hits": 9834,
+      "t1_n": 23116,
+      "t2_hits": 7,
+      "t2_n": 217,
+      "t3_hits": 0,
+      "t3_n": 6,
+      "beta_adjusted_n": 23116,
+      "sum_beta_adjusted": -24179.236499999846,
+      "excess_vs_spy_n": 23116,
+      "sum_excess_vs_spy": -20350.82019999977
     },
     "sector_rotation": {
       "trades": 486,
       "wins": 271,
-      "sum_return": 191.64699999999996,
+      "sum_return": 191.64619999999994,
       "t1_hits": 180,
       "t1_n": 486,
       "t2_hits": 9,
       "t2_n": 55,
       "t3_hits": 0,
-      "t3_n": 5
+      "t3_n": 5,
+      "beta_adjusted_n": 486,
+      "sum_beta_adjusted": -354.29069999999984,
+      "excess_vs_spy_n": 486,
+      "sum_excess_vs_spy": -352.29670000000004
     },
     "trend_following": {
-      "trades": 6563,
-      "wins": 3546,
-      "sum_return": 4236.422900000013,
-      "t1_hits": 2592,
-      "t1_n": 6563,
-      "t2_hits": 3,
-      "t2_n": 72,
+      "trades": 27769,
+      "wins": 14584,
+      "sum_return": 3390.039999999976,
+      "t1_hits": 11263,
+      "t1_n": 27769,
+      "t2_hits": 40,
+      "t2_n": 584,
       "t3_hits": 0,
-      "t3_n": 1
+      "t3_n": 17,
+      "beta_adjusted_n": 27769,
+      "sum_beta_adjusted": -21454.32949999978,
+      "excess_vs_spy_n": 27769,
+      "sum_excess_vs_spy": -19498.78359999997
     }
   }
 }

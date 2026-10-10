@@ -91,6 +91,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - Each scan prints a "Provider health" GitHub notice: SEC and Yahoo success counts, and context and display-fundamentals coverage. It is readable from the run's check annotations without admin rights.
 - `supabase/migration_2026_10_10_fundamentals.sql` adds `eps_ttm`, `fundamentals_source` and `fundamentals_as_of`. It also adds the never-applied `reference_entry_price`, `weighted_scaleout_rr` and `entry_location_zone` columns, and it is idempotent.
 - Inserts drop only the specific unmigrated column the database names (`write_with_missing_column_retry`). If the logs show `[SCHEMA] Wrote without unmigrated column(s)`, apply the missing migration.
+- **Applying migrations:** once `supabase/setup_run_migration.sql` has been run in the Supabase SQL editor, `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement, using the service key from `.env` (`--dry-run` lists the statements). Migration files must be idempotent. Until that setup is done, migrations need the SQL editor.
 - `get_client()` raises `SupabaseConfigError` instead of exiting, so CI can run tests without secrets.
 
 ## Strategy decisions (user-approved 2026-10-09)

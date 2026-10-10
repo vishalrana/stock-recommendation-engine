@@ -1044,6 +1044,10 @@ def run_scan(
     # Tickers whose latest cached bar is older than the market session (e.g. a failed download
     # chunk): never evaluated, so no signal can be issued from stale bars.
     stale_bar_tickers: Set[str] = set()
+    # Tickers with current price data, whether or not they pass the strategy filters (liquidity,
+    # history length). The targeted refresh's lifecycle safeguard needs data, not eligibility: an
+    # open idea that slipped under the liquidity floor must not block updates for every idea.
+    data_ready_tickers: Set[str] = set()
 
     for strategy in STRATEGIES:
         if hasattr(strategy, "set_earnings_calendar"):
@@ -1102,6 +1106,7 @@ def run_scan(
                         stale_bar_tickers.add(ticker)
                         evaluated_dfs[ticker] = None
                         continue
+                    data_ready_tickers.add(ticker)
 
                     if len(raw) < 60:
                         logger.warning(
@@ -1680,11 +1685,15 @@ def run_scan(
             for sig in (qualified_recommendations if 'qualified_recommendations' in locals() else []):
                 updated_analytics[sig["ticker"].upper()] = sig
             try:
+                data_ready_targets = data_ready_tickers & {t.upper() for t in tickers}
+                missing_data = sorted({t.upper() for t in tickers} - data_ready_targets)
+                if missing_data:
+                    logger.warning("[TARGETED REFRESH] No current price data for: %s", ", ".join(missing_data))
                 reconcile_recommendation_lifecycle(
                     supabase=supabase,
                     qualified_tickers=qualified_tickers,
                     scan_successful=True,
-                    scanned_count=len(successfully_evaluated_tickers),
+                    scanned_count=len(data_ready_targets),
                     min_required_scanned=len(tickers),
                     disqualification_reasons=disqualification_reasons,
                     target_tickers=set(tickers),

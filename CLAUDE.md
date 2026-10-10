@@ -51,7 +51,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - Yahoo blocks GitHub's runners, so fundamentals now come from SEC EDGAR first. CI needs the `SEC_USER_AGENT` repository secret (a name and contact email); without it, fundamentals fall back to Yahoo and stay mostly empty in CI. After the next run, check the "Provider health" notice.
 - The backtest universe is the 2025-02-13 cache constituents, but the window starts 2022-10-21. Results before the universe date are survivorship-inflated. The late period (from 2025-04-09) is the cleaner test; its figures are given with the latest backtest below.
 - Earnings blackout (user-approved 2026-10-10): `EARNINGS_BLACKOUT_DAYS` now counts NYSE trading sessions after the scan date up to and including the report date (`trading_sessions_between` in `src/utils/market_date.py`, which applies the NYSE holiday rules). Before this it counted calendar days. `days_to_earnings` stays in calendar days, because that is what the card shows. The windows are still far shorter than the 5–25-day holding periods, so the card warns when earnings fall inside the holding period. The backtest cannot test the blackout (no historical earnings calendar).
-- **Universe mismatch (open):** production scans the broad US universe (5,598 common equities; about 2,750 pass the liquidity filter). The backtest universe is the 516 mostly large-cap stocks of the first cache file. Strategy evidence and reach probabilities are therefore measured on large caps but applied to small caps too, so treat the evidence as provisional for small caps.
+- **Universe mismatch (open decision):** production scans the broad US universe (5,598 common equities; about 2,750 pass the liquidity filter). The strategy evidence comes from the 516 mostly large-cap stocks of the first cache file. The production-universe backtest (2026-10-10; see "Production-universe backtest" below) found the extra names worse, not better. Recommendation pending the user's decision: switch the nightly to `UNIVERSE_SOURCE=benchmark` (S&P 500 + Nasdaq-100), and keep downloading the tickers of open ideas so their lifecycle keeps updating.
 - CI failed on every push because `get_client()` called `sys.exit()` without secrets. This is fixed: the suite passes 40/40 with and without Supabase credentials.
 - The earlier backtest figures (−0.45% OOS expectancy) came from a harness that did not run the production pipeline, so they are superseded.
 - Latest production-pipeline backtest (2026-10-10, with 52-Week High switched off): 2,984 issued trades.
@@ -127,6 +127,22 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - Ideas fall only 29%, because many of the same stocks are then issued under Trend Following (964 → 2,550 ideas, −0.19 beta-adjusted). Other strategies' evidence does not depend on 52-Week High, so the screen is exact for this option.
 - The engine is still not positive after adjusting for beta. This removes its worst component; it does not create an edge.
 
+## Production-universe backtest (2026-10-10, GitHub run 38059174571)
+
+Today's security master was applied to Oct 2022 – Oct 2026: 5,598 stocks, 821 s replay, 82,914 setups, 7,261 issued ideas. Survivorship flatters small caps here, because stocks that delisted are missing. Figures are beta-adjusted %/trade, with signal-month block-bootstrap 95% CIs.
+
+| Segment | All setups | Issued ideas |
+|---|---|---|
+| Whole universe | −0.71 (−1.03 to −0.39) | −0.50 (−1.14 to +0.20); late period −0.32 |
+| Large caps (the 516 backtested) | −0.35 (−0.62 to −0.06) | −0.27 (−0.86 to +0.29) |
+| Rest of the universe | −0.81 (−1.16 to −0.45) | −0.58 (−1.30 to +0.19) |
+
+- In every strategy except Mean Reversion, small- and mid-cap setups are worse than large-cap ones. Cross-Sectional Momentum setups outside the large caps: −1.17 (−1.56 to −0.75).
+- Trend Following is 95% of issued ideas (52-Week High off).
+- By 20-day dollar volume at the signal, issued ideas over $100M ADV did worst (−0.68 and −0.75, CIs excluding zero), so liquidity alone is not the explanation.
+- Issued Mean Reversion ideas: +0.45 on 202 ideas, almost all from the 2022 bear market (no late-period trades). At the setup level, Mean Reversion is +0.01 (−0.60 to +0.71), so this is not evidence of an edge.
+- There is no edge in either universe. The broad universe adds about 2.4× the ideas (7.3 vs 3.0 a day) at a lower quality per idea.
+
 ## Research findings (2026-10-10, setup level)
 
 Method: all 27,268 strategy setups from the production-pipeline backtest (Oct 2022 – Oct 2026), point-in-time features, forward net return minus SPY over the same window. Ranking power is measured as the monthly Spearman rank-IC (t-stat over months), with differences given as signal-month block-bootstrap 95% CIs. The sample is almost all bull market, so treat every result as provisional.
@@ -160,6 +176,12 @@ Run while 52-Week High was still active. Method: one pass of `validate_backtest_
 - `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap. Rerun it after any change to strategy, scoring or exit logic, then commit the regenerated `config/strategy_performance.json`.
 - Every trade carries a point-in-time `beta` (252 sessions before the signal) and `beta_adjusted_pct` (net − β × SPY return over the trade window). The stats include `mean_beta_adjusted_pct` with its CI, and the summary includes `edge_beta_adjusted_verdict_*`. Judge selection skill on the beta-adjusted and vs-SPY verdicts, not on `edge_verdict_*` (absolute return).
 - The cached phase-1 scans are keyed by strategy code, indicators, data extent and `REGIME_STRATEGY_MAP`, so switching a strategy on or off forces a rescan.
+- `--universe production` backtests today's broad US security master (about 5,600 tickers) instead of the first cache file's 516 stocks. It fails if the security master is unavailable.
+  - Run it on GitHub: the workflow `backtest_production_universe.yml` (manual dispatch, optional `limit` for a smoke test, about 2–4 h) uploads the summary, trades and setups, and `outputs/strategy_performance_production_universe.json` as an artifact.
+  - It never overwrites `config/strategy_performance.json`; adopting that evidence is a decision.
+  - Survivorship: today's list is applied to the whole window, so every period is chosen with hindsight, and small caps are biased upward the most.
+  - `--phase1-only` caches the scans. Trades carry `adv20_usd` (20-day dollar volume at the signal) for size tiers.
+  - Walk-forward evidence is incremental (`WalkForwardEvidenceBook`) and matches daily re-aggregation exactly.
 - `--variants all` (or a comma-separated list) evaluates alternatives in the same pass, against identical setups, evidence and execution. Selection variants: `rs_momentum`, `entry_info`, `rs_momentum_entry_info`, `fundamentals_in_score`. Strategy screening variants (`STRATEGY_VARIANTS`, candidate filters): `w52_off`, `w52_original_rules`, `w52_breakout`. They need 52-Week High re-enabled in `REGIME_STRATEGY_MAP`; otherwise they do nothing. A strategy variant keeps that strategy's walk-forward evidence from all its setups, so a winner must be built into the strategy and re-validated with a full run. Each variant keeps its own book, with one active idea per ticker. Results go to `outputs/production_backtest_variants.json`, with paired CIs against production. The switches live in `src/quant_config.py` (`MOMENTUM_MODEL`, `ENTRY_LOCATION_MODE`, `CONTEXT_SCORE_COMPONENTS`) and are read through `SelectionSettings` by both the scan and the backtest. `fundamentals_in_score` uses point-in-time SEC fundamentals: facts filed strictly before the signal date, with the 200-day freshness rule.
 - Known limitations (listed in its output): survivorship, no historical earnings calendar (so PEAD and the earnings blackout cannot be tested), no historical context data, no VIX history, and thresholds that were hand-tuned before the harness existed. The 516-stock universe is narrower than production's (see Current status).
 
@@ -179,6 +201,10 @@ Run while 52-Week High was still active. Method: one pass of `validate_backtest_
   - Download: it uses 200-ticker chunks with a 0.25 s pause instead of 100-ticker chunks with a 1 s sleep, and re-requests a 7-day overlap so a failed chunk heals the next night (same request count). yfinance throughput did not rise with more threads or concurrent chunks (tested), so those were not changed.
 - **Per-ticker freshness gate:** a ticker whose latest cached bar is older than the market session is never evaluated. Provider health reports `stale_tickers_skipped`.
 - **Refresh Current Ideas** restores the nightly's `data-cache-v2-*` cache and never saves one. It used its own nearly empty `v1` cache, so every idea was skipped for having too few bars and Refresh changed nothing. It now downloads its few tickers up to the market date. Its lifecycle safeguard requires current price data for every target, not strategy eligibility; before this, one open idea under the liquidity floor (AII) blocked updates for all of them. Verified 2026-10-10 in run 38056801266 (1 min 46 s): all 30 ideas reconciled, LILAK closed at its stop, GDDY reached T1, and SEC fundamentals were written for 29 of 29 open ideas.
+- **Refresh button (site):**
+  - It sends every active idea (the old cap of 30 is gone; the limit is now 200) and polls for up to 15 minutes, showing the queued or running state and the elapsed time.
+  - Each outcome has its own message with a link to the run.
+  - After success, the cards adopt the refreshed server data. They used to keep a `useState` copy seeded once, so the page showed the pre-refresh list until a full reload.
 - If a GitHub run page keeps showing "in progress" after a run finished, check `gh run view <id>`. On 2026-10-10 a 46-second refresh run still showed as running in the browser after 9 minutes.
 
 ## Other docs

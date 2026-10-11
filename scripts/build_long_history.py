@@ -40,15 +40,10 @@ def get_target_tickers() -> List[str]:
     # 1. Sector ETFs and benchmark
     tickers.update(SECTOR_ETFS)
 
-    # 2. U1 Production universe
-    try:
-        import jobs.generate_signals as gs
-        u1_tickers, _, _ = gs.load_universe("expanded")
-        for t in u1_tickers:
-            if t and isinstance(t, str):
-                tickers.add(yahoo_symbol(t))
-    except Exception as e:
-        logger.warning(f"Could not load U1 universe from generate_signals: {e}")
+    # 2. U1: today's security master. Fails loudly rather than silently building a smaller universe.
+    from scripts.validate_backtest_pipeline import production_universe
+    stocks, _ = production_universe()
+    tickers.update(yahoo_symbol(t) for t in stocks if t)
 
     # 3. S&P 500 historical membership overlapping 2008-2022
     try:

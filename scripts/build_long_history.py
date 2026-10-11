@@ -90,6 +90,10 @@ def process_ticker_frame(df_t: pd.DataFrame) -> Optional[pd.DataFrame]:
     if df_t is None or df_t.empty:
         return None
 
+    if isinstance(df_t.columns, pd.MultiIndex):
+        df_t = df_t.copy()
+        df_t.columns = df_t.columns.get_level_values(0)
+
     # Handle standard columns
     cols_map = {
         "Open": "OPEN",

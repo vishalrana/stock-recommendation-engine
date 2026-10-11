@@ -125,6 +125,9 @@ def load_price_data(limit: Optional[int] = None) -> Tuple[Dict[str, pd.DataFrame
         try:
             import yfinance as yf
             spy_raw = yf.download("SPY", start="2004-01-01", auto_adjust=False, actions=True)
+            if isinstance(spy_raw.columns, pd.MultiIndex):
+                spy_raw = spy_raw.copy()
+                spy_raw.columns = spy_raw.columns.get_level_values(0)
             from scripts.build_long_history import process_ticker_frame
             spy_df = process_ticker_frame(spy_raw)
             if spy_df is not None:

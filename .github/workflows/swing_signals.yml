@@ -37,15 +37,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r jobs/requirements.txt
 
       - name: Restore Price & SEC Cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             data/backtest_history
             data/cache/fundamentals
-          key: swing-live-cache-${{ hashFiles('config/strategy.yaml') }}
+          key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-backtest-history-
             swing-live-cache-
 
       - name: Run Swing Signals Engine
@@ -67,6 +69,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -d "ledger" ] && [ -n "$(ls -A ledger)" ]; then
+            mkdir -p /tmp/ledger_backup
+            cp -r ledger/* /tmp/ledger_backup/
             # Check if signals-ledger branch exists on remote
             if git ls-remote --exit-code --heads origin signals-ledger; then
               git fetch origin signals-ledger
@@ -75,9 +79,9 @@ jobs:
               git checkout --orphan signals-ledger
               git rm -rf .
             fi
-            # Copy ledger files into root
-            git checkout ${{ github.sha }} -- ledger/
-            git add ledger/
+            mkdir -p ledger
+            cp -r /tmp/ledger_backup/* ledger/
+            git add -f ledger/
             if ! git diff --staged --quiet; then
               git commit -m "Automated forward swing signals ledger: $(date -u +'%Y-%m-%d')"
               git push origin signals-ledger

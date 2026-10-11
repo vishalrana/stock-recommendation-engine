@@ -31,6 +31,7 @@ data/backtest_history_long/
 !config/*.json
 !.github/swing_research_trigger.json
 outputs/
+ledger/*.jsonl
 *.log
 
 # Scratch scripts

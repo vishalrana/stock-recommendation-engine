@@ -26,6 +26,17 @@ NON_COMMON_PATTERNS = [
     r"\bNote\b", r"\bNotes\b", r"\bDebenture\b", r"\bDebentures\b",
     r"\bClosed-End\b", r"\bTerm Trust\b", r"\bIncome Trust\b",
 ]
+# Royalty trusts (added 2026-10-11): pass-through units of oil, gas or mineral royalties, not
+# operating companies. Their 8-K item 2.02 filings are monthly distributions, not earnings, and
+# their prices follow commodity royalties and trust events (e.g. PBT's 2026 merger and rights
+# offering). In the 2026-10-10 production-universe backtest they produced 0 issued ideas.
+ROYALTY_TRUST_PATTERNS = [
+    r"\bRoyalty Trust\b", r"\bRoyalty Tr\b",
+    r"\b(?:Oil|Gas|Energy|Petroleum|Minerals?) Trust\b",
+    r"\bMesabi Trust\b", r"\bMarcellus Trust\b", r"\bMississippian Trust\b", r"\bPermian Trust\b",
+]
+ROYALTY_TRUST_REGEX = re.compile("|".join(ROYALTY_TRUST_PATTERNS), re.IGNORECASE)
+NON_COMMON_PATTERNS = NON_COMMON_PATTERNS + ROYALTY_TRUST_PATTERNS
 NON_COMMON_REGEX = re.compile("|".join(NON_COMMON_PATTERNS), re.IGNORECASE)
 
 DEFAULT_BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER", "TEMP"}
@@ -70,7 +81,10 @@ def is_eligible_equity(
     if inst_type in {"PREFERRED", "WARRANT", "RIGHT", "UNIT", "MUTUAL_FUND", "CEF", "NOTE", "DEBENTURE"}:
         return False, f"Security instrument type is {inst_type}"
 
-    # 7. Name regex check for warrants, preferreds, units, rights, notes
+    # 7. Name regex check for royalty trusts, warrants, preferreds, units, rights, notes
+    trust = ROYALTY_TRUST_REGEX.search(record.company_name)
+    if trust:
+        return False, f"Security is a royalty trust: matched '{trust.group(0)}'"
     if NON_COMMON_REGEX.search(record.company_name):
         match = NON_COMMON_REGEX.search(record.company_name)
         return False, f"Security name indicates non-common equity: matched '{match.group(0)}'"

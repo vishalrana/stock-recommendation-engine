@@ -197,6 +197,11 @@ class USEquitiesUniverseProvider(UniverseProvider):
             records = {}
             for item in data.get("securities", []):
                 rec = SecurityRecord.from_dict(item)
+                # Eligibility rules can change after the cache was written (e.g. royalty trusts)
+                ok, reason = is_eligible_equity(rec, self.delisted_tickers)
+                if not ok:
+                    logger.info("[UNIVERSE] Excluded cached %s: %s", rec.ticker, reason)
+                    continue
                 records[rec.ticker] = rec
             self._universe = records
             self._provider_ticker_map = {r.data_provider_ticker: r.ticker for r in records.values()}
@@ -283,6 +288,9 @@ class USEquitiesUniverseProvider(UniverseProvider):
                     stats["excluded_test_issues"] += 1
                 elif "etf" in reason.lower():
                     stats["excluded_etfs"] += 1
+                elif "royalty trust" in reason.lower():
+                    stats["excluded_royalty_trusts"] = stats.get("excluded_royalty_trusts", 0) + 1
+                    logger.info("[UNIVERSE] Excluded %s: %s", canonical, reason)
                 else:
                     stats["excluded_non_common"] += 1
                 continue
@@ -332,6 +340,9 @@ class USEquitiesUniverseProvider(UniverseProvider):
                     stats["excluded_test_issues"] += 1
                 elif "etf" in reason.lower():
                     stats["excluded_etfs"] += 1
+                elif "royalty trust" in reason.lower():
+                    stats["excluded_royalty_trusts"] = stats.get("excluded_royalty_trusts", 0) + 1
+                    logger.info("[UNIVERSE] Excluded %s: %s", canonical, reason)
                 else:
                     stats["excluded_non_common"] += 1
                 continue

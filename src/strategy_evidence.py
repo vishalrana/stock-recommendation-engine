@@ -52,6 +52,11 @@ class StrategyEvidence:
     # window, and minus SPY itself, over the trades that had a benchmark return.
     raw_beta_adjusted_expectancy: Optional[float] = None
     raw_excess_vs_spy_expectancy: Optional[float] = None
+    # Display only (cards): mean realized R multiple (net return / planned stop distance) and the
+    # share of exits by stop, target and holding-period expiry.
+    expected_r: Optional[float] = None
+    r_trades: int = 0
+    exit_mix: Dict[str, float] = field(default_factory=dict)
     # target -> (hits, trades where that target existed)
     target_hits: Dict[str, Tuple[int, int]] = field(default_factory=dict)
     source: str = "no_evidence"
@@ -87,7 +92,16 @@ def add_trade_to_aggregate(agg: Dict[str, Dict[str, Any]], t: Dict[str, Any]) ->
         "trades": 0, "wins": 0, "sum_return": 0.0,
         "t1_hits": 0, "t1_n": 0, "t2_hits": 0, "t2_n": 0, "t3_hits": 0, "t3_n": 0,
         "beta_adjusted_n": 0, "sum_beta_adjusted": 0.0, "excess_vs_spy_n": 0, "sum_excess_vs_spy": 0.0,
+        "r_n": 0, "sum_r": 0.0, "exit_stop": 0, "exit_target": 0, "exit_expiry": 0,
     })
+    stop_pct = _finite(t.get("stop_pct"))
+    net = _finite(t.get("net_return_pct"))
+    if stop_pct is not None and stop_pct > 0 and net is not None:
+        a["r_n"] = a.get("r_n", 0) + 1
+        a["sum_r"] = a.get("sum_r", 0.0) + net / stop_pct
+    reason = str(t.get("exit_reason") or "")
+    if reason in ("stop", "target", "expiry"):
+        a[f"exit_{reason}"] = a.get(f"exit_{reason}", 0) + 1
     beta_adj = _finite(t.get("beta_adjusted_pct"))
     if beta_adj is not None:
         a["beta_adjusted_n"] = a.get("beta_adjusted_n", 0) + 1
@@ -149,6 +163,9 @@ def evidence_from_aggregate(
     wins = int(agg["wins"])
     mean_ret = float(agg["sum_return"]) / n
     ba_n, ex_n = int(agg.get("beta_adjusted_n", 0) or 0), int(agg.get("excess_vs_spy_n", 0) or 0)
+    r_n = int(agg.get("r_n", 0) or 0)
+    exits = {k: int(agg.get(f"exit_{k}", 0) or 0) for k in ("stop", "target", "expiry")}
+    n_exits = sum(exits.values())
     return StrategyEvidence(
         strategy=key,
         trades=n,
@@ -159,6 +176,9 @@ def evidence_from_aggregate(
         shrunk_expectancy=round((n * mean_ret + alpha * BAYESIAN_PRIOR_EXPECTANCY_PCT) / (n + alpha), 4),
         raw_beta_adjusted_expectancy=round(float(agg["sum_beta_adjusted"]) / ba_n, 4) if ba_n else None,
         raw_excess_vs_spy_expectancy=round(float(agg["sum_excess_vs_spy"]) / ex_n, 4) if ex_n else None,
+        expected_r=round(float(agg["sum_r"]) / r_n, 4) if r_n else None,
+        r_trades=r_n,
+        exit_mix={k: round(100.0 * v / n_exits, 2) for k, v in exits.items()} if n_exits else {},
         target_hits={
             "t1": (int(agg.get("t1_hits", 0)), int(agg.get("t1_n", 0))),
             "t2": (int(agg.get("t2_hits", 0)), int(agg.get("t2_n", 0))),
@@ -214,6 +234,14 @@ def apply_evidence_to_candidate(sig: Dict[str, Any], ev: StrategyEvidence) -> No
     sig["strategy_trades"] = ev.trades
     sig["strategy_beta_adjusted_pct"] = ev.raw_beta_adjusted_expectancy   # display only
     sig["strategy_excess_vs_spy_pct"] = ev.raw_excess_vs_spy_expectancy   # display only
+    sig["strategy_expected_r"] = ev.expected_r                            # display only
+    sig["strategy_exit_stop_pct"] = ev.exit_mix.get("stop")               # display only
+    sig["strategy_exit_target_pct"] = ev.exit_mix.get("target")           # display only
+    sig["strategy_exit_expiry_pct"] = ev.exit_mix.get("expiry")           # display only
+    t2_hits, t2_n = ev.target_hits.get("t2", (0, 0))
+    t3_hits, t3_n = ev.target_hits.get("t3", (0, 0))
+    sig["strategy_t2_hit_pct"] = round(100.0 * t2_hits / t2_n, 2) if t2_n else None   # display only
+    sig["strategy_t3_hit_pct"] = round(100.0 * t3_hits / t3_n, 2) if t3_n else None   # display only
     sig["completed_trades"] = ev.trades
     sig["win_rate_provenance"] = ev.source
     sig["metric_source"] = f"strategy_{ev.source}"

@@ -1,0 +1,82 @@
+name: Research - signal IC study
+
+# Profitability program, Phases 3 and 5 (rules R3 and R4 in CLAUDE.md): monthly rank IC of the
+# pre-registered signals (and, with patterns=true, the pattern features) on the production
+# universe. Research only: nothing here changes production settings (run 3: Phase 7).
+
+on:
+  # A workflow only on a branch cannot be dispatched by hand, so a push of this file on the
+  # program branch also runs the full study (with pattern features).
+  push:
+    branches: [profitability-program]
+    paths: ['.github/workflows/research_signal_ic.yml']
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Smoke test: only the first N stocks (empty = full universe)'
+        required: false
+        default: ''
+      patterns:
+        description: 'Also evaluate the Phase 5 pattern features (true/false)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: research-signal-ic
+  cancel-in-progress: false
+
+jobs:
+  ic:
+    name: Signal IC study
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
+      LIMIT_ARG: ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+      PATTERNS_ARG: ${{ (github.event_name == 'push' || inputs.patterns == 'true') && '--patterns' || '' }}
+      # Pushes after the Phase 3 decision run the Phase 7 ML study (R5) without re-recording signal trials
+      ML_ARG: ${{ github.event_name == 'push' && '--ml --no-trials' || '' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r jobs/requirements.txt
+
+      - name: Install research dependencies
+        continue-on-error: true
+        run: pip install -r requirements-research.txt
+
+      - name: Restore price history
+        uses: actions/cache/restore@v4
+        with:
+          path: data/backtest_history/*.parquet
+          key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-backtest-history-
+
+      - name: Signal IC study
+        run: python scripts/research_signal_ic.py --universe production $LIMIT_ARG $PATTERNS_ARG $ML_ARG
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-signal-ic
+          path: |
+            outputs/research/
+            outputs/research_trials.jsonl
+          if-no-files-found: warn
+          retention-days: 30

@@ -379,6 +379,109 @@ class TestNoLookaheadIntegrity(unittest.TestCase):
         self.assertNotEqual(res1.raw_prob, res2.raw_prob, "Cache collision between distinct datasets!")
 
 
+def _synthetic_panel(n_tickers=20, n_bars=700, seed=5):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2023-01-02", periods=n_bars)
+    spy = pd.Series(400 * np.exp(np.cumsum(rng.normal(0.0003, 0.01, n_bars))), index=idx)
+    etf = pd.DataFrame({"XLK": 150 * np.exp(np.cumsum(rng.normal(0.0003, 0.012, n_bars)))}, index=idx)
+    mkt = np.log(spy).diff().fillna(0).to_numpy()
+    close, high, vol = {}, {}, {}
+    for k in range(n_tickers):
+        r = 0.9 * mkt + rng.normal(0, 0.02, n_bars)
+        c = 30 * np.exp(np.cumsum(r))
+        if k == 3:
+            c[:150] = np.nan                    # listed later
+        close[f"T{k:02d}"] = c
+        high[f"T{k:02d}"] = c * 1.01
+        vol[f"T{k:02d}"] = rng.integers(200_000, 2_000_000, n_bars).astype(float)
+    sectors = {t: ("XLK" if i % 2 else None) for i, t in enumerate(close)}
+    return (pd.DataFrame(close, index=idx), pd.DataFrame(high, index=idx), pd.DataFrame(vol, index=idx),
+            spy, etf, sectors)
+
+
+class TestSignalFeaturesNoLookahead(unittest.TestCase):
+    """Phase 3 signal features: values at t computed on data cut at t equal the full-history values."""
+
+    def test_bar_by_bar_equals_vectorized(self):
+        from scripts.research_signal_ic import compute_features
+        close, high, vol, spy, etf, sectors = _synthetic_panel()
+        full = compute_features(close, high, vol, spy, etf, sectors)
+        for t in (close.index[560], close.index[620], close.index[-1]):
+            cut = compute_features(close.loc[:t], high.loc[:t], vol.loc[:t], spy.loc[:t], etf.loc[:t], sectors)
+            for name, frame in full.items():
+                a, b = frame.loc[t], cut[name].loc[t]
+                pd.testing.assert_series_equal(a, b, check_names=False, rtol=1e-9, atol=1e-12, obj=f"{name}@{t.date()}")
+            self.assertTrue(full["RESMOM"].loc[t].notna().sum() >= 15)
+
+    def test_resmom_matches_direct_ols(self):
+        from scripts.research_signal_ic import residual_momentum
+        close, high, vol, spy, etf, sectors = _synthetic_panel(n_tickers=2)
+        r = close["T01"].pct_change()
+        x1, x2 = spy.pct_change(), etf["XLK"].pct_change()
+        rm = residual_momentum(r, [x1, x2])
+        t = 650
+        e = t - 21
+        sl = slice(e - 503, e + 1)
+        X = np.column_stack([np.ones(504), x1.iloc[sl], x2.iloc[sl]])
+        b, *_ = np.linalg.lstsq(X, r.iloc[sl].to_numpy(), rcond=None)
+        res = r.iloc[e - 230: e + 1].to_numpy() - np.column_stack(
+            [np.ones(231), x1.iloc[e - 230: e + 1], x2.iloc[e - 230: e + 1]]) @ b
+        self.assertAlmostEqual(rm.iloc[t], res.mean() / res.std(), places=8)
+
+
+def _path(points, noise=0.002, seed=1):
+    """Piecewise-linear close path through (bar, price) points, with OHLC around it."""
+    rng = np.random.default_rng(seed)
+    xs, ys = zip(*points)
+    c = np.interp(np.arange(xs[-1] + 1), xs, ys) * (1 + rng.normal(0, noise, xs[-1] + 1))
+    return c * 1.004, c * 0.996, c, np.full(len(c), 1e6)
+
+
+class TestPatternFeatures(unittest.TestCase):
+    """Phase 5 pattern templates and their point-in-time stamping."""
+
+    def test_templates_detect_synthetic_shapes(self):
+        from src.patterns import pattern_events
+        hs = [(0, 80), (40, 100), (60, 90), (80, 112), (100, 90), (120, 101), (140, 92), (150, 82), (170, 80)]
+        kinds = {e.kind for e in pattern_events(*_path(hs)[:3])}
+        self.assertIn("hs_top", kinds)
+        inv = [(0, 120), (40, 100), (60, 110), (80, 88), (100, 110), (120, 99), (140, 108), (150, 118), (170, 120)]
+        self.assertIn("inv_hs", {e.kind for e in pattern_events(*_path(inv)[:3])})
+        db = [(0, 120), (40, 100), (70, 115), (100, 100.5), (130, 117), (140, 122), (160, 124)]
+        self.assertIn("double_bottom", {e.kind for e in pattern_events(*_path(db)[:3])})
+        flag = [(0, 100), (40, 100), (48, 125), (58, 120), (60, 128), (80, 132)]
+        self.assertIn("bull_flag", {e.kind for e in pattern_events(*_path(flag, noise=0.0005)[:3])})
+
+    def test_events_stamped_when_knowable(self):
+        from src.patterns import pattern_events, wilder_atr, atr_zigzag
+        h, l, c, _ = _path([(0, 80), (40, 100), (60, 90), (80, 112), (100, 90), (120, 101), (140, 92), (150, 82), (170, 80)])
+        atr = wilder_atr(h, l, c)
+        piv, prov = atr_zigzag(h, l, atr)
+        self.assertTrue(all(p.confirmation_index > p.extreme_index for p in piv))
+        self.assertEqual(prov.confirmation_index, -1)                     # the last leg stays provisional
+        for e in pattern_events(h, l, c, atr, piv):
+            self.assertGreaterEqual(e.index, e.breakout_index)
+            later = [x for x in pattern_events(h[: e.index], l[: e.index], c[: e.index]) if x.kind == e.kind and x.breakout_index == e.breakout_index]
+            self.assertEqual(later, [], f"{e.kind} visible before bar {e.index}")
+
+    def test_bar_by_bar_equals_vectorized(self):
+        from src.patterns import ticker_pattern_features
+        rng = np.random.default_rng(11)
+        for k in range(20):
+            c = 50 * np.exp(np.cumsum(rng.normal(0.0004, 0.02, 420)))
+            h, l = c * (1 + rng.uniform(0, 0.02, 420)), c * (1 - rng.uniform(0, 0.02, 420))
+            v = rng.integers(1e5, 1e6, 420).astype(float)
+            ts = [150, 230, 310, 419]
+            full = ticker_pattern_features(h, l, c, v, ts)
+            for t in ts:
+                cut = ticker_pattern_features(h[: t + 1], l[: t + 1], c[: t + 1], v[: t + 1], [t])[t]
+                for f, val in full[t].items():
+                    if np.isnan(val):
+                        self.assertTrue(np.isnan(cut[f]), (k, t, f))
+                    else:
+                        self.assertAlmostEqual(val, cut[f], places=10, msg=(k, t, f))
+
+
 if __name__ == "__main__":
     unittest.main()
 

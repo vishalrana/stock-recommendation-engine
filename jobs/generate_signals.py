@@ -416,6 +416,8 @@ OPTIONAL_INSERT_COLUMNS = (
     "reach_prob_source", "strategy_win_rate", "strategy_expectancy_pct", "strategy_trades",
     "strategy_beta_adjusted_pct", "strategy_excess_vs_spy_pct",
     "eps_ttm", "fundamentals_source", "fundamentals_as_of", "negative_equity",
+    "strategy_expected_r", "strategy_exit_stop_pct", "strategy_exit_target_pct", "strategy_exit_expiry_pct",
+    "strategy_t2_hit_pct", "strategy_t3_hit_pct", "earnings_unknown", "event_lock_unknown",
 )
 
 # Used only when a recommendation's strategy is unknown (no holding period to apply).
@@ -535,6 +537,78 @@ _DISPLAY_METADATA = None
 
 DISPLAY_FUNDAMENTAL_FIELDS = ("pe_ratio", "de_ratio", "current_ratio", "eps_ttm", "fundamentals_source",
                               "fundamentals_as_of", "negative_equity")
+
+
+_SEC_FILINGS = None
+
+
+def _sec_filings():
+    global _SEC_FILINGS
+    if _SEC_FILINGS is None:
+        from src.providers.context.sec_filings import SecFilingsProvider
+        _SEC_FILINGS = SecFilingsProvider()
+    return _SEC_FILINGS
+
+
+def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFrame], scan_date,
+                             earnings_calendar: Optional[Dict[str, Any]]) -> Optional[str]:
+    """
+    Issuance filters of the profitability program (src/trade_hygiene.py), each behind its switch in
+    src/quant_config.py. Returns the rejection reason, or None. Unknown data never rejects: the idea
+    is issued and flagged (earnings_unknown / event_lock_unknown).
+    """
+    from src import quant_config as qc
+    from src.quant_config import normalize_strategy_key
+    from src.pipeline_steps import holding_days_for
+    from src.trade_hygiene import (SessionCalendar, full_hold_window, earnings_hold_rejection,
+                                   rr_stop_rejection, estimate_next_earnings)
+    from src.filters.earnings_filter import PROVIDER_CONFIRMED_DATES, normalize_date_str
+    from datetime import date as _date, timedelta as _td
+
+    ticker = sig["ticker"].upper()
+    is_etf = bool(sig.get("is_etf")) or normalize_strategy_key(sig["strategy"]) == "sector_rotation"
+    if qc.RR_FLOOR_STOP_CAP_ENABLED:
+        reason = rr_stop_rejection(sig.get("entry_price"), sig.get("stop_loss"), sig.get("target_1"), sig.get("atr_14"))
+        if reason:
+            return f"Stop cap / R:R floor: {reason}"
+    if qc.EARNINGS_BLACKOUT_MODE == "full_hold" and not is_etf:
+        cal = SessionCalendar()
+        window = full_hold_window(cal.shift(scan_date, 1), holding_days_for(sig["strategy"]) or 20, cal)
+        entry = (earnings_calendar or {}).get(ticker) or {}
+        nxt_s = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
+        nxt = _date.fromisoformat(nxt_s) if nxt_s else None
+        confirmed, estimated = [], []
+        if nxt is not None and nxt >= scan_date:
+            if PROVIDER_CONFIRMED_DATES.get(ticker) == nxt_s:
+                confirmed = [nxt, cal.shift(nxt, 1)]  # report timing unknown: that session or the next
+            else:
+                estimated = [nxt]
+        else:
+            filings = _sec_filings().filings(ticker)
+            if filings:
+                from src.providers.context.sec_filings import earnings_events
+                est = estimate_next_earnings([e.reaction for e in earnings_events(filings)], scan_date)
+                estimated = [est] if est else []
+        if not confirmed and not estimated:
+            sig["earnings_unknown"] = True
+        reason = earnings_hold_rejection(window, confirmed, estimated, cal)
+        if reason:
+            return f"Earnings inside the hold: {reason}"
+    if qc.EVENT_LOCK_ENABLED and not is_etf:
+        from src.providers.context.sec_filings import event_lock, price_pin, rights_days_for
+        prov = _sec_filings()
+        filings = prov.filings(ticker)
+        if filings is None:
+            sig["event_lock_unknown"] = True
+        else:
+            rights = prov.rights_offering_days(scan_date - _td(days=200), scan_date)
+            lock = event_lock(filings, scan_date, rights_days_for(rights, prov.sec.cik_for(ticker)))
+            if lock:
+                return f"Event lock: {lock['form']} filed (since {lock['since']})"
+        if ticker_df is not None and "CLOSE" in ticker_df.columns and len(ticker_df) > 140:
+            if bool(price_pin(ticker_df["CLOSE"]).iloc[-1]):
+                return "Event lock: price pinned after a > 15% move (possible pending deal)"
+    return None
 
 
 def _fundamentals_fields(f) -> Dict[str, Any]:
@@ -1061,6 +1135,7 @@ def run_scan(
         "failed_minrisk_gate": 0,
         "failed_maxgap_gate": 0,
         "failed_earnings_gate": 0,
+        "failed_trade_hygiene": 0,
         "failed_trades_gate": 0,
         "failed_liquidity_gate": 0,
         "momentum_exceptions": 0,
@@ -1499,6 +1574,18 @@ def run_scan(
                 rejected_signals_to_insert.append(sig)
                 continue
 
+            # Trade hygiene (profitability program, Phase 2; switches in src/quant_config.py).
+            # New ideas only: an active idea that keeps qualifying is never closed by these rules.
+            if ticker.upper() not in open_tickers:
+                hygiene_reason = _trade_hygiene_rejection(sig, ticker_df, scan_dt, earnings_calendar_cache)
+                if hygiene_reason:
+                    logger.info(f"[TRADE HYGIENE] Rejected {ticker} ({strategy_name}): {hygiene_reason}")
+                    sig["status"] = "rejected"
+                    sig["rejection_reason"] = hygiene_reason
+                    gate_rejections["failed_trade_hygiene"] += 1
+                    rejected_signals_to_insert.append(sig)
+                    continue
+
             # 3. Evaluate Entry Location & Market Structure
             loc_res = evaluate_entry_location(sig, ticker_df, strategy_name)
             sig["entry_state"] = loc_res.state
@@ -1683,6 +1770,14 @@ def run_scan(
                     "strategy_trades": sig.get("strategy_trades"),
                     "strategy_beta_adjusted_pct": sig.get("strategy_beta_adjusted_pct"),
                     "strategy_excess_vs_spy_pct": sig.get("strategy_excess_vs_spy_pct"),
+                    "strategy_expected_r": sig.get("strategy_expected_r"),
+                    "strategy_exit_stop_pct": sig.get("strategy_exit_stop_pct"),
+                    "strategy_exit_target_pct": sig.get("strategy_exit_target_pct"),
+                    "strategy_exit_expiry_pct": sig.get("strategy_exit_expiry_pct"),
+                    "strategy_t2_hit_pct": sig.get("strategy_t2_hit_pct"),
+                    "strategy_t3_hit_pct": sig.get("strategy_t3_hit_pct"),
+                    "earnings_unknown": sig.get("earnings_unknown"),
+                    "event_lock_unknown": sig.get("event_lock_unknown"),
                     "pe_ratio": sig.get("pe_ratio"),
                     "eps_ttm": sig.get("eps_ttm"),
                     "fundamentals_source": sig.get("fundamentals_source"),
@@ -1874,6 +1969,14 @@ def run_scan(
                         "strategy_trades": sig.get("strategy_trades"),
                         "strategy_beta_adjusted_pct": sig.get("strategy_beta_adjusted_pct"),
                         "strategy_excess_vs_spy_pct": sig.get("strategy_excess_vs_spy_pct"),
+                        "strategy_expected_r": sig.get("strategy_expected_r"),
+                        "strategy_exit_stop_pct": sig.get("strategy_exit_stop_pct"),
+                        "strategy_exit_target_pct": sig.get("strategy_exit_target_pct"),
+                        "strategy_exit_expiry_pct": sig.get("strategy_exit_expiry_pct"),
+                        "strategy_t2_hit_pct": sig.get("strategy_t2_hit_pct"),
+                        "strategy_t3_hit_pct": sig.get("strategy_t3_hit_pct"),
+                        "earnings_unknown": sig.get("earnings_unknown"),
+                        "event_lock_unknown": sig.get("event_lock_unknown"),
                         "pe_ratio": sig.get("pe_ratio"),
                         "eps_ttm": sig.get("eps_ttm"),
                         "fundamentals_source": sig.get("fundamentals_source"),

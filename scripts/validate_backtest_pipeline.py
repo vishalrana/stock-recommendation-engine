@@ -31,11 +31,18 @@ Statistics are honest about dependence: trades overlap in time and are cross-sec
 correlated, so confidence intervals come from a block bootstrap that resamples whole signal
 months, not from formulas that assume independent trades. There is no per-trade "Sharpe".
 
+Earnings calendar (since 2026-10-11): SEC EDGAR 8-K item 2.02 filings give point-in-time
+announcement dates and reaction sessions (src/providers/context/sec_filings.py). PEAD reads the
+last announcement on or before each bar, Pullback's earnings buffer the next one, and issued ideas
+get the live fixed-days blackout (EARNINGS_BLACKOUT_DAYS). Future announcement dates are treated as
+known at the signal, as a calendar would show them; earnings results are never used. Without
+SEC_USER_AGENT the run falls back to no calendar (and refuses the hygiene variants).
+
 Known limitations (reported in the output):
   * Survivorship: before the universe date the universe holds only stocks that survived to it,
     and tickers that delisted afterwards have no downloadable history.
-  * No historical earnings calendar: the earnings blackout cannot be applied and PEAD
-    (which needs past earnings dates) cannot fire.
+  * Earnings dates come from SEC 8-K item 2.02 filings: filers without them (foreign private
+    issuers) have no calendar, and future dates are assumed known at the signal.
   * No historical news/analyst context: context is "unavailable" and excluded from the score
     with renormalized weights, as production does when context is missing.
   * No VIX history in the cache: the VIX>40 emergency override is not applied.
@@ -49,6 +56,18 @@ per ticker); the production settings always run first and alone produce the stan
 "fundamentals_in_score" scores the context from point-in-time SEC fundamentals (facts filed
 before the signal date; the only context with history).
 
+Profitability-program measurements (CLAUDE.md, pre-registered 2026-10-11), for production and
+every variant:
+  * LATE period: signals from 2025-04-09 (fixed, LATE_FROM), whatever the window.
+  * Random-stock placebo (--placebo N, default 200; 20 in --limit smoke runs; 0 = off): the book's
+    percentile among N placebo books, and the paired diff vs the per-idea placebo median.
+  * Cost scenarios: 10 bps/side, + Corwin-Schultz half-spread (trailing 20 sessions, point-in-time),
+    twice that, and the break-even cost per side.
+  * Multiple testing: one-sided paired-bootstrap p-values, Holm across the variants of the run, and
+    StepM (arch, stationary bootstrap) on per-signal-month series when arch is installed.
+  * Trials registry: one record per book per run in outputs/research_trials.jsonl (smoke runs marked).
+  * Survivorship gauge: share of S&P 500 member-days with no bar in the price cache.
+
 Outputs:
   outputs/production_backtest_summary.json   statistics
   outputs/production_backtest_trades.csv     every simulated trade
@@ -59,6 +78,7 @@ Outputs:
 
 Usage:
   python scripts/validate_backtest_pipeline.py [--refresh-data] [--workers 4] [--variants all]
+         [--placebo 200] [--trial-phase phase2]
 """
 
 import argparse
@@ -110,6 +130,211 @@ EMBARGO_DAYS = 20
 BOOTSTRAP_SAMPLES = 2000
 CROSS_SECTIONAL_TOP_FRACTION = 0.15
 SEC_FACTS_DIR = os.path.join(BACKTEST_DATA_DIR, "sec")
+LATE_FROM = "2025-04-09"        # pre-registered LATE period: signals from this date (after the universe date)
+PLACEBO_DRAWS_FULL = 200
+PLACEBO_DRAWS_SMOKE = 20
+PLACEBO_SEED = 20261011
+SEC_SUBMISSIONS_DIR = os.path.join(SEC_FACTS_DIR, "submissions")
+SEC_FILINGS_TTL_HOURS = 72      # refetch filings older than this (the window's last days need fresh 8-Ks)
+SEC_HISTORY_START = date(2021, 1, 1)
+
+# Trade-hygiene variants (Phase 2, rule R1): production settings plus issuance filters
+# (src/trade_hygiene.py). They need the SEC calendar and filings.
+HYGIENE_VARIANTS: Dict[str, Tuple[str, ...]] = {
+    "earnings_full_hold": ("earnings_full_hold",),
+    "event_lock": ("event_lock",),
+    "rr_floor_stop_cap": ("rr_floor_stop_cap",),
+    "hygiene_all": ("earnings_full_hold", "event_lock", "rr_floor_stop_cap"),
+}
+# Pattern veto (Phase 5, rule R2): no idea within 20 sessions of a confirmed head-and-shoulders top.
+PATTERN_VARIANTS = ("hs_top_veto",)
+
+# Selection / structure variants (Phase 4, rule R2, Holm over these six). The ranking signal is
+# C6, adopted under R3 (Phase 3): equal-weight mean of the MOM12_1, RESMOM, HI52, -FIP, -REV21 and
+# -RVOL252 cross-sectional ranks (scripts/research_signal_ic.py), as a percentile among liquid stocks.
+#   rank_select         qualify on C6 >= 80th percentile instead of composite >= 65 (tier not used)
+#   cs_mom_12_1         Cross-Sectional Momentum screen: C6 top 10% instead of 63-day return top 15%
+#   momentum_rank_book  weekly book: C6 top decile with price above a rising 200-DMA; exit below the
+#                       70th percentile at a weekly check, after 60 sessions, or at a 3 x ATR stop
+#   trail_after_t1      after T1, the remainder trails at highest close - 3 x ATR (40-session limit)
+#   mr_liquid_only      Mean Reversion only among the 500 most liquid stocks (20-day dollar volume)
+#   no_rebound_entries  no rebound entries: Pullback Recovery and Mean Reversion ideas dropped
+PHASE4_VARIANTS = ("rank_select", "cs_mom_12_1", "momentum_rank_book", "trail_after_t1", "mr_liquid_only",
+                   "no_rebound_entries")
+PHASE4_PARAMS = {"rank_select": 1, "cs_mom_12_1": 1, "momentum_rank_book": 4, "trail_after_t1": 2,
+                 "mr_liquid_only": 1, "no_rebound_entries": 0}
+REBOUND_STRATEGIES = ("Pullback Recovery", "Mean Reversion")
+C6_VARIANTS = ("rank_select", "cs_mom_12_1", "momentum_rank_book")
+
+
+def c6_percentiles(stock_frames: Dict[str, pd.DataFrame], etf_frames: Dict[str, pd.DataFrame],
+                   spy: pd.DataFrame) -> pd.DataFrame:
+    """C6 percentile (0-1] among liquid stocks per session, point-in-time (research_signal_ic features)."""
+    from scripts.research_signal_ic import compute_features, composite_c6, liquid_mask, SECTOR_TO_ETF
+    idx = spy.index
+    close = pd.DataFrame({t: f["CLOSE"] for t, f in stock_frames.items()}).reindex(idx)
+    high = pd.DataFrame({t: f["HIGH"] for t, f in stock_frames.items()}).reindex(idx)
+    vol = pd.DataFrame({t: f["VOLUME"] for t, f in stock_frames.items()}).reindex(idx)
+    etf_close = pd.DataFrame({e: f["CLOSE"] for e, f in etf_frames.items()}).reindex(idx)
+    try:
+        with open(os.path.join(PROJECT_ROOT, "data", "cache", "universe", "us_equities_master.json"), encoding="utf-8") as fh:
+            master = {x["ticker"]: x.get("sector") for x in json.load(fh)["securities"]}
+    except Exception:
+        master = {}
+    sectors = {t: (SECTOR_TO_ETF.get(master.get(t) or master.get(t.replace("-", ".")) or "")
+                   if SECTOR_TO_ETF.get(master.get(t) or "") in etf_close else None) for t in close.columns}
+    feats = compute_features(close, high, vol, spy["CLOSE"], etf_close, sectors)
+    mask = liquid_mask(close, vol)
+    c6 = composite_c6(feats, mask)
+    return c6.where(mask).rank(axis=1, pct=True)
+
+
+def trail_after_t1_outcome(frame: pd.DataFrame, loc: int, fill: float, stop: float, t1: float,
+                           t2: Optional[float], t3: Optional[float], hold_days: int,
+                           mult: float = 3.0, limit: int = 40) -> Optional[Dict[str, Any]]:
+    """
+    Production exits until T1 (STOP_FIRST, gap fills, expiry at hold_days). At T1 the plan's first
+    scale-out fills; the remainder's stop is breakeven, then trails at the highest close since T1
+    minus mult x ATR14 (updated after each close), with a limit of `limit` sessions from the fill.
+    """
+    from src.research.placebo import _weights
+    o, h, l, c = (frame[k].to_numpy(float) for k in ("OPEN", "HIGH", "LOW", "CLOSE"))
+    atr = frame["ATR_14"].to_numpy(float)
+    w1 = _weights(t1, t2, t3)[0]
+    after_t1, cur, rem, realized, hd, best = False, float(stop), 1.0, 0.0, 0, None
+
+    def done(reason, i, px):
+        return {"realized_return_pct": round(realized, 4), "exit_reason": reason,
+                "outcome": "hit_t1" if after_t1 else ("stopped" if reason == "stop" else "expired"),
+                "outcome_date": frame.index[i].date().isoformat(), "holding_days": hd, "exit_price": px}
+
+    for i in range(loc + 1, len(c)):
+        if not all(np.isfinite(x) and x > 0 for x in (o[i], h[i], l[i], c[i])):
+            continue
+        hd += 1
+        if not after_t1:
+            px = o[i] if o[i] <= cur else (cur if (o[i] < t1 and l[i] <= cur) else None)
+            if px is not None:
+                realized += rem * (px - fill) / fill * 100.0
+                return done("stop", i, px)
+            if h[i] >= t1:
+                realized += w1 * (max(t1, o[i]) - fill) / fill * 100.0
+                rem, after_t1, cur, best = 1.0 - w1, True, max(cur, fill), c[i]
+                if l[i] <= cur:                       # STOP_FIRST on the ratcheted stop
+                    realized += rem * (cur - fill) / fill * 100.0
+                    return done("stop", i, cur)
+                if np.isfinite(atr[i]):
+                    cur = max(cur, best - mult * atr[i])
+            elif hd >= hold_days:
+                realized += rem * (c[i] - fill) / fill * 100.0
+                return done("expiry", i, c[i])
+        else:
+            px = o[i] if o[i] <= cur else (cur if l[i] <= cur else None)
+            if px is not None:
+                realized += rem * (px - fill) / fill * 100.0
+                return done("stop", i, px)
+            best = max(best, c[i])
+            if np.isfinite(atr[i]):
+                cur = max(cur, best - mult * atr[i])
+            if hd >= limit:
+                realized += rem * (c[i] - fill) / fill * 100.0
+                return done("expiry", i, c[i])
+    return None
+
+
+def momentum_rank_book(stock_frames: Dict[str, pd.DataFrame], c6pct: pd.DataFrame, eval_dates: List[pd.Timestamp],
+                       regimes: Dict[pd.Timestamp, str], reject=None) -> Tuple[List[Dict[str, Any]], int, Dict[str, int]]:
+    """Weekly C6 top-decile book (see PHASE4_VARIANTS). reject(ticker, d, sig) -> reason applies production hygiene."""
+    weeks: Dict[Tuple[int, int], pd.Timestamp] = {}
+    for d in eval_dates:
+        weeks.setdefault(tuple(d.isocalendar()[:2]), d)
+    checks = sorted(weeks.values())
+    check_set = set(checks)
+    trades, censored, funnel = [], 0, defaultdict(int)
+    active_until: Dict[str, pd.Timestamp] = {}
+    sma_cache: Dict[str, pd.Series] = {}
+    for d in checks:
+        row = c6pct.loc[d] if d in c6pct.index else None
+        if row is None:
+            continue
+        for t in sorted(row[row >= 0.90].index):
+            if t in active_until and active_until[t] >= d:
+                continue
+            f = stock_frames[t]
+            if d not in f.index:
+                continue
+            loc = f.index.get_loc(d)
+            if loc < 220 or loc + 1 >= len(f):
+                continue
+            if t not in sma_cache:
+                sma_cache[t] = f["CLOSE"].rolling(200).mean()
+            sma = sma_cache[t]
+            if not (f["CLOSE"].iat[loc] > sma.iat[loc] > sma.iat[loc - 20]):
+                continue
+            funnel["qualified"] += 1
+            atr, close = float(f["ATR_14"].iat[loc]), float(f["CLOSE"].iat[loc])
+            fill = float(f["OPEN"].iat[loc + 1])
+            if not (np.isfinite(atr) and atr > 0 and np.isfinite(fill) and fill > 0):
+                continue
+            sig = {"entry_price": close, "stop_loss": close - 3 * atr, "target_1": None, "atr_14": atr,
+                   "strategy": "Momentum Rank Book"}
+            if reject is not None and reject(t, d, sig, loc):
+                funnel["hygiene_blocked"] += 1
+                continue
+            stop = fill - 3 * atr
+            o, h, l, c = (f[k].to_numpy(float) for k in ("OPEN", "HIGH", "LOW", "CLOSE"))
+            res, hd = None, 0
+            for i in range(loc + 1, len(c)):
+                if not all(np.isfinite(x) and x > 0 for x in (o[i], h[i], l[i], c[i])):
+                    continue
+                hd += 1
+                px = o[i] if o[i] <= stop else (stop if l[i] <= stop else None)
+                if px is not None:
+                    res = ("stop", i, px)
+                    break
+                di = f.index[i]
+                if hd >= 60:
+                    res = ("expiry", i, c[i])
+                    break
+                if di in check_set and di in c6pct.index:
+                    p = c6pct.at[di, t]
+                    if not np.isfinite(p) or p < 0.70:
+                        res = ("rank_exit", i, c[i])
+                        break
+            funnel["issued"] += 1
+            if res is None:
+                censored += 1
+                active_until[t] = pd.Timestamp.max
+                continue
+            reason, i, px = res
+            raw = (px - fill) / fill * 100.0
+            trades.append({
+                "signal_date": d.date().isoformat(), "fill_date": f.index[loc + 1].date().isoformat(),
+                "exit_date": f.index[i].date().isoformat(), "ticker": t, "strategy": "Momentum Rank Book",
+                "regime": regimes.get(d), "composite_score": round(100 * float(row[t]), 2),
+                "entry_signal_close": close, "fill_price": round(fill, 4), "stop_loss": close - 3 * atr,
+                "stop_pct": round(3 * atr / close * 100, 2), "target_1": None, "target_2": None, "target_3": None,
+                "has_t2": False, "has_t3": False, "reach_prob_source": None, "atr_14": round(atr, 6),
+                "outcome": "stopped" if reason == "stop" else "expired", "exit_reason": reason,
+                "exit_price": round(float(px), 4), "holding_days": hd, "raw_return_pct": round(raw, 4),
+                "net_return_pct": round(raw - 2.0 * TRANSACTION_COST_PCT_PER_SIDE, 4),
+                "adv20_usd": round(float((f["CLOSE"].iloc[max(0, loc - 19): loc + 1] * f["VOLUME"].iloc[max(0, loc - 19): loc + 1]).mean()), 0),
+            })
+            active_until[t] = f.index[i]
+    return trades, censored, dict(funnel)
+
+
+def production_hygiene_rules() -> Tuple[str, ...]:
+    """Hygiene rules adopted into production (src/quant_config.py switches); every book applies them."""
+    from src import quant_config as qc
+    rules = []
+    if qc.EARNINGS_BLACKOUT_MODE == "full_hold":
+        rules.append("earnings_full_hold")
+    if qc.EVENT_LOCK_ENABLED:
+        rules.append("event_lock")
+    if qc.RR_FLOOR_STOP_CAP_ENABLED:
+        rules.append("rr_floor_stop_cap")
+    return tuple(rules)
 
 # Selection variants evaluated against the production settings (--variants)
 VARIANT_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -198,6 +423,45 @@ def production_universe() -> Tuple[List[str], List[str]]:
     return stocks, etfs
 
 
+def load_sec_events(tickers: List[str], end: date) -> Optional[Dict[str, Any]]:
+    """
+    SEC filings per ticker (earnings events, deal filings) and rights-offering hits, cached under
+    data/backtest_history/sec/submissions. None when SEC access is not configured.
+    """
+    from src.providers.context.sec_filings import SecFilingsProvider, earnings_events, rights_days_for
+    prov = SecFilingsProvider(cache_dir=SEC_SUBMISSIONS_DIR, ttl_hours=SEC_FILINGS_TTL_HOURS, since=SEC_HISTORY_START)
+    if not prov.available:
+        logger.warning("SEC_USER_AGENT not set: no earnings calendar or event filings for this run.")
+        return None
+    t0 = time.time()
+    prov.sec.ticker_map()  # load once before the worker threads share it
+    filings: Dict[str, Any] = {}
+    from concurrent.futures import ThreadPoolExecutor
+    # Threads only overlap network latency; the provider's lock keeps requests under SEC's rate limit.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for i, (t, f) in enumerate(zip(tickers, pool.map(prov.filings, tickers)), 1):
+            filings[t] = f
+            if i % 500 == 0:
+                logger.info("SEC filings %d/%d (%s, %.0fs)", i, len(tickers), prov.stats, time.time() - t0)
+    rights = prov.rights_offering_days(SEC_HISTORY_START, end)
+    if rights is None:
+        logger.warning("SEC full-text search unavailable: rights offerings are not part of the event lock.")
+    events = {t: earnings_events(f) for t, f in filings.items() if f is not None}
+    rights_by_ticker = {t: rights_days_for(rights, prov.sec.cik_for(t)) for t in tickers}
+    stats = dict(prov.stats)
+    stats.update({
+        "tickers": len(tickers),
+        "with_filings": sum(1 for f in filings.values() if f is not None),
+        "with_earnings_events": sum(1 for e in events.values() if e),
+        "earnings_events": sum(len(e) for e in events.values()),
+        "rights_offering_search": rights is not None,
+        "tickers_with_rights_offering_hits": sum(1 for v in rights_by_ticker.values() if v),
+        "seconds": round(time.time() - t0, 1),
+    })
+    logger.info("SEC calendar: %s", stats)
+    return {"filings": filings, "events": events, "rights": rights_by_ticker, "stats": stats}
+
+
 def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.DataFrame]:
     """Daily adjusted OHLCV per ticker, downloaded once and stored under data/backtest_history/."""
     import yfinance as yf
@@ -249,17 +513,38 @@ def prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 # Phase 1: point-in-time strategy scans (parallel by ticker)
 # ----------------------------------------------------------------------------
-def _stub_live_only_lookups():
-    """Earnings calendars are live-only (no history): disable them so no current data leaks in."""
+def _stub_live_only_lookups(announcements: Optional[List[date]] = None, clock: Optional[Dict[str, Any]] = None):
+    """
+    Replace the live earnings-calendar lookups with point-in-time SEC announcement dates (or with
+    nothing when there is no calendar), so no current data leaks into the replay. PEAD gets the
+    last announcement on or before its as-of date; Pullback's earnings buffer the next announcement
+    on or after the bar being scanned (clock["d"]).
+    """
     import jobs.strategies.pullback as pullback_mod
     import jobs.strategies.pead as pead_mod
-    pullback_mod.get_earnings_date = lambda *a, **k: None
-    pead_mod.get_last_earnings_date = lambda *a, **k: None
+    ann = sorted(announcements or [])
+
+    def _last(ticker, as_of_date=None, *a, **k):
+        if not ann or as_of_date is None:
+            return None
+        i = bisect.bisect_right(ann, as_of_date)
+        return ann[i - 1] if i else None
+
+    def _next(*a, **k):
+        d = (clock or {}).get("d")
+        if not ann or d is None:
+            return None
+        i = bisect.bisect_left(ann, d)
+        return ann[i] if i < len(ann) else None
+
+    pullback_mod.get_earnings_date = _next
+    pead_mod.get_last_earnings_date = _last
 
 
 def scan_ticker(args) -> List[Dict[str, Any]]:
-    ticker, frame, date_regimes, cs_eligible_dates, is_etf = args
-    _stub_live_only_lookups()
+    ticker, frame, date_regimes, cs_eligible_dates, is_etf, announcements = args
+    clock: Dict[str, Any] = {"d": None}
+    _stub_live_only_lookups(announcements, clock)
     from jobs.strategies import STRATEGIES
     from jobs.generate_signals import REGIME_STRATEGY_MAP
     from src.utils.metrics_pipeline import build_hardened_metrics
@@ -280,6 +565,7 @@ def scan_ticker(args) -> List[Dict[str, Any]]:
         if not is_etf and not liquid[loc]:
             continue
         allowed = REGIME_STRATEGY_MAP.get(regime, [])
+        clock["d"] = date.date()
         window = frame.iloc[loc - SCAN_WINDOW_BARS + 1: loc + 1]
         for strat in STRATEGIES:
             if strat.name not in allowed:
@@ -302,7 +588,8 @@ def scan_ticker(args) -> List[Dict[str, Any]]:
     return out
 
 
-def _phase1_cache_key(frames: Dict[str, pd.DataFrame], limit: Optional[int]) -> str:
+def _phase1_cache_key(frames: Dict[str, pd.DataFrame], limit: Optional[int],
+                      announcements: Optional[Dict[str, List[date]]] = None, extra: str = "") -> str:
     """Hash of strategy/indicator source code and the data extent, so cached scans never go stale."""
     import hashlib
     import inspect
@@ -320,6 +607,8 @@ def _phase1_cache_key(frames: Dict[str, pd.DataFrame], limit: Optional[int]) -> 
     from jobs.generate_signals import REGIME_STRATEGY_MAP
     h.update(json.dumps(REGIME_STRATEGY_MAP, sort_keys=True).encode())
     h.update(str(limit).encode())
+    h.update(extra.encode())
+    h.update(json.dumps({t: [d.isoformat() for d in v] for t, v in sorted((announcements or {}).items())}).encode())
     for t in sorted(frames):
         h.update(f"{t}:{len(frames[t])}:{frames[t].index[-1]}".encode())
     return h.hexdigest()[:16]
@@ -359,8 +648,10 @@ def simulate(sig: Dict[str, Any], frame: pd.DataFrame, loc: int, evidence, d_str
         "target_1": sig["target_1"], "target_2": sig.get("target_2"), "target_3": sig.get("target_3"),
         "has_t2": sig.get("target_2") is not None, "has_t3": sig.get("target_3") is not None,
         "reach_prob_source": sig.get("reach_prob_source"),
+        "atr_14": round(float(sig.get("atr_14") or 0.0), 6),
         "outcome": res["outcome"],
         "exit_reason": res["exit_reason"],
+        "exit_price": round(float(res["exit_price"]), 4),
         "holding_days": res["holding_days"],
         "raw_return_pct": round(float(res["realized_return_pct"]), 4),
         "net_return_pct": round(net, 4),
@@ -474,25 +765,19 @@ def apply_backtest_context(sig, settings, sec_table, scorer, d_str, mark_unavail
 # ----------------------------------------------------------------------------
 def paired_block_diff(a: List[Dict[str, Any]], b: List[Dict[str, Any]], key: str,
                       n_boot: int = BOOTSTRAP_SAMPLES, seed: int = 11) -> Dict[str, Any]:
-    """mean(a) - mean(b) of `key`, with a 95% CI resampling the same signal months for both books."""
-    va = [(t["signal_date"][:7], t[key]) for t in a if t.get(key) is not None]
-    vb = [(t["signal_date"][:7], t[key]) for t in b if t.get(key) is not None]
-    if len(va) < 30 or len(vb) < 30:
-        return {"diff": None, "ci95": None}
-    months = sorted({m for m, _ in va} | {m for m, _ in vb})
-    ga = {m: np.array([v for mm, v in va if mm == m]) for m in months}
-    gb = {m: np.array([v for mm, v in vb if mm == m]) for m in months}
-    rng = np.random.default_rng(seed)
-    diffs = []
-    for _ in range(n_boot):
-        pick = rng.choice(months, len(months))
-        x = np.concatenate([ga[m] for m in pick])
-        y = np.concatenate([gb[m] for m in pick])
-        if len(x) and len(y):
-            diffs.append(x.mean() - y.mean())
-    lo, hi = np.percentile(diffs, [2.5, 97.5])
-    point = float(np.mean([v for _, v in va]) - np.mean([v for _, v in vb]))
-    return {"diff": round(point, 3), "ci95": [round(float(lo), 3), round(float(hi), 3)]}
+    """
+    mean(a) - mean(b) of `key`, with a 95% CI resampling the same signal months for both books,
+    and one-sided bootstrap p-values (p_gt0: H0 diff <= 0; p_lt0: H0 diff >= 0) for Holm.
+    """
+    from src.research.stats import paired_month_bootstrap
+    va = [t for t in a if t.get(key) is not None]
+    vb = [t for t in b if t.get(key) is not None]
+    r = paired_month_bootstrap([t["signal_date"][:7] for t in va], [t[key] for t in va],
+                               [t["signal_date"][:7] for t in vb], [t[key] for t in vb], n_boot=n_boot, seed=seed)
+    if r["diff"] is None:
+        return {"diff": None, "ci95": None, "p_gt0": None, "p_lt0": None}
+    return {"diff": round(r["diff"], 3), "ci95": [round(x, 3) for x in r["ci95"]],
+            "p_gt0": round(r["p_gt0"], 4), "p_lt0": round(r["p_lt0"], 4)}
 
 
 def block_bootstrap_ci(values: np.ndarray, clusters: np.ndarray, stat, n_boot: int = BOOTSTRAP_SAMPLES, seed: int = 7):
@@ -510,6 +795,88 @@ def block_bootstrap_ci(values: np.ndarray, clusters: np.ndarray, stat, n_boot: i
             stats.append(stat(sample))
     lo, hi = np.percentile(stats, [2.5, 97.5])
     return float(lo), float(hi)
+
+
+def left_tail(trades: List[Dict[str, Any]], events: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """R1 left-tail report: 5th-percentile and worst idea, stops gapped through, earnings inside the hold."""
+    ba = np.array([t["beta_adjusted_pct"] for t in trades if t.get("beta_adjusted_pct") is not None], dtype=float)
+    stopped = [t for t in trades if t.get("exit_reason") == "stop" and t.get("outcome") == "stopped"]
+    gapped = [t for t in stopped if t.get("exit_price") is not None and t["exit_price"] < t["stop_loss"] * (1 - 1e-6)]
+    out: Dict[str, Any] = {
+        "p05_beta_adjusted_pct": round(float(np.percentile(ba, 5)), 3) if len(ba) else None,
+        "worst_beta_adjusted_pct": round(float(ba.min()), 3) if len(ba) else None,
+        "initial_stop_exits": len(stopped),
+        "share_stops_gapped_through_pct": round(100.0 * len(gapped) / len(stopped), 2) if stopped else None,
+    }
+    if events is not None:
+        covered = [t for t in trades if events["events"].get(t["ticker"])]
+        inside = [t for t in covered if any(t["fill_date"] <= e.reaction.isoformat() <= t["exit_date"]
+                                            for e in events["events"][t["ticker"]])]
+        out.update({
+            "ideas_with_earnings_calendar": len(covered),
+            "share_earnings_inside_hold_pct": round(100.0 * len(inside) / len(covered), 2) if covered else None,
+        })
+    return out
+
+
+def fixed_days_blackout(ticker: str, strategy: str, d: pd.Timestamp, events: Optional[Dict[str, Any]],
+                        session_index: pd.DatetimeIndex) -> Optional[str]:
+    """
+    The live EARNINGS_BLACKOUT_DAYS gate on SEC dates: the next announcement whose reaction is after
+    the signal date, within the strategy's blackout counted in sessions after the signal date up to
+    and including the announcement date (src/filters/earnings_filter.py).
+    """
+    from src.quant_config import EARNINGS_BLACKOUT_DAYS
+    key = normalize_strategy_key(strategy)
+    if events is None or key == "sector_rotation":
+        return None
+    ev = events["events"].get(ticker) or []
+    upcoming = [e for e in ev if e.reaction > d.date()]
+    if not upcoming:
+        return None
+    nxt = upcoming[0].announced
+    sessions = int(((session_index > d) & (session_index <= pd.Timestamp(nxt))).sum())
+    if sessions <= EARNINGS_BLACKOUT_DAYS.get(key, 5):
+        return f"Earnings in {sessions} trading days (blackout {EARNINGS_BLACKOUT_DAYS.get(key, 5)})"
+    return None
+
+
+def hygiene_rejection(rules: Tuple[str, ...], sig: Dict[str, Any], ticker: str, d: pd.Timestamp, is_etf: bool,
+                      events: Dict[str, Any], session_cal, hold_days: int, pinned: Optional[bool]) -> Tuple[Optional[str], Optional[str], Dict[str, bool]]:
+    """(rule, reason) of the first hygiene rule that rejects the idea, else (None, None); plus unknown-data flags."""
+    from src.trade_hygiene import full_hold_window, earnings_hold_rejection, rr_stop_rejection, estimate_next_earnings
+    from src.providers.context.sec_filings import event_lock
+    flags = {"earnings_unknown": False, "event_lock_unknown": False}
+    for rule in rules:
+        if rule == "earnings_full_hold" and not is_etf:
+            ev = events["events"].get(ticker)
+            fill = session_cal.shift(d.date(), 1)
+            window = full_hold_window(fill, hold_days, session_cal)
+            confirmed = [e.reaction for e in (ev or []) if e.reaction > d.date()]
+            estimated = []
+            if not confirmed:  # no later filing in the data yet: point-in-time estimate
+                est = estimate_next_earnings([e.reaction for e in (ev or [])], d.date())
+                estimated = [est] if est else []
+            if not confirmed and not estimated:
+                flags["earnings_unknown"] = True
+            reason = earnings_hold_rejection(window, confirmed[:1], estimated, session_cal)
+            if reason:
+                return rule, reason, flags
+        elif rule == "event_lock" and not is_etf:
+            filings = events["filings"].get(ticker)
+            if filings is None:
+                flags["event_lock_unknown"] = True
+            else:
+                lock = event_lock(filings, d.date(), events["rights"].get(ticker, []))
+                if lock:
+                    return rule, f"Event lock: {lock['form']} since {lock['since']}", flags
+            if pinned:
+                return rule, "Price pinned after a > 15% move (deal backstop)", flags
+        elif rule == "rr_floor_stop_cap":
+            reason = rr_stop_rejection(sig.get("entry_price"), sig.get("stop_loss"), sig.get("target_1"), sig.get("atr_14"))
+            if reason:
+                return rule, reason, flags
+    return None, None, flags
 
 
 def compile_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -582,7 +949,8 @@ def edge_verdict(stats: Dict[str, Any], ci_key: str = "net_expectancy_ci95_block
 # Main
 # ----------------------------------------------------------------------------
 def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = None, write_outputs: bool = True,
-        variants: Optional[List[str]] = None, universe: str = "cache_start", phase1_only: bool = False) -> Dict[str, Any]:
+        variants: Optional[List[str]] = None, universe: str = "cache_start", phase1_only: bool = False,
+        placebo: Optional[int] = None, trial_phase: str = "adhoc", record_trials: bool = True) -> Dict[str, Any]:
     t0 = time.time()
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     from src.ranker import SignalRanker, assign_tier
@@ -619,6 +987,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         if np.isfinite(m)
     }
 
+    bar_dates = {t: df.dropna(subset=["CLOSE"]).index for t, df in raw.items() if t != "SPY"}
     frames = {t: prepare_frame(df) for t, df in raw.items() if t != "SPY" and len(df) > WARMUP_BARS + 5}
     del raw  # the frames hold everything needed from here on (keeps the 5,600-ticker run in memory)
     stock_frames = {t: f for t, f in frames.items() if t not in SECTOR_ETFS}
@@ -635,20 +1004,43 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         for t, _ in ordered[: max(1, int(len(ordered) * CROSS_SECTIONAL_TOP_FRACTION))]:
             cs_eligible[t].add(d)
 
+    c6pct = None
+    cs63 = {t: set(v) for t, v in cs_eligible.items()}
+    csc6: Dict[str, set] = defaultdict(set)
+    phase1_extra = ""
+    if any(v in C6_VARIANTS for v in (variants or [])):
+        tc = time.time()
+        c6pct = c6_percentiles(stock_frames, {t: f for t, f in frames.items() if t in SECTOR_ETFS}, spy)
+        logger.info("C6 percentiles computed (%.0fs)", time.time() - tc)
+        if "cs_mom_12_1" in (variants or []):
+            top = c6pct >= 0.90
+            for t in top.columns:
+                csc6[t] = set(top.index[top[t].to_numpy()])
+                cs_eligible[t] = cs_eligible[t] | csc6[t]
+            import hashlib
+            phase1_extra = "cs_c6:" + hashlib.sha256(json.dumps(
+                {t: len(v) for t, v in sorted(csc6.items())}).encode()).hexdigest()[:12]
+
     eval_dates = sorted(d for d in date_regimes if d >= spy.index[min(len(spy) - 1, WARMUP_BARS)])
+    sec_events = load_sec_events(sorted(stock_frames), spy.index[-1].date())
+    hygiene_requested = [v for v in (variants or []) if v in HYGIENE_VARIANTS] + list(production_hygiene_rules())
+    if hygiene_requested and sec_events is None:
+        raise RuntimeError(f"Variants {hygiene_requested} need the SEC calendar and filings (set SEC_USER_AGENT).")
+    announcements = ({t: sorted({e.announced for e in ev}) for t, ev in sec_events["events"].items()}
+                     if sec_events is not None else {})
     logger.info("Evaluation window %s -> %s (%d sessions); %d stocks with data (%d missing), %d ETFs",
                 eval_dates[0].date(), eval_dates[-1].date(), len(eval_dates), len(stock_frames),
                 len(missing_stocks), len(frames) - len(stock_frames))
 
     # Phase 1: parallel point-in-time scans (cached; invalidated when strategy code or data change)
-    phase1_key = _phase1_cache_key(frames, limit)
+    phase1_key = _phase1_cache_key(frames, limit, announcements, phase1_extra)
     phase1_path = os.path.join(BACKTEST_DATA_DIR, f"_phase1_{phase1_key}.pkl")
     if os.path.exists(phase1_path) and not refresh_data:
         candidates = pd.read_pickle(phase1_path)
         logger.info("Phase 1 loaded from cache: %d raw strategy candidates", len(candidates))
     else:
         jobs_args = [
-            (t, f, date_regimes, cs_eligible.get(t, set()), t in SECTOR_ETFS)
+            (t, f, date_regimes, cs_eligible.get(t, set()), t in SECTOR_ETFS, announcements.get(t, []))
             for t, f in frames.items()
         ]
         candidates = []
@@ -659,9 +1051,16 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                     logger.info("Scanned %d/%d tickers (%d raw candidates, %.0fs)", i, len(jobs_args), len(candidates), time.time() - t0)
         pd.to_pickle(candidates, phase1_path)
         logger.info("Phase 1 complete: %d raw strategy candidates in %.0fs", len(candidates), time.time() - t0)
+    # Cross-Sectional Momentum candidates carry which screen admitted them (production: 63-day)
+    for c in candidates:
+        if c["strategy"] == "Cross-Sectional Momentum":
+            t = c["ticker"].upper()
+            c["_cs63"] = c["_date"] in cs63.get(t, ())
+            c["_csc6"] = c["_date"] in csc6.get(t, ())
     raw_by_strategy = defaultdict(int)
     for c in candidates:
-        raw_by_strategy[c["strategy"]] += 1
+        if c.get("_cs63", True):
+            raw_by_strategy[c["strategy"]] += 1
     logger.info("Raw candidates by strategy: %s", dict(raw_by_strategy))
     if phase1_only:
         logger.info("Phase 1 only: candidates cached at %s", phase1_path)
@@ -673,6 +1072,8 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     for v in variants or []:
         if v in VARIANT_PRESETS:
             settings_list.append(replace(production, name=v, **VARIANT_PRESETS[v]))
+        elif v in HYGIENE_VARIANTS or v in PATTERN_VARIANTS or v in PHASE4_VARIANTS:
+            settings_list.append(replace(production, name=v))
         else:
             settings_list.append(replace(production, name=v))
             candidate_filters[v] = STRATEGY_VARIANTS[v]
@@ -699,7 +1100,18 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     shadow_active_until: Dict[Tuple[str, str], pd.Timestamp] = {}
     # One book per selection setting: issued recommendations (what the user would see)
     books = {v.name: {"trades": [], "active_until": {}, "censored": 0, "funnel": defaultdict(int)} for v in settings_list}
+    from src.trade_hygiene import SessionCalendar
+    from src.providers.context.sec_filings import price_pin
+    session_cal = SessionCalendar([x.date() for x in spy.index])
+    pins: Dict[str, np.ndarray] = {}
+    prod_rules = production_hygiene_rules()
+    hs_tops: Dict[str, np.ndarray] = {}     # per ticker: bars at which an H&S top became known
     sim_args = (build_trade_plan, evaluate_signal_outcome, holding_days_for, SAME_DAY_AMBIGUITY_POLICY)
+    adv_rank = None
+    if "mr_liquid_only" in [v.name for v in settings_list]:
+        dv = pd.DataFrame({t: (f["CLOSE"] * f["VOLUME"]).rolling(20).mean().where(f["_LIQUID"])
+                           for t, f in stock_frames.items()}).reindex(spy.index)
+        adv_rank = dv.rank(axis=1, ascending=False)
 
     for d in eval_dates:
         day = by_date.get(d)
@@ -711,6 +1123,8 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         # Shadow trades: every setup that passed its strategy's rules (one open per strategy+ticker)
         shadow_results: Dict[Tuple[str, str], Tuple[str, Optional[Dict[str, Any]]]] = {}
         for sig in day:
+            if not sig.get("_cs63", True):
+                continue  # admitted only by the C6 screen (cs_mom_12_1); not a production setup
             key = (sig["strategy"], sig["ticker"].upper())
             if key in shadow_active_until and shadow_active_until[key] >= d:
                 continue
@@ -729,23 +1143,40 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
             active_until, funnel = book["active_until"], book["funnel"]
             scored = []
             flt = candidate_filters.get(settings.name)
+            if settings.name == "momentum_rank_book":
+                continue  # built separately after the replay
             for base in day:
                 if flt and base["strategy"] == flt[0] and (flt[1] is None or not flt[1](base, frames[base["ticker"].upper()])):
                     continue
+                if base["strategy"] == "Cross-Sectional Momentum":
+                    if not base.get("_csc6" if settings.name == "cs_mom_12_1" else "_cs63", True):
+                        continue
+                if settings.name == "no_rebound_entries" and base["strategy"] in REBOUND_STRATEGIES:
+                    continue
+                if settings.name == "mr_liquid_only" and base["strategy"] == "Mean Reversion":
+                    if adv_rank is None or not (adv_rank.at[d, base["ticker"].upper()] <= 500):
+                        continue
                 sig = dict(base)
                 regime = sig["regime"]
                 prepare_candidate_scores(sig, regime, evidence, settings=settings)
                 apply_backtest_context(sig, settings, sec_table, context_scorer, d_str, _mark_context_unavailable)
                 if composite_score(sig, regime, ranker) is None:
                     scored.append(sig)
-            scored.sort(key=lambda s: float(s.get("composite_score", 0.0)), reverse=True)
+            if settings.name == "rank_select":
+                for sg in scored:
+                    v = c6pct.at[d, sg["ticker"].upper()] if sg["ticker"].upper() in c6pct.columns else np.nan
+                    sg["_c6pct"] = float(v) if np.isfinite(v) else -1.0
+                scored.sort(key=lambda s: s["_c6pct"], reverse=True)
+            else:
+                scored.sort(key=lambda s: float(s.get("composite_score", 0.0)), reverse=True)
             funnel["scored"] += len(scored)
 
             issued_today = set()
             for sig in scored:
                 ticker = sig["ticker"].upper()
                 score = float(sig["composite_score"])
-                if score < BUY_THRESHOLD:
+                rank_mode = settings.name == "rank_select"
+                if (sig["_c6pct"] < 0.80) if rank_mode else (score < BUY_THRESHOLD):
                     continue
                 funnel["score_qualified"] += 1
                 if ticker in active_until and active_until[ticker] >= d:
@@ -759,14 +1190,57 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 status, res = shadow_results.get(key) or simulate(sig, frame, loc, evidence, d_str, *sim_args)
                 if status == "invalid_plan":
                     continue
-                if assign_tier(score) not in ("Strong Buy", "Buy"):
+                if not rank_mode and assign_tier(score) not in ("Strong Buy", "Buy"):
                     continue
+                if fixed_days_blackout(ticker, sig["strategy"], d, sec_events, spy.index):
+                    funnel["earnings_blackout_blocked"] += 1
+                    continue
+                flags = {"earnings_unknown": None, "event_lock_unknown": None}
+                rules = tuple(dict.fromkeys(prod_rules + HYGIENE_VARIANTS.get(settings.name, ())))
+                if rules:
+                    if "event_lock" in rules and ticker not in pins:
+                        pins[ticker] = price_pin(frame["CLOSE"]).to_numpy()
+                    rule, _, flags = hygiene_rejection(
+                        rules, sig, ticker, d, ticker in SECTOR_ETFS, sec_events, session_cal,
+                        holding_days_for(sig["strategy"]) or 20, bool(pins[ticker][loc]) if ticker in pins else None)
+                    if rule:
+                        funnel[f"{rule}_blocked"] += 1
+                        continue
+                if settings.name == "hs_top_veto":
+                    if ticker not in hs_tops:
+                        from src.patterns import pattern_events
+                        evs = pattern_events(frame["HIGH"].to_numpy(float), frame["LOW"].to_numpy(float),
+                                             frame["CLOSE"].to_numpy(float))
+                        hs_tops[ticker] = np.array([e.index for e in evs if e.kind == "hs_top"], dtype=int)
+                    tops = hs_tops[ticker]
+                    if len(tops) and ((tops <= loc) & (tops > loc - 20)).any():
+                        funnel["hs_top_veto_blocked"] += 1
+                        continue
                 if key not in entry_states:
                     entry_states[key] = evaluate_entry_location(
                         sig, frame.iloc[max(0, loc - SCAN_WINDOW_BARS + 1): loc + 1], sig["strategy"]).state
                 if settings.blocks_entry(entry_states[key]):
                     funnel["entry_location_blocked"] += 1
                     continue
+                if settings.name == "trail_after_t1" and status in ("closed", "censored"):
+                    fwd_fill = float(frame["OPEN"].iat[loc + 1]) if loc + 1 < len(frame) else float("nan")
+                    alt = (trail_after_t1_outcome(frame, loc, fwd_fill, float(sig["stop_loss"]), float(sig["target_1"]),
+                                                  sig.get("target_2"), sig.get("target_3"),
+                                                  holding_days_for(sig["strategy"]) or 20)
+                           if np.isfinite(fwd_fill) and fwd_fill > 0 else None)
+                    if alt is None:
+                        status, res = "censored", None
+                    else:
+                        base_res = res or simulate(sig, frame, loc, evidence, d_str, *sim_args)[1]
+                        if base_res is None:
+                            status, res = "censored", None
+                        else:
+                            res = dict(base_res, exit_date=alt["outcome_date"], outcome=alt["outcome"],
+                                       exit_reason=alt["exit_reason"], exit_price=round(float(alt["exit_price"]), 4),
+                                       holding_days=alt["holding_days"],
+                                       raw_return_pct=alt["realized_return_pct"],
+                                       net_return_pct=round(alt["realized_return_pct"] - 2.0 * TRANSACTION_COST_PCT_PER_SIDE, 4))
+                            status = "closed"
                 issued_today.add(ticker)
                 funnel["issued"] += 1
                 if status == "censored":
@@ -776,8 +1250,26 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 trade = dict(res)
                 trade["composite_score"] = round(score, 2)
                 trade["entry_state"] = entry_states[key]
+                trade.update({k: v for k, v in flags.items() if v is not None})
                 book["trades"].append(trade)
                 active_until[ticker] = pd.Timestamp(res["exit_date"])
+
+    if "momentum_rank_book" in books:
+        def _mrb_reject(t, d, sig, loc):
+            # Not a production strategy: the live blackout uses Trend Following's window (5 sessions)
+            if fixed_days_blackout(t, "Trend Following", d, sec_events, spy.index):
+                return True
+            if not prod_rules:
+                return False
+            if "event_lock" in prod_rules and t not in pins:
+                pins[t] = price_pin(frames[t]["CLOSE"]).to_numpy()
+            rule, _, _ = hygiene_rejection(tuple(r for r in prod_rules if r != "rr_floor_stop_cap"), sig, t, d, False,
+                                           sec_events, session_cal, 60, bool(pins[t][loc]) if t in pins else None)
+            return rule is not None
+        mrb_trades, mrb_censored, mrb_funnel = momentum_rank_book(stock_frames, c6pct, eval_dates, date_regimes, _mrb_reject)
+        books["momentum_rank_book"].update({"trades": mrb_trades, "censored": mrb_censored})
+        books["momentum_rank_book"]["funnel"].update(mrb_funnel)
+        logger.info("Momentum rank book: %d trades (%d censored)", len(mrb_trades), mrb_censored)
 
     prod_book = books[production.name]
     trades, censored, funnel = prod_book["trades"], prod_book["censored"], prod_book["funnel"]
@@ -809,12 +1301,22 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         t["beta"] = round(beta, 4) if np.isfinite(beta) else None
         t["beta_adjusted_pct"] = round(t["net_return_pct"] - beta * spy_ret, 4) if np.isfinite(beta) else None
 
+    # Corwin-Schultz half-spread at the signal close (trailing 20 sessions, point-in-time)
+    from src.research.costs import rolling_half_spread_pct, half_spread_at, cost_scenarios
+    spreads: Dict[str, pd.Series] = {}
+    for t in [t for b in books.values() for t in b["trades"]]:
+        tk = t["ticker"]
+        if tk not in spreads:
+            spreads[tk] = rolling_half_spread_pct(frames[tk]["HIGH"], frames[tk]["LOW"], close=frames[tk]["CLOSE"])
+        hs = half_spread_at(spreads[tk], t["signal_date"])
+        t["half_spread_pct"] = round(hs, 4) if hs is not None else None
+
     # Partitions: chronological by signal date with an embargo
     split_idx = int(len(eval_dates) * TRAIN_FRACTION)
     split_date = eval_dates[split_idx].date().isoformat()
     embargo_end = eval_dates[min(len(eval_dates) - 1, split_idx + EMBARGO_DAYS)].date().isoformat()
     early = [t for t in trades if t["signal_date"] < split_date]
-    late = [t for t in trades if t["signal_date"] >= embargo_end]
+    late = [t for t in trades if t["signal_date"] >= LATE_FROM]
 
     all_stats = compile_stats(trades)
     late_stats = compile_stats(late)
@@ -831,6 +1333,17 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     evidence_agg = aggregate_trades(shadow_trades)
     evidence_as_of = max((t["exit_date"] for t in shadow_trades), default=None)
 
+    from src.research.survivorship import survivorship_gauge
+    try:
+        gauge = survivorship_gauge(bar_dates, eval_dates)
+    except Exception as e:  # reference file missing or unreadable: report, never guess
+        gauge = {"missing_share_pct": None, "error": str(e)}
+    gauge_line = (f"Survivorship gauge: {gauge['missing_share_pct']}% of S&P 500 member-days in the window have no bar "
+                  f"in the price cache ({gauge.get('members_never_seen')} historical members never seen; "
+                  f"fja05680/sp500, MIT). Symbol changes overstate it slightly; delistings are true gaps."
+                  if gauge.get("missing_share_pct") is not None else
+                  f"Survivorship gauge unavailable: {gauge.get('error', 'no member-days in the window')}")
+
     metadata = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "runtime_seconds": round(time.time() - t0, 1),
@@ -842,7 +1355,9 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                     + f"{len(missing_stocks)} stocks had no downloadable history (likely delisted)",
         "transaction_cost_pct_per_side": TRANSACTION_COST_PCT_PER_SIDE,
         "execution": "Fill at next bar open; STOP_FIRST; ratcheted stops; gap fills at open; expiry at strategy hold_days",
-        "split": {"early_period_before": split_date, "late_period_from": embargo_end, "embargo_sessions": EMBARGO_DAYS},
+        "split": {"early_period_before": split_date, "late_period_from": LATE_FROM,
+                  "late_period_note": "pre-registered LATE period (signals from 2025-04-09)",
+                  "train_split_embargo_end": embargo_end, "embargo_sessions": EMBARGO_DAYS},
         "censored_trades": censored,
         "raw_candidates_by_strategy": dict(raw_by_strategy),
         "shadow_setup_trades": len(shadow_trades),
@@ -854,10 +1369,15 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
             f"most for small caps, which delist more often."
             if universe == "production" else
             f"Survivorship: the universe is the {universe_date} cache constituents; before that date it "
-            f"is chosen with hindsight (survivors only). The late period from {embargo_end} is the cleaner test."
+            f"is chosen with hindsight (survivors only). The late period from {LATE_FROM} is the cleaner test."
             if universe_date > eval_dates[0].date().isoformat() else
             "Survivorship: tickers delisted after the start date have no history and are excluded.",
-            "No historical earnings calendar: earnings blackout not applied; PEAD cannot fire.",
+            gauge_line,
+            ("Earnings calendar from SEC 8-K item 2.02 filings: live fixed-days blackout applied and PEAD can fire; "
+             "future announcement dates are assumed known at the signal; filers without 8-K 2.02 (foreign private "
+             "issuers) have no calendar."
+             if sec_events is not None else
+             "No earnings calendar (SEC_USER_AGENT not set): earnings blackout not applied; PEAD cannot fire."),
             "No historical context data: context excluded from scores (weights renormalized).",
             "No VIX history: VIX>40 override not applied.",
             "Strategy thresholds were hand-tuned beforehand; the late period is not a clean out-of-sample test of them.",
@@ -883,17 +1403,54 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         "benchmark": {"symbol": "SPY", "buy_and_hold_return_pct_over_window": spy_return},
     }
 
+    summary["survivorship_gauge"] = gauge
+    summary["sec_calendar"] = sec_events["stats"] if sec_events is not None else None
+    summary["left_tail"] = left_tail(trades, sec_events)
+
+    # Random-stock placebo, cost scenarios and monthly series for every book
+    from src.research.placebo import PlaceboEngine
+    from src.research.stats import monthly_series
+    n_placebo = (PLACEBO_DRAWS_SMOKE if limit else PLACEBO_DRAWS_FULL) if placebo is None else int(placebo)
+
+    def _ci(values, months):
+        return block_bootstrap_ci(np.asarray(values, dtype=float), np.asarray(months), np.mean)
+
+    placebo_engine = None
+    if n_placebo > 0:
+        placebo_engine = PlaceboEngine(stock_frames, spy, betas, holding_days_for,
+                                       cost_pct_per_side=TRANSACTION_COST_PCT_PER_SIDE, seed=PLACEBO_SEED)
+    book_extras: Dict[str, Dict[str, Any]] = {}
+    for settings in settings_list:
+        b_trades = books[settings.name]["trades"]
+        extra: Dict[str, Any] = {"cost_scenarios": cost_scenarios(b_trades, _ci)}
+        if placebo_engine is not None:
+            tp = time.time()
+            extra["placebo"] = placebo_engine.evaluate_book(
+                b_trades, lambda t: float(t.get("atr_14") or 0.0), n_placebo, _ci)
+            logger.info("Placebo (%d draws) for %s: %s (%.0fs)", n_placebo, settings.name,
+                        {k: extra["placebo"].get(k) for k in ("placebo_percentile", "paired_diff_vs_placebo_median",
+                                                              "paired_diff_ci95")}, time.time() - tp)
+        extra["monthly_beta_adjusted"] = monthly_series([t["signal_date"][:7] for t in b_trades],
+                                                        [t.get("beta_adjusted_pct") for t in b_trades])
+        book_extras[settings.name] = extra
+    prod_extra = book_extras[production.name]
+    summary["cost_scenarios"] = prod_extra["cost_scenarios"]
+    if "placebo" in prod_extra:
+        summary["placebo"] = prod_extra["placebo"]
+        summary["placebo_percentile"] = prod_extra["placebo"].get("placebo_percentile")
+
     if len(settings_list) > 1:
         variant_summary = {}
         for settings in settings_list:
             b = books[settings.name]
             v_trades = b["trades"]
-            v_late = [t for t in v_trades if t["signal_date"] >= embargo_end]
+            v_late = [t for t in v_trades if t["signal_date"] >= LATE_FROM]
             entry = {
                 "settings": {"momentum_model": settings.momentum_model,
                              "entry_location_mode": settings.entry_location_mode,
                              "context_components": list(settings.context_components),
-                             "candidate_filter": settings.name if settings.name in candidate_filters else None},
+                             "candidate_filter": settings.name if settings.name in candidate_filters else None,
+                             "hygiene_rules": list(dict.fromkeys(production_hygiene_rules() + HYGIENE_VARIANTS.get(settings.name, ())))},
                 "funnel": dict(b["funnel"]),
                 "censored_trades": b["censored"],
                 "edge_vs_spy_verdict_all": None,
@@ -911,10 +1468,63 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                     "beta_adjusted_pct": paired_block_diff(v_trades, trades, "beta_adjusted_pct"),
                     "late_beta_adjusted_pct": paired_block_diff(v_late, late, "beta_adjusted_pct"),
                 }
+            extra = book_extras[settings.name]
+            entry["left_tail"] = left_tail(v_trades, sec_events)
+            entry["late_left_tail"] = left_tail(v_late, sec_events)
+            entry["cost_scenarios"] = extra["cost_scenarios"]
+            if "placebo" in extra:
+                entry["placebo"] = extra["placebo"]
+                entry["placebo_percentile"] = extra["placebo"].get("placebo_percentile")
             variant_summary[settings.name] = entry
         summary["selection_variants"] = variant_summary
 
+        # Multiple testing across this run's variants (the phase's Holm family when the run holds them all)
+        from src.research.stats import holm, stepm_superior
+        names = [v.name for v in settings_list if v.name != production.name]
+        p_gt0 = [variant_summary[n]["vs_production"]["beta_adjusted_pct"].get("p_gt0") for n in names]
+        valid = [(n, p) for n, p in zip(names, p_gt0) if p is not None]
+        mt: Dict[str, Any] = {"family": names, "metric": "beta_adjusted_pct, full period, one-sided (variant > production)"}
+        if valid:
+            adj = holm([p for _, p in valid])
+            mt["holm_adjusted_p_gt0"] = {n: round(a, 4) for (n, _), a in zip(valid, adj)}
+        try:
+            mt["stepm"] = stepm_superior(prod_extra["monthly_beta_adjusted"],
+                                         {n: book_extras[n]["monthly_beta_adjusted"] for n in names})
+        except ImportError:
+            mt["stepm"] = {"superior": None, "note": "arch not installed (pip install -r requirements-research.txt)"}
+        summary["multiple_testing"] = mt
+
+    if record_trials:
+        from src.research.trials import record_trial
+        series_path = os.path.join("outputs", "production_backtest_variant_trades.csv" if len(settings_list) > 1
+                                   else f"production_backtest_trades{suffix}.csv")
+        for settings in settings_list:
+            b_trades = books[settings.name]["trades"]
+            st = compile_stats(b_trades)
+            lt = compile_stats([t for t in b_trades if t["signal_date"] >= LATE_FROM])
+            extra = book_extras[settings.name]
+            record_trial(
+                name=settings.name, phase=trial_phase,
+                params={"momentum_model": settings.momentum_model, "entry_location_mode": settings.entry_location_mode,
+                        "context_components": list(settings.context_components),
+                        "candidate_filter": settings.name if settings.name in candidate_filters else None,
+                        "hygiene_rules": list(HYGIENE_VARIANTS.get(settings.name, ())),
+                        "universe": universe, "limit": limit, "late_from": LATE_FROM},
+                n_ideas=len(b_trades), mean_beta_adj=st.get("mean_beta_adjusted_pct"),
+                ci=st.get("beta_adjusted_ci95_block_bootstrap"), late_mean=lt.get("mean_beta_adjusted_pct"),
+                series_path=series_path, smoke=bool(limit),
+                extra={"evaluation_window": metadata["evaluation_window"],
+                       "vs_production": summary.get("selection_variants", {}).get(settings.name, {}).get("vs_production"),
+                       "placebo": extra.get("placebo"), "cost_scenarios": extra["cost_scenarios"],
+                       "left_tail": left_tail(b_trades, sec_events),
+                       "monthly_beta_adjusted": extra["monthly_beta_adjusted"]},
+            )
+
     if not write_outputs:
+        if limit:
+            os.makedirs(OUTPUTS_DIR, exist_ok=True)
+            with open(os.path.join(OUTPUTS_DIR, f"production_backtest_summary{suffix}_smoke.json"), "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, default=str)
         return summary
 
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
@@ -970,15 +1580,22 @@ if __name__ == "__main__":
     parser.add_argument("--phase1-only", action="store_true", help="Run and cache the strategy scans, then stop")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None, help="Smoke test on the first N stocks (outputs not written)")
-    all_variants = list(VARIANT_PRESETS) + list(STRATEGY_VARIANTS)
+    all_variants = (list(VARIANT_PRESETS) + list(STRATEGY_VARIANTS) + list(HYGIENE_VARIANTS) + list(PATTERN_VARIANTS)
+                    + list(PHASE4_VARIANTS))
     parser.add_argument("--variants", default="", help=f"Comma-separated variants or 'all': {', '.join(all_variants)}")
+    parser.add_argument("--placebo", type=int, default=None,
+                        help=f"Random-stock placebo draws per idea (default {PLACEBO_DRAWS_FULL}; "
+                             f"{PLACEBO_DRAWS_SMOKE} with --limit; 0 = off)")
+    parser.add_argument("--trial-phase", default="adhoc",
+                        help="Phase label for the trials registry (e.g. phase2); pre-registered trials only")
     args = parser.parse_args()
     chosen = all_variants if args.variants.strip() == "all" else [v.strip() for v in args.variants.split(",") if v.strip()]
     unknown = [v for v in chosen if v not in all_variants]
     if unknown:
         parser.error(f"Unknown variants {unknown}; choose from {all_variants}")
     s = run(refresh_data=args.refresh_data, workers=args.workers, limit=args.limit, write_outputs=args.limit is None,
-            variants=chosen, universe=args.universe, phase1_only=args.phase1_only)
+            variants=chosen, universe=args.universe, phase1_only=args.phase1_only,
+            placebo=args.placebo, trial_phase=args.trial_phase)
     if args.phase1_only:
         print(json.dumps(s, indent=2))
         sys.exit(0)
@@ -987,10 +1604,13 @@ if __name__ == "__main__":
                                         "edge_beta_adjusted_verdict_all", "edge_beta_adjusted_verdict_late_period",
                                         "verdict_note")}, indent=2))
     print(json.dumps(s["all_trades"], indent=2))
+    print(json.dumps({k: s.get(k) for k in ("placebo", "cost_scenarios", "survivorship_gauge", "multiple_testing",
+                                            "sec_calendar", "left_tail")},
+                     indent=2, default=str))
     print(json.dumps({k: {kk: v.get(kk) for kk in ("trade_count", "win_rate_pct", "net_expectancy_pct", "net_expectancy_ci95_block_bootstrap")} for k, v in s["by_strategy"].items()}, indent=2))
     for name, v in s.get("selection_variants", {}).items():
         a = v["all_trades"]
         print(f"{name:26s} trades {a.get('trade_count', 0):5d} | net {a.get('net_expectancy_pct')} | "
               f"excess vs SPY {a.get('mean_excess_vs_spy_pct')} | beta-adj {a.get('mean_beta_adjusted_pct')} "
               f"CI {a.get('beta_adjusted_ci95_block_bootstrap')} | vs production: full {v.get('vs_production', {}).get('beta_adjusted_pct')} "
-              f"late {v.get('vs_production', {}).get('late_beta_adjusted_pct')}")
+              f"late {v.get('vs_production', {}).get('late_beta_adjusted_pct')} | placebo pct {v.get('placebo_percentile')}")

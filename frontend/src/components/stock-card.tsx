@@ -4,6 +4,8 @@ import React from 'react';
 import { Recommendation } from '../types/database';
 import { Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { getStrategyExplanation } from '../lib/strategy-explanations';
+import { RARELY_REACHED_PCT } from '../lib/backtest-verdict';
+import { sizeIdea } from '../lib/sizing';
 
 interface StockCardProps {
   recommendation: Recommendation;
@@ -11,6 +13,8 @@ interface StockCardProps {
   isExpanded: boolean;
   onToggleExpand: () => void;
   onRemove: (rec: Recommendation) => void;
+  // Display-only sizing guidance (browser-local settings); null when no account size is set
+  sizing?: { account: number | null; riskPct: number };
 }
 
 function getDaysActive(dateStr?: string | null): string {
@@ -67,6 +71,7 @@ export default function StockCard({
   isExpanded,
   onToggleExpand,
   onRemove,
+  sizing,
 }: StockCardProps) {
   const ticker = recommendation.ticker?.toUpperCase() || 'UNKNOWN';
   const company = recommendation.company_name || '';
@@ -139,6 +144,14 @@ export default function StockCard({
   if (t2) targetParts.push(`T2 $${t2}`);
   if (t3) targetParts.push(`T3 $${t3}`);
   const targetsDisplay = targetParts.length > 0 ? targetParts.join(' · ') : 'Trailing Stop';
+  // How often T2 / T3 were reached in the strategy's backtest (display only)
+  const hitPct = (v?: number | null) => (v !== null && v !== undefined && !isNaN(Number(v))) ? Number(v) : null;
+  const rarelyParts: string[] = [];
+  const t2Hit = hitPct(recommendation.strategy_t2_hit_pct);
+  const t3Hit = hitPct(recommendation.strategy_t3_hit_pct);
+  if (t2 && t2Hit !== null && t2Hit < RARELY_REACHED_PCT) rarelyParts.push(`T2 ${t2Hit.toFixed(0)}%`);
+  if (t3 && t3Hit !== null && t3Hit < RARELY_REACHED_PCT) rarelyParts.push(`T3 ${t3Hit.toFixed(0)}%`);
+  const rarelyNote = rarelyParts.length ? `${rarelyParts.length > 1 ? 'T2/T3' : rarelyParts[0].slice(0, 2)} rarely reached in backtest (${rarelyParts.join(', ')})` : null;
 
   // Build validated supporting evidence items (hide any criteria that are unavailable)
   const evidenceItems: { label: string; detail: string }[] = [];
@@ -241,6 +254,21 @@ export default function StockCard({
     ? `Versus simply holding SPY over the same days: ${fmtPct(Number(sxs))} (before adjusting for market risk)`
     : undefined;
 
+  // Realized backtest outcome of this strategy's setups: mean R multiple and how trades ended
+  const expR = recommendation.strategy_expected_r;
+  const expRDisplay = (expR !== null && expR !== undefined && !isNaN(Number(expR)))
+    ? `${Number(expR) >= 0 ? '+' : ''}${Number(expR).toFixed(2)}R per trade` : null;
+  const mix = [
+    ['stop', recommendation.strategy_exit_stop_pct],
+    ['time limit', recommendation.strategy_exit_expiry_pct],
+    ['all targets', recommendation.strategy_exit_target_pct],
+  ].filter(([, v]) => v !== null && v !== undefined && !isNaN(Number(v)));
+  const exitMixDisplay = mix.length ? mix.map(([k, v]) => `${k} ${Number(v).toFixed(0)}%`).join(' · ') : null;
+
+  const entryNum = recommendation.entry_price ? Number(recommendation.entry_price) : null;
+  const stopNum = recommendation.stop_loss ? Number(recommendation.stop_loss) : null;
+  const guide = sizing ? sizeIdea(sizing.account, sizing.riskPct, entryNum, stopNum) : null;
+
   const rrVal = recommendation.weighted_rr_honest ?? recommendation.weighted_rr ?? recommendation.risk_reward;
   const rrDisplay = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal)))
     ? `${Number(rrVal).toFixed(2)}:1 (if targets hit)`
@@ -317,6 +345,9 @@ export default function StockCard({
             {targetsDisplay}
           </span>
         </div>
+        {rarelyNote && (
+          <div className="text-right text-[10px] font-medium text-slate-400">{rarelyNote}</div>
+        )}
 
         <div className="flex items-baseline justify-between text-slate-400 text-[11px]">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Risk & Time</span>
@@ -330,6 +361,11 @@ export default function StockCard({
         {earningsInsideHold && (
           <div className="text-right text-[10px] font-medium text-amber-300">
             Earnings report falls inside the holding period (gap risk)
+          </div>
+        )}
+        {recommendation.earnings_unknown && (
+          <div className="text-right text-[10px] font-medium text-amber-300">
+            Earnings date unknown: check before acting
           </div>
         )}
       </div>
@@ -443,6 +479,36 @@ export default function StockCard({
                   </span>
                 </div>
               )}
+              {(expRDisplay || exitMixDisplay) && (
+                <div className="col-span-2">
+                  <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
+                    What actually happened (backtest)
+                  </span>
+                  {expRDisplay && (
+                    <span className={`font-mono font-medium block ${Number(expR) < 0 ? 'text-rose-300' : 'text-slate-300'}`}
+                          title="Mean realized return divided by the planned stop distance, over this strategy's backtest setups">
+                      {expRDisplay}
+                    </span>
+                  )}
+                  {exitMixDisplay && (
+                    <span className="font-mono text-slate-400 block">Exits: {exitMixDisplay}</span>
+                  )}
+                </div>
+              )}
+              <div className="col-span-2">
+                <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
+                  Sizing guidance
+                </span>
+                {guide ? (
+                  <span className="font-mono text-slate-300 block"
+                        title="Guidance only, from your browser-saved account size and risk per idea. Not advice; you decide whether and how much to trade.">
+                    {guide.shares} shares ≈ ${guide.positionUsd.toFixed(0)} · loses ≈ ${guide.riskUsd.toFixed(0)} at the stop
+                    {guide.cappedByAccount ? ' (capped at account size)' : ''}
+                  </span>
+                ) : (
+                  <span className="text-slate-500 block">Set an account size above the ideas to see a guide.</span>
+                )}
+              </div>
             </div>
           </div>
         </div>

@@ -110,3 +110,30 @@ def trading_sessions_between(start: datetime.date, end: datetime.date) -> int:
     begin = start + datetime.timedelta(days=1)
     stop = end + datetime.timedelta(days=1)
     return int(np.busday_count(begin, stop, holidays=_nyse_holidays(begin, end)))
+
+
+def _session_holidays(start: datetime.date, end: datetime.date) -> list:
+    return _nyse_holidays(start - datetime.timedelta(days=7), end + datetime.timedelta(days=400))
+
+
+def is_nyse_session(day: datetime.date) -> bool:
+    """True when `day` is a regular NYSE session (weekday, not a standing-rule holiday)."""
+    import numpy as np
+
+    return bool(np.is_busday(day, holidays=_nyse_holidays(day, day)))
+
+
+def session_on_or_after(day: datetime.date) -> datetime.date:
+    """The first NYSE session on or after `day`."""
+    import numpy as np
+
+    out = np.busday_offset(day, 0, roll="forward", holidays=_session_holidays(day, day))
+    return datetime.date.fromisoformat(str(out))
+
+
+def add_sessions(day: datetime.date, n: int) -> datetime.date:
+    """The NYSE session `n` sessions after `day` (n >= 0; `day` rolls forward to a session first)."""
+    import numpy as np
+
+    out = np.busday_offset(day, n, roll="forward", holidays=_session_holidays(day, day + datetime.timedelta(days=2 * n + 10)))
+    return datetime.date.fromisoformat(str(out))

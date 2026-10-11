@@ -341,7 +341,10 @@ def main() -> int:
     logger.info("Features computed (%.0fs)", time.time() - t0)
     if args.patterns:
         from src.patterns import pattern_feature_panel
+        from src.patterns import FAILED_TICKERS
         feats.update(pattern_feature_panel(close, high, low, volume))
+        if FAILED_TICKERS:
+            logger.warning("Pattern features failed for %d tickers (left missing)", len(FAILED_TICKERS))
         logger.info("Pattern features computed (%.0fs)", time.time() - t0)
 
     beta = feats["BETA252"]
@@ -377,6 +380,11 @@ def main() -> int:
         result["signals"][name] = entry
         logger.info("%-10s IC20 %s t %s halves %s/%s late %s", name, entry.get("mean_ic"), entry.get("nw_t"),
                     entry.get("first_half_mean_ic"), entry.get("second_half_mean_ic"), entry.get("late_mean_ic"))
+
+    if args.patterns:
+        from src.patterns import FAILED_TICKERS
+        result["metadata"]["pattern_feature_failures"] = {"count": len(FAILED_TICKERS),
+                                                          "sample": dict(list(FAILED_TICKERS.items())[:10])}
 
     # R3 decision
     c6, mom = result["signals"]["C6"], result["signals"]["MOM12_1"]

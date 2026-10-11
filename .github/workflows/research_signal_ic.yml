@@ -2,7 +2,7 @@ name: Research - signal IC study
 
 # Profitability program, Phases 3 and 5 (rules R3 and R4 in CLAUDE.md): monthly rank IC of the
 # pre-registered signals (and, with patterns=true, the pattern features) on the production
-# universe. Research only: nothing here changes production settings.
+# universe. Research only: nothing here changes production settings (run 2).
 
 on:
   # A workflow only on a branch cannot be dispatched by hand, so a push of this file on the

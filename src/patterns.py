@@ -50,6 +50,7 @@ EVENT_WINDOW = 20
 BREAK_WITHIN = 60
 BASE_WINDOW = 60
 CONTRACTION_WINDOW = 120
+FAILED_TICKERS: Dict[str, str] = {}   # pattern_feature_panel failures (reported by the IC study)
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,11 @@ def bull_flag_events(high, low, close, atr) -> List[PatternEvent]:
         if not np.isfinite(a) or a <= 0:
             i += 1
             continue
-        base = i - 10 + int(np.nanargmin(close[i - 10: i + 1]))
+        seg = close[i - 10: i + 1]
+        if not np.isfinite(seg).any() or not np.isfinite(close[i]):
+            i += 1
+            continue
+        base = i - 10 + int(np.nanargmin(seg))
         pole = close[i] - close[base]
         if pole >= 4 * a and close[i] == np.nanmax(close[base: i + 1]):
             for length in range(5, 16):
@@ -287,17 +292,27 @@ def pattern_feature_panel(close: pd.DataFrame, high: pd.DataFrame, low: pd.DataF
     if dates is None:
         s = pd.Series(idx, index=idx)
         dates = s.groupby([idx.year, idx.month]).max().tolist()
-    pos = [idx.get_loc(d) for d in dates]
     out = {f: pd.DataFrame(np.nan, index=idx, columns=close.columns) for f in PATTERN_FEATURES}
+    want = pd.DatetimeIndex(dates)
     for t in close.columns:
-        c = close[t].to_numpy(dtype=float)
-        first = int(np.argmax(np.isfinite(c))) if np.isfinite(c).any() else len(c)
-        at = [p for p in pos if p - first >= BASE_WINDOW]
+        # Each ticker's own valid bars (missing sessions dropped, as the backtest's prepare_frame does)
+        ok = (close[t].notna() & high[t].notna() & low[t].notna()).to_numpy()
+        if ok.sum() <= BASE_WINDOW:
+            continue
+        sub_idx = idx[ok]
+        loc = {d: i for i, d in enumerate(sub_idx)}
+        at = [loc[d] for d in want if d in loc and loc[d] >= BASE_WINDOW]
         if not at:
             continue
-        vals = ticker_pattern_features(high[t].to_numpy()[first:], low[t].to_numpy()[first:], c[first:],
-                                       volume[t].to_numpy()[first:], [p - first for p in at])
+        try:
+            vals = ticker_pattern_features(high[t].to_numpy()[ok], low[t].to_numpy()[ok], close[t].to_numpy()[ok],
+                                           np.nan_to_num(volume[t].to_numpy()[ok]), at)
+        except Exception as e:  # reported, never guessed: the ticker's features stay missing
+            FAILED_TICKERS[t] = str(e)
+            continue
+        col = out[PATTERN_FEATURES[0]].columns.get_loc(t)
         for p in at:
-            for f, v in vals[p - first].items():
-                out[f].iat[p, out[f].columns.get_loc(t)] = v
+            row = idx.get_loc(sub_idx[p])
+            for f, v in vals[p].items():
+                out[f].iat[row, col] = v
     return out

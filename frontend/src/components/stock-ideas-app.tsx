@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState } from 'react';
-import { Recommendation, ScanHistoryEntry, ScanLog } from '../types/database';
+import { Recommendation, ScanHistoryEntry, ScanLog, SwingSignalRecord, SwingSleeveStatus } from '../types/database';
 import StockCard from './stock-card';
 import ClosedIdeasView from './closed-ideas-view';
 import ScanHistoryView from './scan-history-view';
+import SignalsView from './signals-view';
 import RemoveIdeaModal from './remove-idea-modal';
 import {
   removeRecommendationAction,
@@ -13,7 +14,7 @@ import {
   checkRefreshCurrentIdeasStatusAction,
   completeRefreshCurrentIdeasAction,
 } from '../app/actions';
-import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
+import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldCheck, TrendingUp } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { BACKTEST_VERDICT } from '../lib/backtest-verdict';
 import { useSizing } from '../lib/sizing';
@@ -23,9 +24,11 @@ interface StockIdeasAppProps {
   initialClosedIdeas: Recommendation[];
   scanHistory: ScanHistoryEntry[];
   latestScanLog: ScanLog | null;
+  swingSignals?: SwingSignalRecord[];
+  swingSleeves?: SwingSleeveStatus[];
 }
 
-type TabType = 'ideas' | 'closed' | 'scans';
+type TabType = 'signals' | 'ideas' | 'closed' | 'scans';
 
 function formatScanDateHeader(dateStr?: string | null): string {
   if (!dateStr) return '';
@@ -49,11 +52,13 @@ export default function StockIdeasApp({
   initialClosedIdeas,
   scanHistory,
   latestScanLog,
+  swingSignals = [],
+  swingSleeves = [],
 }: StockIdeasAppProps) {
   const router = useRouter();
 
-  // Primary Navigation State (Default: 'ideas')
-  const [activeTab, setActiveTab] = useState<TabType>('ideas');
+  // Primary Navigation State (Default: 'signals')
+  const [activeTab, setActiveTab] = useState<TabType>('signals');
   const sizingSettings = useSizing();
 
   // Active / Closed Datasets with server-confirmed updates
@@ -327,6 +332,28 @@ export default function StockIdeasApp({
           <nav className="hidden md:flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 p-1 rounded-xl">
             <button
               type="button"
+              onClick={() => setActiveTab('signals')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                activeTab === 'signals'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>Signals</span>
+              {swingSignals.length > 0 && (
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                    activeTab === 'signals' ? 'bg-blue-800 text-white' : 'bg-slate-800 text-slate-300'
+                  }`}
+                >
+                  {swingSignals.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
               onClick={() => setActiveTab('ideas')}
               className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                 activeTab === 'ideas'
@@ -440,6 +467,15 @@ export default function StockIdeasApp({
             <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
             <span className="font-semibold">{successBanner}</span>
           </div>
+        )}
+
+        {/* TAB: SWING SIGNALS */}
+        {activeTab === 'signals' && (
+          <SignalsView
+            signals={swingSignals}
+            sleeves={swingSleeves}
+            latestDataDate={latestScanLog?.scan_date}
+          />
         )}
 
         {/* TAB 1: CURRENT STOCK IDEAS */}
@@ -602,6 +638,26 @@ export default function StockIdeasApp({
         aria-label="Mobile Navigation"
         className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0d1322]/95 backdrop-blur-lg border-t border-slate-800/90 px-3 py-2 flex items-center justify-around shadow-2xl"
       >
+        <button
+          type="button"
+          onClick={() => setActiveTab('signals')}
+          className={`flex flex-col items-center justify-center flex-1 py-1 rounded-xl transition-all cursor-pointer ${
+            activeTab === 'signals' ? 'text-blue-400' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <div className="relative">
+            <TrendingUp className={`w-5 h-5 ${activeTab === 'signals' ? 'stroke-[2.5]' : 'stroke-2'}`} />
+            {swingSignals.length > 0 && (
+              <span className="absolute -top-1 -right-2.5 bg-blue-600 text-white text-[9px] font-bold px-1 rounded-full min-w-[14px] text-center">
+                {swingSignals.length}
+              </span>
+            )}
+          </div>
+          <span className={`text-[10px] mt-1 font-bold ${activeTab === 'signals' ? 'text-blue-400' : 'text-slate-400'}`}>
+            Signals
+          </span>
+        </button>
+
         <button
           type="button"
           onClick={() => setActiveTab('ideas')}

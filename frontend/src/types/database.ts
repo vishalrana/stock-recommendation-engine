@@ -136,7 +136,64 @@ export interface ScanHistoryEntry {
   signals_generated: number;
   signals_qualified: number;
   regime: string;
-  status: string;
   newIdeas: Array<{ ticker: string; strategy: string; company_name?: string | null }>;
   filteredSetups: Array<{ ticker: string; strategy?: string | null; reason: string }>;
+}
+
+export interface SwingSignalRecord {
+  id: number;
+  ticker: string;
+  sleeve: 'T' | 'E' | 'N' | 'P' | 'I';
+  status: 'open' | 'closed' | 'cancelled';
+  signal_date: string;
+  entry_signal_close: number;
+  entry_fill_price?: number | null;
+  fill_date?: string | null;
+  stop_loss: number;
+  target?: number | null;
+  exit_date?: string | null;
+  exit_price?: number | null;
+  exit_reason?: string | null;
+  holding_sessions?: number;
+  net_return_pct?: number | null;
+  spy_return_pct?: number | null;
+  excess_pct?: number | null;
+  beta_adj_pct?: number | null;
+  beta?: number | null;
+  atr14?: number | null;
+  c6_pct?: number | null;
+  ear_pct?: number | null;
+  avol_pct?: number | null;
+  cluster_value?: number | null;
+  gap_pct?: number | null;
+  rsi2?: number | null;
+  earnings_date?: string | null;
+  earnings_unknown?: boolean;
+  event_lock_unknown?: boolean;
+  details?: {
+    why_it_moved?: {
+      summary: string;
+      label: string;
+      sources: Array<{ index: number; title: string; url: string; source: string }>;
+    };
+    sleeve_status?: 'LIVE' | 'LIVE-SP500' | 'SHADOW' | 'KILLED';
+    why_exit?: {
+      summary: string;
+    };
+    [key: string]: any;
+  };
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SwingSleeveStatus {
+  sleeve: string;
+  name: string;
+  status: 'LIVE' | 'LIVE-SP500' | 'SHADOW' | 'KILLED';
+  universe: string;
+  u2_beta_adj?: number | null;
+  u1_beta_adj?: number | null;
+  kill_status?: string;
+  reasons?: string[];
+  last_evaluated_at?: string;
 }

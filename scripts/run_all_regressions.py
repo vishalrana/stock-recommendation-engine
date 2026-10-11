@@ -58,6 +58,7 @@ TEST_SUITES = [
     "tests/test_swing_phase1.py",
     "tests/test_swing_engine.py",
     "tests/test_swing_phase5.py",
+    "tests/test_swing_alerts.py",
 ]
 
 

@@ -1,5 +1,5 @@
-import { fetchActiveRecommendations, fetchClosedSignals, fetchScanHistory, getLatestScanLog } from '../lib/database';
-import { Recommendation, ScanHistoryEntry, ScanLog } from '../types/database';
+import { fetchActiveRecommendations, fetchClosedSignals, fetchScanHistory, getLatestScanLog, fetchSwingData } from '../lib/database';
+import { Recommendation, ScanHistoryEntry, ScanLog, SwingSignalRecord, SwingSleeveStatus } from '../types/database';
 import StockIdeasApp from '../components/stock-ideas-app';
 
 // Force dynamic rendering — never prerender at build time
@@ -12,20 +12,25 @@ export default async function Page() {
   let closedIdeas: Recommendation[] = [];
   let scanHistory: ScanHistoryEntry[] = [];
   let latestScanLog: ScanLog | null = null;
+  let swingSignals: SwingSignalRecord[] = [];
+  let swingSleeves: SwingSleeveStatus[] = [];
   let errorMsg = '';
 
   try {
-    const [active, closed, history, scanLog] = await Promise.all([
+    const [active, closed, history, scanLog, swingData] = await Promise.all([
       fetchActiveRecommendations(),
       fetchClosedSignals(),
       fetchScanHistory(14),
       getLatestScanLog(),
+      fetchSwingData(),
     ]);
 
     activeIdeas = active;
     closedIdeas = closed;
     scanHistory = history;
     latestScanLog = scanLog;
+    swingSignals = swingData.signals;
+    swingSleeves = swingData.sleeves;
   } catch (e: any) {
     errorMsg = e.message || 'Failed to load stock recommendations';
   }
@@ -47,6 +52,8 @@ export default async function Page() {
       initialClosedIdeas={closedIdeas}
       scanHistory={scanHistory}
       latestScanLog={latestScanLog}
+      swingSignals={swingSignals}
+      swingSleeves={swingSleeves}
     />
   );
 }

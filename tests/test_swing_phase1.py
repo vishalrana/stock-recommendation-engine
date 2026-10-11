@@ -22,7 +22,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from scripts.build_long_history import compute_unadjusted_close, process_ticker_frame
-from scripts.build_insider_history import parse_quarter_zip
+from scripts.build_insider_history import parse_quarter
 from scripts.build_short_interest import calculate_publication_date
 from src.trade_hygiene import SessionCalendar
 
@@ -71,47 +71,68 @@ class TestAdjustmentIdentities(unittest.TestCase):
 
 
 class TestInsiderPurchasesParser(unittest.TestCase):
-    def test_parse_quarter_zip_fixture(self):
-        # Create in-memory zip file with mock SUBMISSION, REPORTING_OWNER, and NONDERIV_TRANS
+    """Fixture in the real SEC data-set schema (insider_transactions_readme.htm, 2024Q3 file)."""
+
+    @staticmethod
+    def tsv(rows):
+        return "\n".join("\t".join(r) for r in rows) + "\n"
+
+    def zip_fixture(self):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as z:
-            # Submissions
-            sub_tsv = (
-                "ACCESSION_NUMBER\tFILING_DATE\tISSUER_CIK\tDOCUMENT_TYPE\n"
-                "0001-24-0001\t2024-05-15\t320193\t4\n"     # AAPL CIK, Form 4 original
-                "0001-24-0002\t2024-05-15\t320193\t4/A\n"   # Amendment (should be dropped)
-                "0001-24-0003\t2024-05-16\t320193\t4\n"     # Form 4 original
-            )
-            z.writestr("SUBMISSION.tsv", sub_tsv)
+            z.writestr("SUBMISSION.tsv", self.tsv([
+                ["ACCESSION_NUMBER", "FILING_DATE", "DOCUMENT_TYPE", "ISSUERCIK", "ISSUERTRADINGSYMBOL", "AFF10B5ONE"],
+                ["0001-24-0001", "15-MAY-2024", "4", "0000320193", "AAPL", "0"],       # original Form 4
+                ["0001-24-0002", "15-MAY-2024", "4/A", "0000320193", "AAPL", "0"],     # amendment: excluded
+                ["0001-24-0003", "16-MAY-2024", "4", "0000320193", "AAPL", "true"],    # 10b5-1 plan
+                ["0001-24-0004", "16-MAY-2024", "4", "0000320193", "(AAPL)", ""],
+            ]))
+            z.writestr("REPORTINGOWNER.tsv", self.tsv([
+                ["ACCESSION_NUMBER", "RPTOWNERCIK", "RPTOWNER_RELATIONSHIP"],
+                ["0001-24-0001", "99901", "Director"],
+                ["0001-24-0002", "99902", "Director"],
+                ["0001-24-0003", "99903", "Director,Officer"],
+                ["0001-24-0004", "99904", "TenPercentOwner"],
+            ]))
+            z.writestr("NONDERIV_TRANS.tsv", self.tsv([
+                ["ACCESSION_NUMBER", "TRANS_DATE", "TRANS_CODE", "TRANS_SHARES", "TRANS_PRICEPERSHARE", "TRANS_ACQUIRED_DISP_CD"],
+                ["0001-24-0001", "14-MAY-2024", "P", "1000", "150.00", "A"],   # $150,000 purchase
+                ["0001-24-0001", "14-MAY-2024", "S", "500", "150.00", "D"],    # sale: excluded
+                ["0001-24-0002", "14-MAY-2024", "P", "2000", "150.00", "A"],   # on the amendment
+                ["0001-24-0003", "15-MAY-2024", "P", "100", "150.00", "A"],    # 10b5-1
+                ["0001-24-0004", "15-MAY-2024", "P", "1000", "150.00", "A"],   # 10% owner only
+            ]))
+        return buf.getvalue()
 
-            # Reporting owners
-            owner_tsv = (
-                "ACCESSION_NUMBER\tRPTOWNER_CIK\tIS_DIRECTOR\tIS_OFFICER\n"
-                "0001-24-0001\t99901\t1\t0\n"               # Director
-                "0001-24-0002\t99902\t1\t0\n"               # Director on amendment
-                "0001-24-0003\t99903\t0\t0\n"               # 10% owner / not dir/off (drop)
-            )
-            z.writestr("REPORTING_OWNER.tsv", owner_tsv)
+    def test_parse_real_schema(self):
+        p, sym = parse_quarter(self.zip_fixture())
+        self.assertEqual(sorted(p["accession"]), ["0001-24-0001", "0001-24-0003", "0001-24-0004"])
+        a = p[p["accession"] == "0001-24-0001"].iloc[0]
+        self.assertEqual((int(a["issuer_cik"]), a["symbol"], int(a["owner_cik"])), (320193, "AAPL", 99901))
+        self.assertTrue(a["is_director"] and not a["is_officer"])
+        self.assertAlmostEqual(a["value"], 150000.0)
+        self.assertEqual(a["filing_date"], date(2024, 5, 15))
+        self.assertIs(p[p["accession"] == "0001-24-0003"].iloc[0]["aff10b5one"], True)
+        self.assertEqual(p[p["accession"] == "0001-24-0004"].iloc[0]["symbol"], "AAPL")   # "(AAPL)" cleaned
+        self.assertEqual(int(sym["ISSUERCIK"].iloc[0]), 320193)
 
-            # Non-derivative transactions
-            trans_tsv = (
-                "ACCESSION_NUMBER\tTRANS_CODE\tTRANS_ACQUIRED_DISP_CD\tTRANS_SHARES\tTRANS_PRICEPERSHARE\tAFF10B5ONE\n"
-                "0001-24-0001\tP\tA\t1000\t150.00\t0\n"     # $150,000 value, Code P, Acquired A, 10b5-1 False
-                "0001-24-0001\tS\tD\t500\t150.00\t0\n"      # Sale (drop)
-                "0001-24-0002\tP\tA\t2000\t150.00\t0\n"     # P on amendment (dropped)
-                "0001-24-0003\tP\tA\t1000\t150.00\t0\n"     # P by non-dir/off (dropped)
-            )
-            z.writestr("NONDERIV_TRANS.tsv", trans_tsv)
-
-        cik_map = {320193: "AAPL"}
-        df = parse_quarter_zip(buf.getvalue(), cik_map)
-        self.assertEqual(len(df), 1)
-        row = df.iloc[0]
-        self.assertEqual(row["ticker"], "AAPL")
-        self.assertEqual(row["transaction_code"], "P")
-        self.assertEqual(row["relationship"], "Director")
-        self.assertAlmostEqual(row["value"], 150000.0)
-        self.assertFalse(row["aff10b5one"])
+    def test_qualification_rules(self):
+        from src.swing.engine import qualifying_purchases
+        p, _ = parse_quarter(self.zip_fixture())
+        q = qualifying_purchases(p, lambda cik, s, fd: "AAPL")
+        # 0001: director, $150k -> qualifies; 0003: 10b5-1 -> no; 0004: 10% owner only -> no
+        self.assertEqual(list(q["accession"]), ["0001-24-0001"])
+        # Routine: the same owner bought in May of each of the three prior years -> excluded
+        base = p[p["accession"] == "0001-24-0001"]
+        rows = [base]
+        for y in (2021, 2022, 2023):
+            h = base.copy()
+            h["filing_date"] = date(y, 5, 10)
+            h["accession"] = f"old-{y}"
+            h["value"] = 5000.0                       # any code-P purchase counts toward "routine"
+            rows.append(h)
+        q2 = qualifying_purchases(pd.concat(rows, ignore_index=True), lambda cik, s, fd: "AAPL")
+        self.assertNotIn("0001-24-0001", set(q2["accession"]))
 
 
 class TestShortInterestPublicationDate(unittest.TestCase):

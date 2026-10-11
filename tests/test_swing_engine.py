@@ -234,3 +234,8 @@ def test_ledger_recording(tmp_path):
     assert entry["action"] == "BUY"
     assert entry["ticker"] == "AAPL"
     assert entry["price"] == 200.0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__, "-q"]))

@@ -567,7 +567,7 @@ def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFra
 
     ticker = sig["ticker"].upper()
     is_etf = bool(sig.get("is_etf")) or normalize_strategy_key(sig["strategy"]) == "sector_rotation"
-    if qc.RR_FLOOR_STOP_CAP_ENABLED:
+    if getattr(qc, "STOP_CAP_ENABLED", False) or getattr(qc, "RR_FLOOR_ENABLED", False):
         reason = rr_stop_rejection(sig.get("entry_price"), sig.get("stop_loss"), sig.get("target_1"), sig.get("atr_14"))
         if reason:
             return f"Stop cap / R:R floor: {reason}"

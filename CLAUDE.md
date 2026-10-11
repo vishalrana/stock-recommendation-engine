@@ -41,9 +41,9 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 ## Rules
 
 - **Analytics are not qualifiers.** Risk/reward, target-reach probabilities, targets and stop-losses are informational outputs. They must not qualify or reject a recommendation when qualification is meant to be score-based. A stock qualifies because it meets the defined strategy criteria. Flag any code where these metrics act as hidden gates.
-  - **Exception (adopted 2026-10-11 under rule R1, production-universe run 38118783161):** one explicit risk rule, `RR_FLOOR_STOP_CAP_ENABLED` in `src/quant_config.py` (`src/trade_hygiene.py`), rejects a *new* idea in two cases:
-    - its stop sits further below the entry than min(3 × ATR14, 10% of entry);
-    - T1 offers less than 1.5 R.
+  - **Exception (user decision 2026-10-11, not a tested result):** one explicit risk rule in `src/quant_config.py` (`src/trade_hygiene.py`), `STOP_CAP_ENABLED = True`, rejects a *new* idea if:
+    - its stop sits further below the entry than min(3 × ATR14, 10% of entry).
+    The R:R floor (`RR_FLOOR_ENABLED = False`, split from `RR_FLOOR_STOP_CAP_ENABLED`) was turned off on 2026-10-11 by user decision (this is a user decision, not a tested result; it affects only the Ideas product).
   - It acts only after the score has qualified the idea. Tiers stay score-based (`assign_tier`). It never closes or changes an open idea. Reach probabilities remain display-only. No other analytic may gate.
 - **Check calculations rigorously**: RSI/ATR and other indicators (inputs, conventions, edge cases); scores, thresholds, ranking and filters; entry, stop, target and R:R; probabilities (validity, sample size, calibration); backtest execution; scale-outs and same-bar stop/target collisions; lifecycle transitions; timestamps, ticker identity and data provenance.
 - **Present probabilities honestly**: they must be mathematically valid, calibrated and backed by enough data, and never presented as certainties.

@@ -130,16 +130,20 @@ CONTEXT_SCORE_COMPONENTS: tuple = ("analyst", "news")
 #                          window; an unknown date issues the idea marked earnings_unknown.
 #   EVENT_LOCK_ENABLED     SEC deal / tender / rights-offering filings and the price-pin backstop
 #                          (src/providers/context/sec_filings.py) block new ideas.
-#   RR_FLOOR_STOP_CAP_ENABLED  reject when entry - stop > min(STOP_CAP_ATR_MULT x ATR14,
-#                          STOP_CAP_PCT x entry) or (T1 - entry) / (entry - stop) < RR_FLOOR.
+#   STOP_CAP_ENABLED       reject when entry - stop > min(STOP_CAP_ATR_MULT x ATR14, STOP_CAP_PCT x entry).
+#   RR_FLOOR_ENABLED       reject when (T1 - entry) / (entry - stop) < RR_FLOOR.
 # Adopted 2026-10-11 under rule R1 (production-universe run 38118783161): none of the four
-# variants had a full-period paired CI entirely below zero. rr_floor_stop_cap is flagged "costs
+# variants had a full-period paired CI entirely below zero. rr_floor_stop_cap was flagged "costs
 # return; kept as a risk rule" (-0.11 full, -0.76 late, CIs include zero). Together they cut issued
 # ideas from 6,950 to 127 over Oct 2022 - Oct 2026 (CLAUDE.md, Profitability program).
+# On 2026-10-11, by user decision, RR_FLOOR_ENABLED is turned off (False) for the Ideas product,
+# while STOP_CAP_ENABLED remains True.
 EARNINGS_BLACKOUT_MODE: str = "full_hold"
 FULL_HOLD_BUFFER_SESSIONS: int = 2
 ESTIMATED_EARNINGS_BAND_SESSIONS: int = 5
 EVENT_LOCK_ENABLED: bool = True
+STOP_CAP_ENABLED: bool = True
+RR_FLOOR_ENABLED: bool = False
 RR_FLOOR_STOP_CAP_ENABLED: bool = True
 RR_FLOOR: float = 1.5
 STOP_CAP_ATR_MULT: float = 3.0

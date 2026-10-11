@@ -27,6 +27,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src import quant_config as qc  # noqa: E402
 from src.providers.context.sec_filings import (  # noqa: E402
     Filing, acceptance_et, reaction_session, parse_filings, earnings_events, event_lock, price_pin,
 )
@@ -174,9 +175,11 @@ class TestStopCapAndRrFloor(unittest.TestCase):
         reason = rr_stop_rejection(100.0, 85.8, 109.7, 4.0)
         self.assertIsNotNone(reason)
         self.assertIn("cap", reason)
-        # Stop inside the cap but T1 too close: R:R floor
-        reason = rr_stop_rejection(100.0, 95.0, 104.0, 3.0)
-        self.assertIn("reward/risk", reason)
+        # Stop inside the cap: with RR_FLOOR_ENABLED off (user decision), passes; with it on, rejects
+        self.assertIsNone(rr_stop_rejection(100.0, 95.0, 104.0, 3.0))
+        with mock.patch.object(qc, "RR_FLOOR_ENABLED", True):
+            reason = rr_stop_rejection(100.0, 95.0, 104.0, 3.0)
+            self.assertIn("reward/risk", reason)
         self.assertIsNone(rr_stop_rejection(100.0, 95.0, 108.0, 2.5))   # 5% stop < min(7.5%, 10%); 1.6 R
         self.assertIsNotNone(rr_stop_rejection(100.0, 92.0, 120.0, 2.0))  # 8% stop > 3 x ATR = 6%
 
@@ -255,12 +258,14 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         from src import quant_config as qc
         sig = {"ticker": "SNOW", "strategy": "Trend Following", "entry_price": 100.0, "stop_loss": 85.8,
                "target_1": 109.7, "atr_14": 4.0}
-        # All switches off (current defaults until R1 decides): nothing is rejected
-        with mock.patch.object(qc, "RR_FLOOR_STOP_CAP_ENABLED", False), \
+        # All switches off: nothing is rejected
+        with mock.patch.object(qc, "STOP_CAP_ENABLED", False), \
+                mock.patch.object(qc, "RR_FLOOR_ENABLED", False), \
+                mock.patch.object(qc, "RR_FLOOR_STOP_CAP_ENABLED", False), \
                 mock.patch.object(qc, "EARNINGS_BLACKOUT_MODE", "fixed_days"), \
                 mock.patch.object(qc, "EVENT_LOCK_ENABLED", False):
             self.assertIsNone(gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {}))
-        with mock.patch.object(qc, "RR_FLOOR_STOP_CAP_ENABLED", True):
+        with mock.patch.object(qc, "STOP_CAP_ENABLED", True):
             self.assertIn("Stop cap", gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {}))
         # Full hold with an estimated provider date inside the hold (TEVA-like)
         teva = {"ticker": "TEVA", "strategy": "Trend Following", "entry_price": 20.0, "stop_loss": 19.0,

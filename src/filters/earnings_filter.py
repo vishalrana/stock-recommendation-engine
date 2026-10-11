@@ -258,6 +258,10 @@ Unknown/no-info proceeds: {self.unknown_proceeds}
 GLOBAL_EARNINGS_TRACKER = EarningsTracker()
 
 _SESSION_FETCHED_TICKERS: set = set()
+# Next earnings dates the provider returned as a single confirmed date in this run (Yahoo returns a
+# two-date range while a date is only estimated). Read by the full-hold earnings rule; any other
+# date is treated as an estimate.
+PROVIDER_CONFIRMED_DATES: Dict[str, str] = {}
 
 
 def reset_session_cache():
@@ -547,6 +551,8 @@ def fetch_single_ticker_provider(
                 ed = cal.get("Earnings Date")
                 if ed and len(ed) > 0:
                     next_date = normalize_date_str(ed[0])
+                    if len(ed) == 1 and next_date:
+                        PROVIDER_CONFIRMED_DATES[sym_upper] = next_date
             elif cal is not None and hasattr(cal, "empty") and not cal.empty:
                 if hasattr(cal, "index") and len(cal.index) > 0:
                     next_date = normalize_date_str(cal.index[0])

@@ -74,6 +74,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-backtest-history-
 
+      # SEC filings (earnings calendar, deal filings): older submission pages never change; the
+      # recent block is refetched after 72 hours by the harness itself
+      - name: Restore SEC filings
+        uses: actions/cache/restore@v4
+        with:
+          path: data/backtest_history/sec/submissions
+          key: ${{ runner.os }}-sec-submissions-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-sec-submissions-
+
       - name: Phase 1 - strategy scans
         run: python scripts/validate_backtest_pipeline.py --universe production --workers 4 --phase1-only $LIMIT_ARG
 
@@ -83,6 +93,13 @@ jobs:
         with:
           path: data/backtest_history/*.parquet
           key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
+
+      - name: Save SEC filings
+        if: always() && inputs.limit == ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/backtest_history/sec/submissions
+          key: ${{ runner.os }}-sec-submissions-${{ github.run_id }}
 
       - name: Phase 2 - replay and statistics
         run: >

@@ -28,6 +28,8 @@ from src.strategy_evidence import EVIDENCE_PATH, aggregate_trades  # noqa: E402
 ARTIFACT_EVIDENCE = "strategy_performance_production_universe.json"
 ARTIFACT_SETUPS = "production_backtest_setup_trades_production_universe.csv"
 TRADE_FIELDS = ("strategy", "net_return_pct", "outcome", "has_t2", "has_t3", "beta_adjusted_pct", "excess_vs_spy_pct")
+# Display-only aggregates (expected R, exit mix) use these when the artifact has them (runs since 2026-10-11)
+OPTIONAL_FIELDS = ("stop_pct", "exit_reason")
 
 
 def rebuild(artifact_dir: str):
@@ -39,12 +41,13 @@ def rebuild(artifact_dir: str):
     if missing:
         raise ValueError(f"Setup-trades CSV lacks columns {missing}")
     # Same row order as the run's shadow-trade list, so float sums add up in the same order
-    records = setups[list(TRADE_FIELDS)].to_dict("records")
+    fields = list(TRADE_FIELDS) + [c for c in OPTIONAL_FIELDS if c in setups.columns]
+    records = setups[fields].to_dict("records")
     for r in records:
         for k in ("has_t2", "has_t3"):
             r[k] = bool(r[k]) if not pd.isna(r[k]) else False
-        for k in ("beta_adjusted_pct", "excess_vs_spy_pct"):
-            if pd.isna(r[k]):
+        for k in ("beta_adjusted_pct", "excess_vs_spy_pct", "stop_pct", "exit_reason"):
+            if k in r and pd.isna(r[k]):
                 r[k] = None
     rebuilt = aggregate_trades(records)
 

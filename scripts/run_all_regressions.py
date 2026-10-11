@@ -54,6 +54,7 @@ TEST_SUITES = [
     "scripts/test_backtest_pipeline.py",
     "scripts/test_quant_correctness_fixes.py",
     "scripts/test_research_program.py",
+    "scripts/test_trade_hygiene.py",
 ]
 
 

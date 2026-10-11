@@ -10,6 +10,10 @@ A personal-use, quantitative research and recommendation engine for US equities.
 
 - Not a trading bot: no order placement or brokerage execution.
 - Not a portfolio manager: no position sizing, Kelly sizing, capital allocation or portfolio-state logic.
+  - **Exception (adopted 2026-10-11, profitability program Phase 6):** display-only sizing guidance on the cards.
+    - Shares are floor(account × risk % ÷ (entry − stop)), capped at the account size.
+    - The account size and risk per idea are stored only in the viewer's browser (`localStorage`, `frontend/src/lib/sizing.ts`). They are never sent to the server, stored in Supabase, or read by the engine.
+    - Nothing is ordered, allocated or tracked as a portfolio.
 - Not a commercial or multi-tenant product.
 - Not a security-hardening project: keep security proportionate to personal use.
 - Not proof of profitability: passing tests or plausible-looking output does not establish a trading edge.
@@ -48,7 +52,9 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - **Fail correctly**: on incomplete scans, stale or missing data, provider failures or thin samples, never silently publish misleading recommendations or corrupt existing records.
 - **Strategy changes need evidence**: do not change the production strategy without backtest validation.
 
-## Current status (as of 2026-10-10)
+## Current status (as of 2026-10-11)
+
+- **2026-10-11: profitability program completed** (see that section). Production now applies the full-hold earnings blackout, the event lock and the stop cap / R:R floor (about 2–3 new ideas a month). Evidence comes from run 38122679781. The final verdict is no edge.
 
 - Import errors in the universe provider and Supabase client were fixed. A project report claims 39 regression suites passed and a benchmark dry run succeeded.
 - The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code, and `supabase/migration_2026_10_10_fundamentals.sql` (applied 2026-10-10) adds those columns and the fundamentals provenance columns.
@@ -57,7 +63,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
   - The cache_start run uses the 2025-02-13 cache constituents (516 stocks) from 2022-10-21, so results before the universe date are survivorship-inflated.
   - The production-universe run applies today's security master to the whole window, so stocks that delisted are missing throughout, which flatters small caps.
   - The late period (from 2025-04-09) is the cleaner test.
-- Earnings blackout (user-approved 2026-10-10): `EARNINGS_BLACKOUT_DAYS` now counts NYSE trading sessions after the scan date up to and including the report date (`trading_sessions_between` in `src/utils/market_date.py`, which applies the NYSE holiday rules). Before this it counted calendar days. `days_to_earnings` stays in calendar days, because that is what the card shows. The windows are still far shorter than the 5–25-day holding periods, so the card warns when earnings fall inside the holding period. The backtest cannot test the blackout (no historical earnings calendar).
+- Earnings blackout (user-approved 2026-10-10): `EARNINGS_BLACKOUT_DAYS` now counts NYSE trading sessions after the scan date up to and including the report date (`trading_sessions_between` in `src/utils/market_date.py`, which applies the NYSE holiday rules). Before this it counted calendar days. `days_to_earnings` stays in calendar days, because that is what the card shows. Since 2026-10-11 the full-hold rule replaces this window for new ideas (see Profitability program, Phase 2), and the backtest tests both on SEC 8-K item 2.02 dates.
 - **Universe (user decision 2026-10-10): keep the broad universe.** `UNIVERSE_SOURCE` stays `expanded`: 5,598 common equities, about 2,750 of them liquid. Strategy evidence now comes from the production-universe backtest run 38059174571, adopted into `config/strategy_performance.json`, so scores and cards are measured on the universe the scan covers. Delisted stocks are missing from that run, which flatters small caps.
 - **Recommendation data reset (2026-10-10):**
   - Why: a clean start after adopting the production-universe evidence. The existing ideas had been scored with the 516-stock evidence and the pre-fix pipeline.
@@ -309,6 +315,46 @@ Recorded before any of its backtests or IC studies were run. The definitions and
     - Plain 12-1 momentum does not pass in this universe and window.
     - An IC is a ranking statistic, not a tradable return.
 
+- Phase 4 (2026-10-11, R2, Holm over six): run 38122679781.
+  - Production here is the post-Phase-2 book: 127 ideas, −0.34%/idea beta-adjusted (CI −1.16 to +0.50), LATE −0.45.
+
+    | Variant | Ideas | Beta-adj. %/idea | Paired full (CI) | Paired late | Holm p | R2 |
+    |---|---|---|---|---|---|---|
+    | `rank_select` (C6 ≥ 80th pct) | 1,302 | −0.60 | −0.25 (−1.15 to +0.61) | −0.06 | 1.00 | KILL |
+    | `cs_mom_12_1` (C6 top 10% screen) | 113 | −0.32 | +0.02 (−0.40 to +0.44) | +0.18 | 1.00 | KILL |
+    | `momentum_rank_book` | 2,012 | +0.40 (−0.90 to +1.75) | +0.75 (−0.56 to +2.13) | +2.07 | 0.94 | KILL |
+    | `trail_after_t1` | 126 | −0.34 | +0.00 (−0.18 to +0.20) | −0.10 | 1.00 | KILL |
+    | `mr_liquid_only` | 127 | −0.34 | 0.00 | 0.00 | 1.00 | KILL |
+    | `no_rebound_entries` (no Pullback / Mean Reversion ideas) | 127 | −0.34 | 0.00 | 0.00 | 1.00 | KILL |
+
+  - Nothing adopted. StepM finds no variant superior.
+  - `mr_liquid_only` and `no_rebound_entries` change nothing, because the 127-idea book holds no Mean Reversion or Pullback ideas (Pullback setups never reach 65).
+  - The momentum rank book is the only positive point estimate. Its CI includes zero, and it is a different product (about 10 ideas a week), so treat it as a hypothesis, not a result.
+- Phase 5 (2026-10-11, R4 / R2):
+  - Setup: `src/patterns.py` uses ATR-zigzag and rolling-window pivots with confirmation indices (design adapted from neurotrader888/TechnicalAnalysisAutomation, MIT). The H&S, inverse H&S, double-bottom, flat-base / contraction and bull-flag templates are point-in-time; `scripts/test_no_lookahead.py` checks this.
+  - R4, incremental IC residualized on MOM12_1 and HI52 (IC run 38119537011):
+    - Only `hs_top_confirmed_20d` qualifies (+0.035, t 3.04, positive in both halves). Its sign is the opposite of a bearish pattern: recent H&S tops did slightly *better*.
+    - The rest are not kept: inverse H&S −0.014; double-bottom breakout −0.037 (t −4.4); base depth −0.063 (t −4.6); contraction count +0.002; distance to neckline −0.012; breakout volume ratio −0.044 (t −4.9).
+    - The kept feature is not used in ranking: C6 is the adopted signal, and R4 only permits keeping it. The features stay computed in research only.
+  - R2: the `hs_top_veto` variant gives −0.02 (CI −0.07 to 0.00), late −0.06: KILL.
+- Phase 6 (2026-10-11): display only.
+  - Cards show the strategy's realized expected R and exit mix. T2/T3 are labelled "rarely reached in backtest (x%)" below a 10% hit rate. An idea issued without a known earnings date shows an earnings-unknown note.
+  - Browser-local sizing guidance (see "What this is not").
+  - An edge banner whose wording comes from `frontend/src/lib/backtest-verdict.ts`.
+- Phase 7 (2026-10-11, R5): run 38120977022.
+  - Setup: LightGBM on monthly feature ranks, purged walk-forward (one month purged), 34 out-of-sample months.
+  - Out-of-sample IC 0.070 (NW t 3.66) vs C6 0.065 on the same months. Paired diff +0.005 (CI −0.035 to +0.043); first half −0.007.
+  - **KILL.** There was no production model path to delete; the research code stays in `scripts/research_signal_ic.py --ml`.
+- **Final verdict (2026-10-11, EDGE CLAIM, run 38122679781): no edge.**
+  - The final production book: 127 ideas, 38 signal months.
+    - Beta-adjusted −0.34%/idea (CI −1.16 to +0.50); LATE −0.45 (44 ideas).
+    - Excess vs SPY −0.74 (CI −1.71 to +0.26); mean β 0.80.
+  - Placebo: 80th percentile. The paired diff vs the placebo median is +1.35 (CI +0.40 to +2.21): stocks drawn at random with the same ATR-scaled plan did worse. This is not one of the EDGE CLAIM criteria.
+  - StepM: nothing superior. Break-even cost: −7 bps/side.
+  - None of the four EDGE CLAIM criteria passes. The cards say "Backtest: no edge vs SPY after beta; holding SPY did as well or better."
+  - Evidence: `config/strategy_performance.json` was adopted from this run (108 fields reproduced). It now includes PEAD, expected R and the exit mix.
+  - Trials run: 4 (Phase 2), 7 signals + 7 pattern features (Phases 3 and 5), 6 + 1 variants (Phases 4 and 5), 1 ML. Registry: `outputs/research_trials.jsonl` (local), with smoke runs marked.
+
 ## Backtest
 
 - `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap.
@@ -328,7 +374,7 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - `--phase1-only` caches the scans. Trades carry `adv20_usd` (20-day dollar volume at the signal) for size tiers.
   - Walk-forward evidence is incremental (`WalkForwardEvidenceBook`) and matches daily re-aggregation exactly.
 - `--variants all` (or a comma-separated list) evaluates alternatives in the same pass, against identical setups, evidence and execution. Selection variants: `rs_momentum`, `entry_info`, `rs_momentum_entry_info`, `fundamentals_in_score`. Strategy screening variants (`STRATEGY_VARIANTS`, candidate filters): `w52_off`, `w52_original_rules`, `w52_breakout`. They need 52-Week High re-enabled in `REGIME_STRATEGY_MAP`; otherwise they do nothing. A strategy variant keeps that strategy's walk-forward evidence from all its setups, so a winner must be built into the strategy and re-validated with a full run. Each variant keeps its own book, with one active idea per ticker. Results go to `outputs/production_backtest_variants.json`, with paired CIs against production. The switches live in `src/quant_config.py` (`MOMENTUM_MODEL`, `ENTRY_LOCATION_MODE`, `CONTEXT_SCORE_COMPONENTS`) and are read through `SelectionSettings` by both the scan and the backtest. `fundamentals_in_score` uses point-in-time SEC fundamentals: facts filed strictly before the signal date, with the 200-day freshness rule.
-- Known limitations (listed in its output): survivorship, no historical earnings calendar (so PEAD and the earnings blackout cannot be tested), no historical context data, no VIX history, and thresholds that were hand-tuned before the harness existed. The 516-stock universe is narrower than production's (see Current status).
+- Known limitations (listed in its output): survivorship (gauge: 4.3% of S&P 500 member-days missing), earnings dates only for SEC 8-K item 2.02 filers (foreign 6-K filers have none, and future dates are assumed known at the signal), no historical context data, no VIX history, and thresholds that were hand-tuned before the harness existed. The 516-stock universe is narrower than production's (see Current status).
 
 ## Operations (GitHub Actions)
 

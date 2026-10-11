@@ -21,6 +21,14 @@ export interface Recommendation {
   strategy_trades?: number | null;
   strategy_beta_adjusted_pct?: number | null;
   strategy_excess_vs_spy_pct?: number | null;
+  strategy_expected_r?: number | null;
+  strategy_exit_stop_pct?: number | null;
+  strategy_exit_target_pct?: number | null;
+  strategy_exit_expiry_pct?: number | null;
+  strategy_t2_hit_pct?: number | null;
+  strategy_t3_hit_pct?: number | null;
+  earnings_unknown?: boolean | null;
+  event_lock_unknown?: boolean | null;
   reach_prob_source?: string | null;
   stop_loss: number | null;
   exit_price: number | null;

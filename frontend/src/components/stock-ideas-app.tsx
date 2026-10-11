@@ -15,6 +15,8 @@ import {
 } from '../app/actions';
 import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { BACKTEST_VERDICT } from '../lib/backtest-verdict';
+import { useSizing } from '../lib/sizing';
 
 interface StockIdeasAppProps {
   initialActiveIdeas: Recommendation[];
@@ -52,6 +54,7 @@ export default function StockIdeasApp({
 
   // Primary Navigation State (Default: 'ideas')
   const [activeTab, setActiveTab] = useState<TabType>('ideas');
+  const sizingSettings = useSizing();
 
   // Active / Closed Datasets with server-confirmed updates
   const [activeIdeas, setActiveIdeas] = useState<Recommendation[]>(initialActiveIdeas || []);
@@ -484,6 +487,53 @@ export default function StockIdeasApp({
               </div>
             </div>
 
+            {/* Backtest verdict (EDGE CLAIM rule) and browser-local sizing settings */}
+            <div className="mb-4 space-y-2">
+              <div className={`text-[11px] font-medium px-3 py-2 rounded-lg border ${
+                BACKTEST_VERDICT.edgeClaimPassed
+                  ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-300'
+                  : 'bg-amber-950/30 border-amber-900/50 text-amber-200'
+              }`}>
+                {BACKTEST_VERDICT.line}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                <span className="font-bold uppercase tracking-wider text-[10px]">Sizing guide</span>
+                <label className="flex items-center gap-1">
+                  Account $
+                  <input
+                    type="number"
+                    min={0}
+                    inputMode="decimal"
+                    value={sizingSettings.account ?? ''}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      sizingSettings.setAccount(Number.isFinite(v) && v > 0 ? v : null);
+                    }}
+                    className="w-28 bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-slate-200 font-mono"
+                    aria-label="Account size in dollars (saved in this browser only)"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  Risk per idea
+                  <input
+                    type="number"
+                    min={0.05}
+                    max={5}
+                    step={0.05}
+                    value={sizingSettings.riskPct}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v > 0 && v <= 5) sizingSettings.setRiskPct(v);
+                    }}
+                    className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-slate-200 font-mono"
+                    aria-label="Percent of the account lost if the stop is hit"
+                  />
+                  %
+                </label>
+                <span className="text-slate-500">Saved in this browser only. Guidance, not advice.</span>
+              </div>
+            </div>
+
             {activeIdeas.length === 0 ? (
               <div className="py-20 px-4 text-center">
                 <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto mb-3 text-slate-500">
@@ -507,6 +557,7 @@ export default function StockIdeasApp({
                       isExpanded={expandedId === cardId}
                       onToggleExpand={() => toggleExpand(cardId)}
                       onRemove={(rec) => setRemovingIdea(rec)}
+                      sizing={{ account: sizingSettings.account, riskPct: sizingSettings.riskPct }}
                     />
                   );
                 })}

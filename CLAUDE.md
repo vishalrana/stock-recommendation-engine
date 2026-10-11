@@ -199,6 +199,39 @@ Run while 52-Week High was still active. Method: one pass of `validate_backtest_
 - Production per strategy, beta-adjusted, full period: 52-Week High −0.48 (CI −1.03 to +0.04; 72% of trades), Trend Following −0.25, Cross-Sectional −0.07, Sector Rotation −0.10, Mean Reversion −0.38 (47 trades). The late period is worse: 52-Week High −0.75.
 - Production defaults are unchanged (technical, gate, fundamentals display-only). The switches remain available for future tests.
 
+## Profitability program (pre-registered 2026-10-11)
+
+Recorded before any of its backtests or IC studies were run. The definitions and keep/kill rules below are verbatim and are applied mechanically. Only the trials listed here may be run. Any other trial must be logged as an extra trial and reported as such. Nothing in this program guarantees profitability: the realistic best case is a few %/yr of beta-adjusted alpha with large tracking error, statistically indistinguishable from zero over 4 years for a 3–10-name book. Never write "edge" unless the EDGE CLAIM criteria pass.
+
+**Definitions (verbatim):**
+- Primary metric: beta-adjusted %/issued idea (existing beta_adjusted_pct), with signal-month block-bootstrap 95% CI (existing machinery), net of 10 bps/side.
+- Periods: FULL (whole window) and LATE (signals from 2025-04-09).
+- Paired diff: paired_block_diff of a variant vs production on the same pass.
+- Random-stock placebo (new): for every issued idea of a book, draw a random stock from the same date's eligible liquid universe (price >= $5, ADV20 >= $5M, not event-locked), with the same entry rule (next open), same hold_days, the same stop distance in ATR multiples, the same costs. Repeat 200 times with fixed seeds. Report the book's percentile vs the placebo distribution, and the paired diff vs the placebo median with a block-bootstrap CI.
+- Multiple testing: every variant run (including smoke-run failures that produce statistics) is appended to outputs/research_trials.jsonl (name, phase, git sha, params, n_ideas, mean beta-adj, CI, late mean, daily or per-idea return series path). Apply a Holm correction across all variants in a phase, and run arch.bootstrap.StepM (stationary bootstrap) on the per-signal-month beta-adjusted return series of all variants vs production.
+
+**Keep/kill rules (verbatim, decided now, applied mechanically later):**
+- R1 RISK-CONTROL FILTERS (Phase 2: earnings_full_hold, event_lock, rr_floor_stop_cap, and their combination): ADOPT unless the full-period paired diff vs production has a 95% CI entirely below zero (then KILL). Also report the left tail (5th-percentile idea return, worst idea, share of stops gapped through, share of ideas with earnings inside the hold). If the point estimate is below -0.10 in both periods but the CI includes zero, ADOPT and flag it in the report as "costs return; kept as a risk rule".
+- R2 SELECTION/STRUCTURE IMPROVEMENTS (Phases 4-6 variants): ADOPT only if the paired diff vs production (post-Phase-2 production) is > 0 in BOTH FULL and LATE, AND the FULL CI excludes zero, AND it survives the Holm correction within its phase. If several pass, adopt the one with the largest FULL gain. Ties: prefer the one with fewer parameters.
+- R3 SIGNAL ADOPTION (Phase 3 IC study, horizon 20 sessions, monthly non-overlapping rank IC on the liquid universe vs forward return minus beta x SPY): a signal or composite is "valid" if mean IC > 0 with Newey-West t >= 2.0, positive in both halves and in the LATE period. The pre-specified composite C6 is adopted as the ranking signal if valid AND its IC is >= the 12-1 momentum IC (paired monthly diff point estimate >= 0). Otherwise use 12-1 momentum alone if valid. Otherwise adopt nothing.
+- R4 PATTERN FEATURES (Phase 5): a pattern feature is kept as a ranking input only if its INCREMENTAL IC (residualized on 12-1 momentum and 52w-high proximity each month) has t >= 3.0, positive in both halves. The hs_top_veto filter follows R2. Failing features stay computed and displayed only, or are removed if unused.
+- R5 ML (Phase 7, gated): run ONLY if R3 adopted something. Adopt LightGBM only if its purged walk-forward OOS monthly rank IC exceeds the adopted signal's IC with a paired bootstrap CI above zero, in both halves and LATE. Otherwise KILL and delete the model code path (keep the research script).
+- EDGE CLAIM (separate from adoption): the cards and CLAUDE.md may say "positive beta-adjusted edge (backtest)" only if the final production book has a FULL beta-adjusted CI > 0, LATE mean > 0, is above the 95th percentile of the random placebo, and survives StepM at 5%. Otherwise the cards keep the vs-SPY figure and add the plain line "Backtest: no edge vs SPY after beta; holding SPY did as well or better."
+
+**Pre-registered trials (the complete list):**
+
+| Phase | Rule | Trials |
+|---|---|---|
+| 2 Trade hygiene | R1 | `earnings_full_hold`, `event_lock`, `rr_floor_stop_cap`, `hygiene_all` (all three together) |
+| 3 Signal IC (20-session horizon) | R3 | `MOM12_1`, `RESMOM`, `HI52`, `FIP` (used as −FIP), `REV21` (−), `RVOL252` (−), `C6` (equal-weight average of those six ranks). Reported only, never adoptable: `MOM63`, `beta252`, `MAX21`, `ADV20`, sector-ETF 12-1 momentum |
+| 4 Selection / structure | R2 (Holm over these six) | `rank_select`, `cs_mom_12_1`, `momentum_rank_book`, `trail_after_t1`, `mr_liquid_only`, `no_rebound_entries` |
+| 5 Patterns | R4 (features), R2 (veto) | Features `hs_top_confirmed_20d`, `inv_hs_confirmed_20d`, `double_bottom_breakout_20d`, `base_depth_pct`, `contraction_count`, `dist_to_neckline_atr`, `breakout_volume_ratio`; variant `hs_top_veto` |
+| 7 ML (only if R3 adopts a signal) | R5 | `lightgbm_ranker` (purged walk-forward OOS) |
+| Final | EDGE CLAIM | the final production book |
+
+- Trials registry: `outputs/research_trials.jsonl` (gitignored), one JSON record per trial per run, written by `src/research/trials.py`. Smoke runs that produce statistics are recorded too, marked `smoke`.
+- Phase 4 is skipped, along with Phase 7, if neither C6 nor MOM12_1 is valid under R3.
+
 ## Backtest
 
 - `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap.

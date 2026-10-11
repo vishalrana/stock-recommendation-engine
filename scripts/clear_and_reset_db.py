@@ -214,8 +214,8 @@ def reseed_sleeve_status(client) -> None:
             "reasons": c.get("reasons") or [], "details": {"u2": c.get("u2"), "u1": c.get("u1")},
             "research_run_id": prov.get("github_run_id"),
         }, on_conflict="sleeve").execute()
-    print(f"Reseeded swing_sleeve_status: {', '.join(f'{s}={c['status']}' for s, c in cfg.items())} "
-          f"(research run {prov.get('github_run_id')})")
+    modes = ", ".join("%s=%s" % (s, c["status"]) for s, c in cfg.items())
+    print(f"Reseeded swing_sleeve_status: {modes} (research run {prov.get('github_run_id')})")
 
 
 if __name__ == "__main__":

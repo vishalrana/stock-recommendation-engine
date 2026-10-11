@@ -11,7 +11,13 @@ Tests:
 """
 
 import os
+import sys
 import pytest
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from src.news.llm_classifier import (
     anonymize_text,
     compute_text_hash,
@@ -116,3 +122,7 @@ def test_why_it_moved_generator():
     # Empty news fallback
     empty_why = generate_why_it_moved("TEST", "BUY", [])
     assert empty_why["summary"] == "No company-specific news found in SEC filings or headlines."
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

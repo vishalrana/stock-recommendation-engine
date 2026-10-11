@@ -8,7 +8,15 @@ Tests:
 - Graceful handling when APPRISE_URLS is unset
 """
 
+import os
+import sys
 import datetime as dt
+import pytest
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from src.alerts import build_alert_message, send_alerts
 
 
@@ -69,3 +77,7 @@ def test_message_splitting_at_3500_chars():
 def test_send_alerts_no_alerts_flag():
     res = send_alerts(sells=[], buys=[], warns=[], no_alerts=True)
     assert res is True
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

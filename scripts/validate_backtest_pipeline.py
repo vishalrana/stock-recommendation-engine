@@ -49,6 +49,18 @@ per ticker); the production settings always run first and alone produce the stan
 "fundamentals_in_score" scores the context from point-in-time SEC fundamentals (facts filed
 before the signal date; the only context with history).
 
+Profitability-program measurements (CLAUDE.md, pre-registered 2026-10-11), for production and
+every variant:
+  * LATE period: signals from 2025-04-09 (fixed, LATE_FROM), whatever the window.
+  * Random-stock placebo (--placebo N, default 200; 20 in --limit smoke runs; 0 = off): the book's
+    percentile among N placebo books, and the paired diff vs the per-idea placebo median.
+  * Cost scenarios: 10 bps/side, + Corwin-Schultz half-spread (trailing 20 sessions, point-in-time),
+    twice that, and the break-even cost per side.
+  * Multiple testing: one-sided paired-bootstrap p-values, Holm across the variants of the run, and
+    StepM (arch, stationary bootstrap) on per-signal-month series when arch is installed.
+  * Trials registry: one record per book per run in outputs/research_trials.jsonl (smoke runs marked).
+  * Survivorship gauge: share of S&P 500 member-days with no bar in the price cache.
+
 Outputs:
   outputs/production_backtest_summary.json   statistics
   outputs/production_backtest_trades.csv     every simulated trade
@@ -59,6 +71,7 @@ Outputs:
 
 Usage:
   python scripts/validate_backtest_pipeline.py [--refresh-data] [--workers 4] [--variants all]
+         [--placebo 200] [--trial-phase phase2]
 """
 
 import argparse
@@ -110,6 +123,10 @@ EMBARGO_DAYS = 20
 BOOTSTRAP_SAMPLES = 2000
 CROSS_SECTIONAL_TOP_FRACTION = 0.15
 SEC_FACTS_DIR = os.path.join(BACKTEST_DATA_DIR, "sec")
+LATE_FROM = "2025-04-09"        # pre-registered LATE period: signals from this date (after the universe date)
+PLACEBO_DRAWS_FULL = 200
+PLACEBO_DRAWS_SMOKE = 20
+PLACEBO_SEED = 20261011
 
 # Selection variants evaluated against the production settings (--variants)
 VARIANT_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -359,6 +376,7 @@ def simulate(sig: Dict[str, Any], frame: pd.DataFrame, loc: int, evidence, d_str
         "target_1": sig["target_1"], "target_2": sig.get("target_2"), "target_3": sig.get("target_3"),
         "has_t2": sig.get("target_2") is not None, "has_t3": sig.get("target_3") is not None,
         "reach_prob_source": sig.get("reach_prob_source"),
+        "atr_14": round(float(sig.get("atr_14") or 0.0), 6),
         "outcome": res["outcome"],
         "exit_reason": res["exit_reason"],
         "holding_days": res["holding_days"],
@@ -474,25 +492,19 @@ def apply_backtest_context(sig, settings, sec_table, scorer, d_str, mark_unavail
 # ----------------------------------------------------------------------------
 def paired_block_diff(a: List[Dict[str, Any]], b: List[Dict[str, Any]], key: str,
                       n_boot: int = BOOTSTRAP_SAMPLES, seed: int = 11) -> Dict[str, Any]:
-    """mean(a) - mean(b) of `key`, with a 95% CI resampling the same signal months for both books."""
-    va = [(t["signal_date"][:7], t[key]) for t in a if t.get(key) is not None]
-    vb = [(t["signal_date"][:7], t[key]) for t in b if t.get(key) is not None]
-    if len(va) < 30 or len(vb) < 30:
-        return {"diff": None, "ci95": None}
-    months = sorted({m for m, _ in va} | {m for m, _ in vb})
-    ga = {m: np.array([v for mm, v in va if mm == m]) for m in months}
-    gb = {m: np.array([v for mm, v in vb if mm == m]) for m in months}
-    rng = np.random.default_rng(seed)
-    diffs = []
-    for _ in range(n_boot):
-        pick = rng.choice(months, len(months))
-        x = np.concatenate([ga[m] for m in pick])
-        y = np.concatenate([gb[m] for m in pick])
-        if len(x) and len(y):
-            diffs.append(x.mean() - y.mean())
-    lo, hi = np.percentile(diffs, [2.5, 97.5])
-    point = float(np.mean([v for _, v in va]) - np.mean([v for _, v in vb]))
-    return {"diff": round(point, 3), "ci95": [round(float(lo), 3), round(float(hi), 3)]}
+    """
+    mean(a) - mean(b) of `key`, with a 95% CI resampling the same signal months for both books,
+    and one-sided bootstrap p-values (p_gt0: H0 diff <= 0; p_lt0: H0 diff >= 0) for Holm.
+    """
+    from src.research.stats import paired_month_bootstrap
+    va = [t for t in a if t.get(key) is not None]
+    vb = [t for t in b if t.get(key) is not None]
+    r = paired_month_bootstrap([t["signal_date"][:7] for t in va], [t[key] for t in va],
+                               [t["signal_date"][:7] for t in vb], [t[key] for t in vb], n_boot=n_boot, seed=seed)
+    if r["diff"] is None:
+        return {"diff": None, "ci95": None, "p_gt0": None, "p_lt0": None}
+    return {"diff": round(r["diff"], 3), "ci95": [round(x, 3) for x in r["ci95"]],
+            "p_gt0": round(r["p_gt0"], 4), "p_lt0": round(r["p_lt0"], 4)}
 
 
 def block_bootstrap_ci(values: np.ndarray, clusters: np.ndarray, stat, n_boot: int = BOOTSTRAP_SAMPLES, seed: int = 7):
@@ -582,7 +594,8 @@ def edge_verdict(stats: Dict[str, Any], ci_key: str = "net_expectancy_ci95_block
 # Main
 # ----------------------------------------------------------------------------
 def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = None, write_outputs: bool = True,
-        variants: Optional[List[str]] = None, universe: str = "cache_start", phase1_only: bool = False) -> Dict[str, Any]:
+        variants: Optional[List[str]] = None, universe: str = "cache_start", phase1_only: bool = False,
+        placebo: Optional[int] = None, trial_phase: str = "adhoc", record_trials: bool = True) -> Dict[str, Any]:
     t0 = time.time()
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     from src.ranker import SignalRanker, assign_tier
@@ -619,6 +632,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         if np.isfinite(m)
     }
 
+    bar_dates = {t: df.dropna(subset=["CLOSE"]).index for t, df in raw.items() if t != "SPY"}
     frames = {t: prepare_frame(df) for t, df in raw.items() if t != "SPY" and len(df) > WARMUP_BARS + 5}
     del raw  # the frames hold everything needed from here on (keeps the 5,600-ticker run in memory)
     stock_frames = {t: f for t, f in frames.items() if t not in SECTOR_ETFS}
@@ -809,12 +823,22 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         t["beta"] = round(beta, 4) if np.isfinite(beta) else None
         t["beta_adjusted_pct"] = round(t["net_return_pct"] - beta * spy_ret, 4) if np.isfinite(beta) else None
 
+    # Corwin-Schultz half-spread at the signal close (trailing 20 sessions, point-in-time)
+    from src.research.costs import rolling_half_spread_pct, half_spread_at, cost_scenarios
+    spreads: Dict[str, pd.Series] = {}
+    for t in [t for b in books.values() for t in b["trades"]]:
+        tk = t["ticker"]
+        if tk not in spreads:
+            spreads[tk] = rolling_half_spread_pct(frames[tk]["HIGH"], frames[tk]["LOW"], close=frames[tk]["CLOSE"])
+        hs = half_spread_at(spreads[tk], t["signal_date"])
+        t["half_spread_pct"] = round(hs, 4) if hs is not None else None
+
     # Partitions: chronological by signal date with an embargo
     split_idx = int(len(eval_dates) * TRAIN_FRACTION)
     split_date = eval_dates[split_idx].date().isoformat()
     embargo_end = eval_dates[min(len(eval_dates) - 1, split_idx + EMBARGO_DAYS)].date().isoformat()
     early = [t for t in trades if t["signal_date"] < split_date]
-    late = [t for t in trades if t["signal_date"] >= embargo_end]
+    late = [t for t in trades if t["signal_date"] >= LATE_FROM]
 
     all_stats = compile_stats(trades)
     late_stats = compile_stats(late)
@@ -831,6 +855,17 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     evidence_agg = aggregate_trades(shadow_trades)
     evidence_as_of = max((t["exit_date"] for t in shadow_trades), default=None)
 
+    from src.research.survivorship import survivorship_gauge
+    try:
+        gauge = survivorship_gauge(bar_dates, eval_dates)
+    except Exception as e:  # reference file missing or unreadable: report, never guess
+        gauge = {"missing_share_pct": None, "error": str(e)}
+    gauge_line = (f"Survivorship gauge: {gauge['missing_share_pct']}% of S&P 500 member-days in the window have no bar "
+                  f"in the price cache ({gauge.get('members_never_seen')} historical members never seen; "
+                  f"fja05680/sp500, MIT). Symbol changes overstate it slightly; delistings are true gaps."
+                  if gauge.get("missing_share_pct") is not None else
+                  f"Survivorship gauge unavailable: {gauge.get('error', 'no member-days in the window')}")
+
     metadata = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "runtime_seconds": round(time.time() - t0, 1),
@@ -842,7 +877,9 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                     + f"{len(missing_stocks)} stocks had no downloadable history (likely delisted)",
         "transaction_cost_pct_per_side": TRANSACTION_COST_PCT_PER_SIDE,
         "execution": "Fill at next bar open; STOP_FIRST; ratcheted stops; gap fills at open; expiry at strategy hold_days",
-        "split": {"early_period_before": split_date, "late_period_from": embargo_end, "embargo_sessions": EMBARGO_DAYS},
+        "split": {"early_period_before": split_date, "late_period_from": LATE_FROM,
+                  "late_period_note": "pre-registered LATE period (signals from 2025-04-09)",
+                  "train_split_embargo_end": embargo_end, "embargo_sessions": EMBARGO_DAYS},
         "censored_trades": censored,
         "raw_candidates_by_strategy": dict(raw_by_strategy),
         "shadow_setup_trades": len(shadow_trades),
@@ -854,9 +891,10 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
             f"most for small caps, which delist more often."
             if universe == "production" else
             f"Survivorship: the universe is the {universe_date} cache constituents; before that date it "
-            f"is chosen with hindsight (survivors only). The late period from {embargo_end} is the cleaner test."
+            f"is chosen with hindsight (survivors only). The late period from {LATE_FROM} is the cleaner test."
             if universe_date > eval_dates[0].date().isoformat() else
             "Survivorship: tickers delisted after the start date have no history and are excluded.",
+            gauge_line,
             "No historical earnings calendar: earnings blackout not applied; PEAD cannot fire.",
             "No historical context data: context excluded from scores (weights renormalized).",
             "No VIX history: VIX>40 override not applied.",
@@ -883,12 +921,46 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         "benchmark": {"symbol": "SPY", "buy_and_hold_return_pct_over_window": spy_return},
     }
 
+    summary["survivorship_gauge"] = gauge
+
+    # Random-stock placebo, cost scenarios and monthly series for every book
+    from src.research.placebo import PlaceboEngine
+    from src.research.stats import monthly_series
+    n_placebo = (PLACEBO_DRAWS_SMOKE if limit else PLACEBO_DRAWS_FULL) if placebo is None else int(placebo)
+
+    def _ci(values, months):
+        return block_bootstrap_ci(np.asarray(values, dtype=float), np.asarray(months), np.mean)
+
+    placebo_engine = None
+    if n_placebo > 0:
+        placebo_engine = PlaceboEngine(stock_frames, spy, betas, holding_days_for,
+                                       cost_pct_per_side=TRANSACTION_COST_PCT_PER_SIDE, seed=PLACEBO_SEED)
+    book_extras: Dict[str, Dict[str, Any]] = {}
+    for settings in settings_list:
+        b_trades = books[settings.name]["trades"]
+        extra: Dict[str, Any] = {"cost_scenarios": cost_scenarios(b_trades, _ci)}
+        if placebo_engine is not None:
+            tp = time.time()
+            extra["placebo"] = placebo_engine.evaluate_book(
+                b_trades, lambda t: float(t.get("atr_14") or 0.0), n_placebo, _ci)
+            logger.info("Placebo (%d draws) for %s: %s (%.0fs)", n_placebo, settings.name,
+                        {k: extra["placebo"].get(k) for k in ("placebo_percentile", "paired_diff_vs_placebo_median",
+                                                              "paired_diff_ci95")}, time.time() - tp)
+        extra["monthly_beta_adjusted"] = monthly_series([t["signal_date"][:7] for t in b_trades],
+                                                        [t.get("beta_adjusted_pct") for t in b_trades])
+        book_extras[settings.name] = extra
+    prod_extra = book_extras[production.name]
+    summary["cost_scenarios"] = prod_extra["cost_scenarios"]
+    if "placebo" in prod_extra:
+        summary["placebo"] = prod_extra["placebo"]
+        summary["placebo_percentile"] = prod_extra["placebo"].get("placebo_percentile")
+
     if len(settings_list) > 1:
         variant_summary = {}
         for settings in settings_list:
             b = books[settings.name]
             v_trades = b["trades"]
-            v_late = [t for t in v_trades if t["signal_date"] >= embargo_end]
+            v_late = [t for t in v_trades if t["signal_date"] >= LATE_FROM]
             entry = {
                 "settings": {"momentum_model": settings.momentum_model,
                              "entry_location_mode": settings.entry_location_mode,
@@ -911,10 +983,59 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                     "beta_adjusted_pct": paired_block_diff(v_trades, trades, "beta_adjusted_pct"),
                     "late_beta_adjusted_pct": paired_block_diff(v_late, late, "beta_adjusted_pct"),
                 }
+            extra = book_extras[settings.name]
+            entry["cost_scenarios"] = extra["cost_scenarios"]
+            if "placebo" in extra:
+                entry["placebo"] = extra["placebo"]
+                entry["placebo_percentile"] = extra["placebo"].get("placebo_percentile")
             variant_summary[settings.name] = entry
         summary["selection_variants"] = variant_summary
 
+        # Multiple testing across this run's variants (the phase's Holm family when the run holds them all)
+        from src.research.stats import holm, stepm_superior
+        names = [v.name for v in settings_list if v.name != production.name]
+        p_gt0 = [variant_summary[n]["vs_production"]["beta_adjusted_pct"].get("p_gt0") for n in names]
+        valid = [(n, p) for n, p in zip(names, p_gt0) if p is not None]
+        mt: Dict[str, Any] = {"family": names, "metric": "beta_adjusted_pct, full period, one-sided (variant > production)"}
+        if valid:
+            adj = holm([p for _, p in valid])
+            mt["holm_adjusted_p_gt0"] = {n: round(a, 4) for (n, _), a in zip(valid, adj)}
+        try:
+            mt["stepm"] = stepm_superior(prod_extra["monthly_beta_adjusted"],
+                                         {n: book_extras[n]["monthly_beta_adjusted"] for n in names})
+        except ImportError:
+            mt["stepm"] = {"superior": None, "note": "arch not installed (pip install -r requirements-research.txt)"}
+        summary["multiple_testing"] = mt
+
+    if record_trials:
+        from src.research.trials import record_trial
+        series_path = os.path.join("outputs", "production_backtest_variant_trades.csv" if len(settings_list) > 1
+                                   else f"production_backtest_trades{suffix}.csv")
+        for settings in settings_list:
+            b_trades = books[settings.name]["trades"]
+            st = compile_stats(b_trades)
+            lt = compile_stats([t for t in b_trades if t["signal_date"] >= LATE_FROM])
+            extra = book_extras[settings.name]
+            record_trial(
+                name=settings.name, phase=trial_phase,
+                params={"momentum_model": settings.momentum_model, "entry_location_mode": settings.entry_location_mode,
+                        "context_components": list(settings.context_components),
+                        "candidate_filter": settings.name if settings.name in candidate_filters else None,
+                        "universe": universe, "limit": limit, "late_from": LATE_FROM},
+                n_ideas=len(b_trades), mean_beta_adj=st.get("mean_beta_adjusted_pct"),
+                ci=st.get("beta_adjusted_ci95_block_bootstrap"), late_mean=lt.get("mean_beta_adjusted_pct"),
+                series_path=series_path, smoke=bool(limit),
+                extra={"evaluation_window": metadata["evaluation_window"],
+                       "vs_production": summary.get("selection_variants", {}).get(settings.name, {}).get("vs_production"),
+                       "placebo": extra.get("placebo"), "cost_scenarios": extra["cost_scenarios"],
+                       "monthly_beta_adjusted": extra["monthly_beta_adjusted"]},
+            )
+
     if not write_outputs:
+        if limit:
+            os.makedirs(OUTPUTS_DIR, exist_ok=True)
+            with open(os.path.join(OUTPUTS_DIR, f"production_backtest_summary{suffix}_smoke.json"), "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, default=str)
         return summary
 
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
@@ -972,13 +1093,19 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None, help="Smoke test on the first N stocks (outputs not written)")
     all_variants = list(VARIANT_PRESETS) + list(STRATEGY_VARIANTS)
     parser.add_argument("--variants", default="", help=f"Comma-separated variants or 'all': {', '.join(all_variants)}")
+    parser.add_argument("--placebo", type=int, default=None,
+                        help=f"Random-stock placebo draws per idea (default {PLACEBO_DRAWS_FULL}; "
+                             f"{PLACEBO_DRAWS_SMOKE} with --limit; 0 = off)")
+    parser.add_argument("--trial-phase", default="adhoc",
+                        help="Phase label for the trials registry (e.g. phase2); pre-registered trials only")
     args = parser.parse_args()
     chosen = all_variants if args.variants.strip() == "all" else [v.strip() for v in args.variants.split(",") if v.strip()]
     unknown = [v for v in chosen if v not in all_variants]
     if unknown:
         parser.error(f"Unknown variants {unknown}; choose from {all_variants}")
     s = run(refresh_data=args.refresh_data, workers=args.workers, limit=args.limit, write_outputs=args.limit is None,
-            variants=chosen, universe=args.universe, phase1_only=args.phase1_only)
+            variants=chosen, universe=args.universe, phase1_only=args.phase1_only,
+            placebo=args.placebo, trial_phase=args.trial_phase)
     if args.phase1_only:
         print(json.dumps(s, indent=2))
         sys.exit(0)
@@ -987,10 +1114,12 @@ if __name__ == "__main__":
                                         "edge_beta_adjusted_verdict_all", "edge_beta_adjusted_verdict_late_period",
                                         "verdict_note")}, indent=2))
     print(json.dumps(s["all_trades"], indent=2))
+    print(json.dumps({k: s.get(k) for k in ("placebo", "cost_scenarios", "survivorship_gauge", "multiple_testing")},
+                     indent=2, default=str))
     print(json.dumps({k: {kk: v.get(kk) for kk in ("trade_count", "win_rate_pct", "net_expectancy_pct", "net_expectancy_ci95_block_bootstrap")} for k, v in s["by_strategy"].items()}, indent=2))
     for name, v in s.get("selection_variants", {}).items():
         a = v["all_trades"]
         print(f"{name:26s} trades {a.get('trade_count', 0):5d} | net {a.get('net_expectancy_pct')} | "
               f"excess vs SPY {a.get('mean_excess_vs_spy_pct')} | beta-adj {a.get('mean_beta_adjusted_pct')} "
               f"CI {a.get('beta_adjusted_ci95_block_bootstrap')} | vs production: full {v.get('vs_production', {}).get('beta_adjusted_pct')} "
-              f"late {v.get('vs_production', {}).get('late_beta_adjusted_pct')}")
+              f"late {v.get('vs_production', {}).get('late_beta_adjusted_pct')} | placebo pct {v.get('placebo_percentile')}")

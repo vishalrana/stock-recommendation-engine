@@ -12,6 +12,18 @@ on:
         description: 'Smoke test: only the first N stocks (empty = full universe; outputs are not written in smoke tests)'
         required: false
         default: ''
+      variants:
+        description: 'Comma-separated variants evaluated in the same pass (empty = production only)'
+        required: false
+        default: ''
+      trial_phase:
+        description: 'Trials-registry phase label (e.g. phase2); pre-registered trials only'
+        required: false
+        default: 'adhoc'
+      placebo:
+        description: 'Random-stock placebo draws per idea (empty = 200, or 20 in smoke tests; 0 = off)'
+        required: false
+        default: ''
 
 concurrency:
   group: backtest-production-universe
@@ -27,6 +39,10 @@ jobs:
       PYTHONPATH: .
       SKIP_NLP: 'true'
       LIMIT_ARG: ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+      VARIANTS_ARG: ${{ inputs.variants && format('--variants {0}', inputs.variants) || '' }}
+      PLACEBO_ARG: ${{ inputs.placebo && format('--placebo {0}', inputs.placebo) || '' }}
+      TRIAL_PHASE: ${{ inputs.trial_phase || 'adhoc' }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
 
     steps:
       - name: Checkout Code
@@ -43,6 +59,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r jobs/requirements.txt
+
+      # StepM needs arch; without it the summary says StepM was not run (never a silent pass)
+      - name: Install research dependencies
+        continue-on-error: true
+        run: pip install -r requirements-research.txt
 
       # Price history (5 years per ticker) is reused across runs; only missing tickers download
       - name: Restore price history
@@ -64,7 +85,9 @@ jobs:
           key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
 
       - name: Phase 2 - replay and statistics
-        run: python scripts/validate_backtest_pipeline.py --universe production --workers 4 $LIMIT_ARG
+        run: >
+          python scripts/validate_backtest_pipeline.py --universe production --workers 4
+          $LIMIT_ARG $VARIANTS_ARG $PLACEBO_ARG --trial-phase "$TRIAL_PHASE"
 
       - name: Upload results
         if: always()
@@ -76,5 +99,9 @@ jobs:
             outputs/production_backtest_trades_production_universe.csv
             outputs/production_backtest_setup_trades_production_universe.csv
             outputs/strategy_performance_production_universe.json
+            outputs/production_backtest_summary_production_universe_smoke.json
+            outputs/production_backtest_variants.json
+            outputs/production_backtest_variant_trades.csv
+            outputs/research_trials.jsonl
           if-no-files-found: warn
           retention-days: 30

@@ -53,6 +53,7 @@ TEST_SUITES = [
     "tests/test_end_to_end_pipeline.py",
     "scripts/test_backtest_pipeline.py",
     "scripts/test_quant_correctness_fixes.py",
+    "scripts/test_research_program.py",
 ]
 
 

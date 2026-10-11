@@ -1,0 +1,7 @@
+# Research-only dependencies for the profitability program (CLAUDE.md). The nightly scan and the
+# Vercel app never import these; requirements.txt stays the production set.
+arch>=7.0              # StepM (Romano-Wolf) multiple testing, stationary bootstrap
+alphalens-reloaded>=0.4.5  # factor tear sheets for the signal IC study
+skfolio>=0.5           # purged / combinatorial cross-validation helpers
+lightgbm>=4.0          # gated ML ranker study (Phase 7, only if R3 adopts a signal)
+quantstats>=0.0.62     # performance tear sheets

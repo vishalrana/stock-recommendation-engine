@@ -232,6 +232,25 @@ Recorded before any of its backtests or IC studies were run. The definitions and
 - Trials registry: `outputs/research_trials.jsonl` (gitignored), one JSON record per trial per run, written by `src/research/trials.py`. Smoke runs that produce statistics are recorded too, marked `smoke`.
 - Phase 4 is skipped, along with Phase 7, if neither C6 nor MOM12_1 is valid under R3.
 
+**Program progress:**
+- Phase 1 (2026-10-11): measurement tools only, with no strategy change.
+  - `src/research/` contains:
+    - `trials.py`: the trials registry.
+    - `placebo.py`: the random-stock placebo, plus a fast numpy exit engine that matches `evaluate_signal_outcome` on 1,500 random paths.
+    - `costs.py`: the Corwin-Schultz half-spread with the pairwise overnight adjustment, the three cost scenarios and the break-even cost.
+    - `stats.py`: Holm, Newey-West t, a paired month bootstrap with one-sided p-values, a StepM wrapper and the deflated Sharpe ratio.
+    - `survivorship.py`: the S&P 500 member-day gauge.
+  - Harness (`scripts/validate_backtest_pipeline.py`):
+    - New flags: `--placebo N` (200 by default, 20 with `--limit`, 0 = off) and `--trial-phase`.
+    - LATE is fixed at signals from 2025-04-09 (`LATE_FROM`).
+    - Each book reports its cost scenarios and placebo percentile.
+    - Holm and StepM run over the run's variants (`multiple_testing`).
+    - The survivorship gauge is listed in the limitations.
+    - Every book of every run goes into the registry. Smoke runs also write `production_backtest_summary*_smoke.json`.
+  - The workflow `backtest_production_universe.yml` has new inputs `variants`, `trial_phase` and `placebo`. It installs `requirements-research.txt` (research only; `requirements.txt` is unchanged) and uploads the registry.
+  - Corwin-Schultz caveat: daily high-low estimators overstate the spreads of liquid large caps (AAPL ≈ 0.25% half-spread, against about 0.01% in reality). Cost scenario (b) is therefore pessimistic for them. The break-even cost per side does not depend on the estimate.
+  - Tests: `scripts/test_research_program.py`.
+
 ## Backtest
 
 - `scripts/validate_backtest_pipeline.py` replays the production pipeline using the shared `src/pipeline_steps.py`, with walk-forward evidence and confidence intervals from a signal-month block bootstrap.

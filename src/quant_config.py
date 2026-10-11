@@ -122,7 +122,7 @@ ENTRY_LOCATION_MODE: str = "gate"
 CONTEXT_SCORE_COMPONENTS: tuple = ("analyst", "news")
 
 # Trade-hygiene filters (profitability program, Phase 2, keep/kill rule R1 in CLAUDE.md). They act
-# at issuance, after the score qualifies an idea; the backtest evaluates each as a variant.
+# at issuance, after the score qualifies an idea (new ideas only; open ideas are never closed by them).
 #   EARNINGS_BLACKOUT_MODE "fixed_days": EARNINGS_BLACKOUT_DAYS sessions before the report date.
 #                          "full_hold":  no idea when a confirmed earnings reaction session falls in
 #                          [fill, fill + hold_days + FULL_HOLD_BUFFER_SESSIONS]; an estimated date
@@ -132,11 +132,15 @@ CONTEXT_SCORE_COMPONENTS: tuple = ("analyst", "news")
 #                          (src/providers/context/sec_filings.py) block new ideas.
 #   RR_FLOOR_STOP_CAP_ENABLED  reject when entry - stop > min(STOP_CAP_ATR_MULT x ATR14,
 #                          STOP_CAP_PCT x entry) or (T1 - entry) / (entry - stop) < RR_FLOOR.
-EARNINGS_BLACKOUT_MODE: str = "fixed_days"
+# Adopted 2026-10-11 under rule R1 (production-universe run 38118783161): none of the four
+# variants had a full-period paired CI entirely below zero. rr_floor_stop_cap is flagged "costs
+# return; kept as a risk rule" (-0.11 full, -0.76 late, CIs include zero). Together they cut issued
+# ideas from 6,950 to 127 over Oct 2022 - Oct 2026 (CLAUDE.md, Profitability program).
+EARNINGS_BLACKOUT_MODE: str = "full_hold"
 FULL_HOLD_BUFFER_SESSIONS: int = 2
 ESTIMATED_EARNINGS_BAND_SESSIONS: int = 5
-EVENT_LOCK_ENABLED: bool = False
-RR_FLOOR_STOP_CAP_ENABLED: bool = False
+EVENT_LOCK_ENABLED: bool = True
+RR_FLOOR_STOP_CAP_ENABLED: bool = True
 RR_FLOOR: float = 1.5
 STOP_CAP_ATR_MULT: float = 3.0
 STOP_CAP_PCT: float = 0.10

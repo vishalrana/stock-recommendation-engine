@@ -37,6 +37,10 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 ## Rules
 
 - **Analytics are not qualifiers.** Risk/reward, target-reach probabilities, targets and stop-losses are informational outputs. They must not qualify or reject a recommendation when qualification is meant to be score-based. A stock qualifies because it meets the defined strategy criteria. Flag any code where these metrics act as hidden gates.
+  - **Exception (adopted 2026-10-11 under rule R1, production-universe run 38118783161):** one explicit risk rule, `RR_FLOOR_STOP_CAP_ENABLED` in `src/quant_config.py` (`src/trade_hygiene.py`), rejects a *new* idea in two cases:
+    - its stop sits further below the entry than min(3 × ATR14, 10% of entry);
+    - T1 offers less than 1.5 R.
+  - It acts only after the score has qualified the idea. Tiers stay score-based (`assign_tier`). It never closes or changes an open idea. Reach probabilities remain display-only. No other analytic may gate.
 - **Check calculations rigorously**: RSI/ATR and other indicators (inputs, conventions, edge cases); scores, thresholds, ranking and filters; entry, stop, target and R:R; probabilities (validity, sample size, calibration); backtest execution; scale-outs and same-bar stop/target collisions; lifecycle transitions; timestamps, ticker identity and data provenance.
 - **Present probabilities honestly**: they must be mathematically valid, calibrated and backed by enough data, and never presented as certainties.
 - **Lifecycle integrity**: keep each recommendation's identity and status correct, preserve history, and never wrongly duplicate, replace or close a recommendation.
@@ -250,6 +254,40 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - The workflow `backtest_production_universe.yml` has new inputs `variants`, `trial_phase` and `placebo`. It installs `requirements-research.txt` (research only; `requirements.txt` is unchanged) and uploads the registry.
   - Corwin-Schultz caveat: daily high-low estimators overstate the spreads of liquid large caps (AAPL ≈ 0.25% half-spread, against about 0.01% in reality). Cost scenario (b) is therefore pessimistic for them. The break-even cost per side does not depend on the estimate.
   - Tests: `scripts/test_research_program.py`.
+- Phase 2 (2026-10-11, R1): trade hygiene, GitHub run 38118783161.
+  - Setup:
+    - Production universe: 5,592 stocks, Oct 2022 – Oct 2026.
+    - The SEC calendar covers 3,720 of 5,135 stocks with filings: 79,951 earnings events.
+    - The baseline now applies the live fixed-days blackout and lets PEAD fire.
+    - The rights-offering search hit 288 tickers.
+
+    | Variant | Ideas | Beta-adj. %/idea (CI) | LATE | Paired vs production, full (CI) | Late | R1 |
+    |---|---|---|---|---|---|---|
+    | production (baseline) | 6,950 | −0.54 (−1.20 to +0.09) | −0.34 | — | — | — |
+    | `earnings_full_hold` | 5,668 | −0.59 (−1.12 to −0.05) | −0.42 | −0.05 (−0.29 to +0.18) | −0.07 | ADOPT |
+    | `event_lock` | 6,709 | −0.52 (−1.19 to +0.12) | −0.32 | +0.01 (−0.01 to +0.04) | +0.02 | ADOPT |
+    | `rr_floor_stop_cap` | 162 | −0.64 (−1.40 to +0.17) | −1.10 | −0.11 (−0.95 to +0.73) | −0.76 | ADOPT, flagged "costs return; kept as a risk rule" |
+    | `hygiene_all` | 127 | −0.34 (−1.16 to +0.50) | −0.45 | +0.19 (−0.68 to +1.06) | −0.11 | ADOPT |
+
+  - Holm-adjusted one-sided p (variant > production): 1.00 / 0.66 / 1.00 / 0.95. StepM: no variant superior.
+  - Left tail, production → `hygiene_all`:
+    - 5th-percentile idea −12.9% → −7.1%; worst idea −48.4% → −9.7%.
+    - Stops gapped through: 14.5% → 14.0%.
+    - Ideas with earnings inside the hold: 16.4% → 0%.
+  - **All three rules are now production defaults** (`EARNINGS_BLACKOUT_MODE = "full_hold"`, `EVENT_LOCK_ENABLED`, `RR_FLOOR_STOP_CAP_ENABLED`).
+    - The R:R floor removes about 98% of ideas, because T1 is a median 0.8 R away. Expect about 2–3 new ideas a month instead of about 7 a day.
+    - They apply to new ideas only. The open TEVA, SNOW and PBT ideas keep being tracked to their exits.
+  - Royalty trusts (PBT among them) are excluded from the universe; they produced 0 issued ideas in the evidence run.
+  - Live checks (tests): a TEVA-like idea is blocked by the full-hold rule (next report est. 2026-10-28, inside the hold). PBT is locked by its Form 425s since 2026-05-18. A SNOW-like stop of −14.2% exceeds the cap.
+  - SEC calendar vs the stored `earnings_calendar`:
+    - Overall, 88.6% of 1,656 match within ±1 session, just under the 90% target.
+    - Among SEC 8-K item 2.02 filers the match is 97.2%.
+    - Most misses (144) are foreign private issuers that report on Form 6-K and so have no SEC calendar. Only 28 recent dates truly disagree.
+  - Production baseline book:
+    - Placebo: 89.5th percentile. The paired diff vs the placebo median is −0.14 (CI −0.58 to +0.31). The placebo means have a fat right tail (95th percentile +2.34), probably from bad prices among randomly drawn small caps, so the median-based diff is the robust figure.
+    - Costs: break-even −16.8 bps/side, so it loses before costs. With the Corwin-Schultz half-spread (mean 0.35%) the book is −1.24%/idea.
+    - Survivorship gauge: 4.3% of S&P 500 member-days have no bar (44 members never seen).
+  - PEAD now fires: 299 issued ideas at −0.24, and 8,417 setups at −0.53.
 - Phase 3 (2026-10-11, R3): signal IC study, GitHub run 38119537011.
   - Setup: `scripts/research_signal_ic.py`, production universe (5,140 stocks with history), 47 monthly non-overlapping dates from Oct 2022. Target: 20-session forward log return − β252 × SPY.
   - Survivorship: today's security master is applied to the whole window, so delisted stocks are missing.

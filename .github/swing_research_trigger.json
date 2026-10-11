@@ -1,0 +1,6 @@
+{
+  "stage": "all",
+  "universe": "both",
+  "placebo": 200,
+  "limit": null
+}

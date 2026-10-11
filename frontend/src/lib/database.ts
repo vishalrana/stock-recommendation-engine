@@ -392,3 +392,27 @@ export function getRejectionReason(sig: Recommendation): string {
 
   return 'Setup criteria not met';
 }
+
+export async function fetchSwingData(): Promise<{
+  signals: import('../types/database').SwingSignalRecord[];
+  sleeves: import('../types/database').SwingSleeveStatus[];
+}> {
+  const supabase = getSupabase();
+  try {
+    const [{ data: signals, error: sigErr }, { data: sleeves, error: slvErr }] = await Promise.all([
+      supabase.from('swing_signals').select('*').order('signal_date', { ascending: false }),
+      supabase.from('swing_sleeve_status').select('*'),
+    ]);
+
+    if (sigErr) console.warn('Swing signals fetch warning:', sigErr.message);
+    if (slvErr) console.warn('Swing sleeve status fetch warning:', slvErr.message);
+
+    return {
+      signals: (signals || []) as import('../types/database').SwingSignalRecord[],
+      sleeves: (sleeves || []) as import('../types/database').SwingSleeveStatus[],
+    };
+  } catch (err: any) {
+    console.warn('Could not fetch swing signals data:', err.message);
+    return { signals: [], sleeves: [] };
+  }
+}

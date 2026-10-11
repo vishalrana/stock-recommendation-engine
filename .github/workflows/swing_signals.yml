@@ -1,0 +1,85 @@
+name: Daily Swing Signals Scanner
+
+on:
+  schedule:
+    # 21:30 UTC = 17:30 ET (after NYSE close and official settlement), Mon-Fri
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (do not write to DB or alert)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: swing-signals-daily
+  cancel-in-progress: false
+
+jobs:
+  scan-and-reconcile:
+    name: Scan & Reconcile Swing Signals
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Price & SEC Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/backtest_history
+            data/cache/fundamentals
+          key: swing-live-cache-${{ hashFiles('config/strategy.yaml') }}
+          restore-keys: |
+            swing-live-cache-
+
+      - name: Run Swing Signals Engine
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          APPRISE_ALERTS_URL: ${{ secrets.APPRISE_ALERTS_URL }}
+        run: |
+          DRY_RUN_FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python jobs/generate_swing_signals.py $DRY_RUN_FLAG
+
+      - name: Push Forward Ledger to signals-ledger Branch
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -d "ledger" ] && [ -n "$(ls -A ledger)" ]; then
+            # Check if signals-ledger branch exists on remote
+            if git ls-remote --exit-code --heads origin signals-ledger; then
+              git fetch origin signals-ledger
+              git checkout -B signals-ledger origin/signals-ledger
+            else
+              git checkout --orphan signals-ledger
+              git rm -rf .
+            fi
+            # Copy ledger files into root
+            git checkout ${{ github.sha }} -- ledger/
+            git add ledger/
+            if ! git diff --staged --quiet; then
+              git commit -m "Automated forward swing signals ledger: $(date -u +'%Y-%m-%d')"
+              git push origin signals-ledger
+            fi
+          fi

@@ -8,8 +8,9 @@ qualified on its score, so they are risk rules, not ranking inputs:
     earnings reaction session falls in [fill, fill + hold_days + 2 sessions]. An estimated date
     blocks when its +/- 5-session band overlaps that window. With no date the idea is issued and
     marked earnings_unknown.
-  * Stop cap and R:R floor (RR_FLOOR_STOP_CAP_ENABLED): reject when the stop sits further than
-    min(3 x ATR14, 10% of entry) below the entry, or when T1 offers less than 1.5 R.
+  * Stop cap (STOP_CAP_ENABLED) and R:R floor (RR_FLOOR_ENABLED): reject when the stop sits further than
+    min(3 x ATR14, 10% of entry) below the entry, or when T1 offers less than 1.5 R (R:R floor
+    turned off 2026-10-11 by user decision).
   * Event lock (EVENT_LOCK_ENABLED): see src/providers/context/sec_filings.py.
 
 Session arithmetic goes through a SessionCalendar so the backtest can use the price index and the
@@ -77,17 +78,18 @@ def rr_stop_rejection(entry: float, stop: float, target_1: Optional[float], atr:
     risk = entry - stop
     if not (entry > 0 and risk > 0):
         return None  # plan validity is checked by the trade-plan builder
-    cap = qc.STOP_CAP_PCT * entry
-    if atr is not None and np.isfinite(atr) and atr > 0:
-        cap = min(cap, qc.STOP_CAP_ATR_MULT * float(atr))
-    if risk > cap * (1 + 1e-9):
-        return (f"Stop {risk / entry * 100:.1f}% below entry exceeds the cap of {cap / entry * 100:.1f}% "
-                f"(min of {qc.STOP_CAP_ATR_MULT:g} x ATR14 and {qc.STOP_CAP_PCT * 100:g}%)")
-    if target_1 is None:
-        return None
-    rr1 = (float(target_1) - entry) / risk
-    if rr1 < qc.RR_FLOOR - 1e-9:
-        return f"T1 reward/risk {rr1:.2f} below the {qc.RR_FLOOR:g} floor"
+    if getattr(qc, "STOP_CAP_ENABLED", True):
+        cap = qc.STOP_CAP_PCT * entry
+        if atr is not None and np.isfinite(atr) and atr > 0:
+            cap = min(cap, qc.STOP_CAP_ATR_MULT * float(atr))
+        if risk > cap * (1 + 1e-9):
+            return (f"Stop {risk / entry * 100:.1f}% below entry exceeds the cap of {cap / entry * 100:.1f}% "
+                    f"(min of {qc.STOP_CAP_ATR_MULT:g} x ATR14 and {qc.STOP_CAP_PCT * 100:g}%)")
+    if getattr(qc, "RR_FLOOR_ENABLED", False):
+        if target_1 is not None:
+            rr1 = (float(target_1) - entry) / risk
+            if rr1 < qc.RR_FLOOR - 1e-9:
+                return f"T1 reward/risk {rr1:.2f} below the {qc.RR_FLOOR:g} floor"
     return None
 
 

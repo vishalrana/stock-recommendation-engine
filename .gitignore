@@ -25,9 +25,11 @@ Thumbs.db
 
 # Project Cache & Output Data
 data/cache/
+data/backtest_history_long/
 *.parquet
 *.json
 !config/*.json
+!.github/swing_research_trigger.json
 outputs/
 *.log
 

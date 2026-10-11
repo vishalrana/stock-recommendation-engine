@@ -332,6 +332,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--patterns", action="store_true", help="Also evaluate the Phase 5 pattern features (R4)")
     ap.add_argument("--no-alphalens", action="store_true")
+    ap.add_argument("--no-trials", action="store_true", help="Do not write the trials registry (re-runs for artifacts)")
     args = ap.parse_args()
     t0 = time.time()
     close, high, low, volume, spy, etf_close, sectors = load_panel(args.universe, args.limit)
@@ -416,7 +417,7 @@ def main() -> int:
 
     # Trials registry (one record per adoptable signal; IC in place of beta-adjusted return)
     from src.research.trials import record_trial
-    for name, e in result["signals"].items():
+    for name, e in ([] if args.no_trials else result["signals"].items()):
         if not e["adoptable"] and not name.startswith("PAT_"):
             continue
         record_trial(name=name, phase="phase5" if name in result.get("r4_incremental_ic", {}) else "phase3",
@@ -447,9 +448,18 @@ def alphalens_sheets(close: pd.DataFrame, feats: Dict[str, pd.DataFrame], mask: 
     import matplotlib.pyplot as plt
     import alphalens as al
     dates = month_ends(close.index, EVAL_START, close.index[-DECISION_HORIZON - 1])
+    # alphalens infers a frequency from the price index: give it the session calendar explicitly
+    weekdays = pd.bdate_range(close.index[0], close.index[-1])
+    cbd = pd.offsets.CustomBusinessDay(holidays=weekdays.difference(close.index))
+    close = close.copy()
+    close.index = pd.DatetimeIndex(close.index, freq=cbd)
     for name in list(ADOPTABLE) + ["C6"]:
-        f = feats[name].where(mask).loc[dates].stack()
-        f.index.names = ["date", "asset"]
+        # Daily factor values (alphalens requires factor dates on the price calendar); the R3
+        # decision itself uses the monthly non-overlapping ICs above.
+        f = feats[name].where(mask).loc[dates[0]:dates[-1]].stack()
+        f.index = f.index.set_names(["date", "asset"])
+        f = f.reindex(pd.MultiIndex.from_arrays([pd.DatetimeIndex(f.index.get_level_values(0), freq=None),
+                                                 f.index.get_level_values(1)], names=["date", "asset"]))
         data = al.utils.get_clean_factor_and_forward_returns(f, close, periods=(5, 10, 20), quantiles=10, max_loss=0.6)
         al.tears.create_summary_tear_sheet(data)
         for i, num in enumerate(plt.get_fignums()):

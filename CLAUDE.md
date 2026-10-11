@@ -250,6 +250,26 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - The workflow `backtest_production_universe.yml` has new inputs `variants`, `trial_phase` and `placebo`. It installs `requirements-research.txt` (research only; `requirements.txt` is unchanged) and uploads the registry.
   - Corwin-Schultz caveat: daily high-low estimators overstate the spreads of liquid large caps (AAPL ≈ 0.25% half-spread, against about 0.01% in reality). Cost scenario (b) is therefore pessimistic for them. The break-even cost per side does not depend on the estimate.
   - Tests: `scripts/test_research_program.py`.
+- Phase 3 (2026-10-11, R3): signal IC study, GitHub run 38119537011.
+  - Setup: `scripts/research_signal_ic.py`, production universe (5,140 stocks with history), 47 monthly non-overlapping dates from Oct 2022. Target: 20-session forward log return − β252 × SPY.
+  - Survivorship: today's security master is applied to the whole window, so delisted stocks are missing.
+
+    | Signal | Mean IC | NW t | 1st half | 2nd half | LATE | R3 valid |
+    |---|---|---|---|---|---|---|
+    | MOM12_1 | 0.029 | 1.81 | 0.038 | 0.021 | 0.001 | no |
+    | RESMOM (34 months) | 0.005 | 0.37 | 0.015 | −0.006 | −0.006 | no |
+    | HI52 | 0.074 | 3.88 | 0.079 | 0.068 | 0.053 | yes |
+    | −FIP | 0.003 | 0.25 | 0.008 | −0.003 | −0.015 | no |
+    | −REV21 | −0.012 | −1.23 | −0.004 | −0.020 | −0.021 | no |
+    | −RVOL252 | 0.097 | 5.21 | 0.121 | 0.073 | 0.059 | yes |
+    | **C6** | **0.062** | **3.30** | 0.082 | 0.044 | 0.023 | **yes** |
+
+  - Report-only signals (IC, NW t): MOM63 −0.007 (−0.47), β252 −0.058 (−2.62), MAX21 −0.071 (−4.45), ADV20 0.031 (2.91), sector-ETF momentum −0.021 (−1.34).
+  - **Decision: C6 is adopted as the ranking signal.** It is valid, and C6 − MOM12_1 = +0.033 IC (CI +0.013 to +0.055). Phases 4 and 7 therefore run.
+  - Reading:
+    - C6's strength comes from low volatility and 52-week-high proximity: a low-risk / betting-against-beta tilt, measured beta-adjusted, in a bull sample.
+    - Plain 12-1 momentum does not pass in this universe and window.
+    - An IC is a ranking statistic, not a tradable return.
 
 ## Backtest
 

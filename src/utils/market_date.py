@@ -112,6 +112,31 @@ def trading_sessions_between(start: datetime.date, end: datetime.date) -> int:
     return int(np.busday_count(begin, stop, holidays=_nyse_holidays(begin, end)))
 
 
+_HOLIDAYS_CACHE = None
+
+
+def _all_holidays():
+    """NYSE standing-rule holidays 1990-2045, computed once (same rules as _nyse_holidays)."""
+    global _HOLIDAYS_CACHE
+    if _HOLIDAYS_CACHE is None:
+        import numpy as np
+        _HOLIDAYS_CACHE = np.array(_nyse_holidays(datetime.date(1990, 1, 1), datetime.date(2045, 12, 31)),
+                                   dtype="datetime64[D]")
+    return _HOLIDAYS_CACHE
+
+
+_BUSDAYCAL = None
+
+
+def nyse_busdaycal():
+    """Cached numpy business-day calendar with the NYSE holidays (building one per call is slow)."""
+    global _BUSDAYCAL
+    if _BUSDAYCAL is None:
+        import numpy as np
+        _BUSDAYCAL = np.busdaycalendar(holidays=_all_holidays())
+    return _BUSDAYCAL
+
+
 def _session_holidays(start: datetime.date, end: datetime.date) -> list:
     return _nyse_holidays(start - datetime.timedelta(days=7), end + datetime.timedelta(days=400))
 
@@ -120,14 +145,14 @@ def is_nyse_session(day: datetime.date) -> bool:
     """True when `day` is a regular NYSE session (weekday, not a standing-rule holiday)."""
     import numpy as np
 
-    return bool(np.is_busday(day, holidays=_nyse_holidays(day, day)))
+    return bool(np.is_busday(day, busdaycal=nyse_busdaycal()))
 
 
 def session_on_or_after(day: datetime.date) -> datetime.date:
     """The first NYSE session on or after `day`."""
     import numpy as np
 
-    out = np.busday_offset(day, 0, roll="forward", holidays=_session_holidays(day, day))
+    out = np.busday_offset(day, 0, roll="forward", busdaycal=nyse_busdaycal())
     return datetime.date.fromisoformat(str(out))
 
 
@@ -135,5 +160,5 @@ def add_sessions(day: datetime.date, n: int) -> datetime.date:
     """The NYSE session `n` sessions after `day` (n >= 0; `day` rolls forward to a session first)."""
     import numpy as np
 
-    out = np.busday_offset(day, n, roll="forward", holidays=_session_holidays(day, day + datetime.timedelta(days=2 * n + 10)))
+    out = np.busday_offset(day, n, roll="forward", busdaycal=nyse_busdaycal())
     return datetime.date.fromisoformat(str(out))

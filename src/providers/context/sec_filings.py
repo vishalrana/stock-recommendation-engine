@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import time
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -66,7 +67,10 @@ PIN_JUMP = 0.15
 PIN_VOL_RATIO = 0.15
 PIN_WINDOW_SESSIONS = 30
 
-_KEEP_FORMS = DEAL_FORMS | UNLOCK_FORMS | {"8-K"}
+# 6-K (foreign private issuers' current reports) is kept for the swing catalyst-gap sleeve.
+_KEEP_FORMS = DEAL_FORMS | UNLOCK_FORMS | {"8-K", "6-K"}
+CACHE_FORMAT = "v2-6k"   # bump when _KEEP_FORMS changes, so older cache files are refetched
+DECISION_CUTOFF_HOUR = 20  # a filing accepted after 20:00 ET belongs to the next session
 
 
 def base_form(form: str) -> str:
@@ -148,7 +152,66 @@ def earnings_events(filings: Iterable[Filing]) -> List[EarningsEvent]:
     return [events[k] for k in sorted(events)]
 
 
-def event_lock(filings: Iterable[Filing], as_of: date, rights_offering_days: Iterable[date] = ()) -> Optional[Dict[str, Any]]:
+@lru_cache(maxsize=None)
+def _next_session_after(d: date) -> date:
+    from src.utils.market_date import session_on_or_after
+    return session_on_or_after(d + timedelta(days=1))
+
+
+def effective_day(f: Filing) -> date:
+    """Session date a filing belongs to for decisions: accepted after 20:00 ET -> the next session."""
+    t = f.accepted
+    if (t.hour, t.minute, t.second) > (DECISION_CUTOFF_HOUR, 0, 0):
+        return _next_session_after(f.day)
+    return f.day
+
+
+def known_by(filings: Iterable[Filing], as_of: date) -> List[Filing]:
+    """Filings a decision at the close of `as_of` may use (accepted by 20:00 ET on as_of)."""
+    return [f for f in filings if effective_day(f) <= as_of]
+
+
+def lock_intervals(filings: Iterable[Filing], rights_offering_days: Iterable[date] = ()) -> List[Tuple[date, date]]:
+    """
+    Closed date intervals on which event_lock() is not None, using each filing's effective day.
+    Equivalent to calling event_lock(known_by(filings, d), d) for every d (tested), but O(filings).
+    """
+    deal: List[date] = []
+    unlock: List[date] = []
+    for f in filings:
+        d = effective_day(f)
+        if f.form in DEAL_FORMS:
+            deal.append(d)
+        elif f.form in UNLOCK_FORMS or (f.form == "8-K" and COMPLETION_ITEM in f.items):
+            unlock.append(d)
+    deal += list(rights_offering_days)
+    deal, unlock = sorted(set(deal)), sorted(set(unlock))
+    import bisect
+    spans: List[Tuple[date, date]] = []
+    for L in deal:
+        end = L + timedelta(days=LOCK_EXPIRY_DAYS)
+        j = bisect.bisect_left(unlock, L)           # first unlock on or after L ends the lock
+        if j < len(unlock):
+            end = min(end, unlock[j] - timedelta(days=1))
+        if end >= L:
+            spans.append((L, end))
+    out: List[Tuple[date, date]] = []
+    for a, b in sorted(spans):                       # union: a later deal filing extends the lock
+        if out and a <= out[-1][1] + timedelta(days=1):
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def in_intervals(intervals: Sequence[Tuple[date, date]], d: date) -> bool:
+    import bisect
+    i = bisect.bisect_right([a for a, _ in intervals], d) - 1
+    return i >= 0 and intervals[i][0] <= d <= intervals[i][1]
+
+
+def event_lock(filings: Iterable[Filing], as_of: date, rights_offering_days: Iterable[date] = (),
+               effective: bool = False) -> Optional[Dict[str, Any]]:
     """
     Lock state on `as_of` from filings accepted on or before that date. Returns None when not
     locked, else {"form", "since", "last_deal_filing"}.
@@ -156,12 +219,13 @@ def event_lock(filings: Iterable[Filing], as_of: date, rights_offering_days: Ite
     deal_days: List[Tuple[date, str]] = []
     unlock_days: List[date] = []
     for f in filings:
-        if f.day > as_of:
+        day = effective_day(f) if effective else f.day   # effective: the swing program's 20:00 ET cutoff
+        if day > as_of:
             continue
         if f.form in DEAL_FORMS:
-            deal_days.append((f.day, f.form))
+            deal_days.append((day, f.form))
         elif f.form in UNLOCK_FORMS or (f.form == "8-K" and COMPLETION_ITEM in f.items):
-            unlock_days.append(f.day)
+            unlock_days.append(day)
     deal_days += [(d, "rights offering") for d in rights_offering_days if d <= as_of]
     if not deal_days:
         return None
@@ -242,8 +306,9 @@ class SecFilingsProvider:
                     doc = json.load(f)
         except Exception:
             doc = {}
-        if doc.get("since", "9999") > self.since.isoformat() or "recent_rows" not in doc:
-            doc = {}  # older history needed, or a cache file in an earlier format
+        if (doc.get("since", "9999") > self.since.isoformat() or "recent_rows" not in doc
+                or doc.get("format") != CACHE_FORMAT):
+            doc = {}  # older history needed, or a cache file in an earlier format (e.g. without 6-K)
         if doc and self._fresh(doc):
             self.stats["cache_hits"] += 1
             return filings_from_rows(doc.get("recent_rows", []) + [r for rows in doc.get("pages", {}).values() for r in rows])
@@ -269,7 +334,7 @@ class SecFilingsProvider:
                 return None  # incomplete history: unavailable rather than silently partial
             pages[name] = compact_rows(parse_filings(older, self.since))
         self.stats["fetched"] += 1
-        new_doc = {"fetched_at": time.time(), "since": self.since.isoformat(), "name": data.get("name"),
+        new_doc = {"fetched_at": time.time(), "since": self.since.isoformat(), "format": CACHE_FORMAT, "name": data.get("name"),
                    "sic": data.get("sicDescription"), "recent_rows": compact_rows(recent), "pages": pages}
         try:
             tmp = path + ".tmp"

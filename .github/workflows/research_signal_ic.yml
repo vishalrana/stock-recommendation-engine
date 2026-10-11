@@ -5,6 +5,11 @@ name: Research - signal IC study
 # universe. Research only: nothing here changes production settings.
 
 on:
+  # A workflow only on a branch cannot be dispatched by hand, so a push of this file on the
+  # program branch also runs the full study (with pattern features).
+  push:
+    branches: [profitability-program]
+    paths: ['.github/workflows/research_signal_ic.yml']
   workflow_dispatch:
     inputs:
       limit:
@@ -30,7 +35,7 @@ jobs:
       PYTHONPATH: .
       SKIP_NLP: 'true'
       LIMIT_ARG: ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
-      PATTERNS_ARG: ${{ inputs.patterns == 'true' && '--patterns' || '' }}
+      PATTERNS_ARG: ${{ (github.event_name == 'push' || inputs.patterns == 'true') && '--patterns' || '' }}
 
     steps:
       - name: Checkout Code

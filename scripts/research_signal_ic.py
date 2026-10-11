@@ -161,10 +161,11 @@ def compute_features(close: pd.DataFrame, high: pd.DataFrame, volume: pd.DataFra
     return f
 
 
-def liquid_mask(close: pd.DataFrame, volume: pd.DataFrame) -> pd.DataFrame:
+def liquid_mask(close: pd.DataFrame, volume: pd.DataFrame, raw_close: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     adv = (close * volume).rolling(20, min_periods=20).mean()
     history = close.notna().cumsum()
-    return (close >= 5.0) & (adv >= 5e6) & (history >= 252)
+    px = raw_close if raw_close is not None else close
+    return (px >= 5.0) & (adv >= 5e6) & (history >= 252)
 
 
 def cross_rank(frame: pd.DataFrame, mask: pd.DataFrame) -> pd.DataFrame:

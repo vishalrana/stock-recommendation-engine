@@ -1,0 +1,153 @@
+{
+  "universes": {
+    "u2": {
+      "C6": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "MOM12_1": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "RESMOM": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "HI52": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "FIP": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "REV21": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "RVOL252": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "MAD": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      }
+    },
+    "u1": {
+      "C6": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "MOM12_1": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "RESMOM": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "HI52": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "FIP": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "REV21": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "RVOL252": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      },
+      "MAD": {
+        "months": 0,
+        "mean_ic": null,
+        "blocks_5y": {
+          "2008_2012": null,
+          "2013_2017": null,
+          "2018_2022": null
+        }
+      }
+    }
+  },
+  "P8_C6_U2_PASS": false
+}

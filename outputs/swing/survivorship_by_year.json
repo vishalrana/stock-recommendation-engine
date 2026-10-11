@@ -1,0 +1,125 @@
+{
+  "evaluation_window": "2008-01-01 to 2022-12-31",
+  "recycled_symbols_count": 2,
+  "recycled_symbols": [
+    {
+      "ticker": "AAPL",
+      "membership_start": "1996-01-02",
+      "first_bar": "2020-08-03",
+      "gap_days": 8980
+    },
+    {
+      "ticker": "NVDA",
+      "membership_start": "2001-11-30",
+      "first_bar": "2024-05-01",
+      "gap_days": 8188
+    }
+  ],
+  "by_year": {
+    "2008": {
+      "trading_sessions": 253,
+      "total_member_days": 125369,
+      "missing_member_days": 125369,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 506
+    },
+    "2009": {
+      "trading_sessions": 252,
+      "total_member_days": 125214,
+      "missing_member_days": 125214,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2010": {
+      "trading_sessions": 252,
+      "total_member_days": 125049,
+      "missing_member_days": 125049,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2011": {
+      "trading_sessions": 252,
+      "total_member_days": 124757,
+      "missing_member_days": 124757,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2012": {
+      "trading_sessions": 252,
+      "total_member_days": 124750,
+      "missing_member_days": 124750,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2013": {
+      "trading_sessions": 252,
+      "total_member_days": 124756,
+      "missing_member_days": 124756,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2014": {
+      "trading_sessions": 252,
+      "total_member_days": 125044,
+      "missing_member_days": 125044,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2015": {
+      "trading_sessions": 252,
+      "total_member_days": 125670,
+      "missing_member_days": 125670,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2016": {
+      "trading_sessions": 252,
+      "total_member_days": 126879,
+      "missing_member_days": 126879,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2017": {
+      "trading_sessions": 251,
+      "total_member_days": 126521,
+      "missing_member_days": 126521,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 502
+    },
+    "2018": {
+      "trading_sessions": 252,
+      "total_member_days": 126942,
+      "missing_member_days": 126942,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2019": {
+      "trading_sessions": 252,
+      "total_member_days": 126784,
+      "missing_member_days": 126784,
+      "missing_share_pct": 100.0,
+      "excluded_recycled_member_days": 504
+    },
+    "2020": {
+      "trading_sessions": 253,
+      "total_member_days": 127387,
+      "missing_member_days": 127281,
+      "missing_share_pct": 99.92,
+      "excluded_recycled_member_days": 400
+    },
+    "2021": {
+      "trading_sessions": 252,
+      "total_member_days": 127029,
+      "missing_member_days": 126777,
+      "missing_share_pct": 99.8,
+      "excluded_recycled_member_days": 252
+    },
+    "2022": {
+      "trading_sessions": 251,
+      "total_member_days": 126210,
+      "missing_member_days": 125959,
+      "missing_share_pct": 99.8,
+      "excluded_recycled_member_days": 251
+    }
+  }
+}

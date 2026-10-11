@@ -3,6 +3,25 @@
 import { revalidatePath } from 'next/cache';
 import { getSupabase } from '../lib/supabase';
 
+
+interface WorkflowRun {
+  id: number;
+  status: string;
+  conclusion: string | null;
+  html_url: string;
+  created_at: string;
+  head_branch?: string | null;
+}
+
+function errorMessage(e: unknown, fallback: string): string {
+  return e instanceof Error && e.message ? e.message : fallback;
+}
+
+function fetchFailure(e: unknown): string {
+  const err = e as { name?: string; message?: string } | null;
+  return err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+}
+
 // Module-level debounce timer for server action dispatch optimization
 let lastLocalDispatchTimestamp = 0;
 
@@ -17,7 +36,6 @@ export interface RemoveRecommendationParams {
 export async function removeRecommendationAction({
   ticker,
   id,
-  scanDate,
   reason,
   note,
 }: RemoveRecommendationParams) {
@@ -71,9 +89,9 @@ export async function removeRecommendationAction({
     revalidatePath('/');
 
     return { success: true, ticker: tickerClean };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Failed to remove recommendation:', error);
-    return { success: false, error: error.message || 'Failed to remove recommendation' };
+    return { success: false, error: errorMessage(error, 'Failed to remove recommendation') };
   }
 }
 
@@ -143,8 +161,8 @@ export async function fetchLiveQuotesAction(
           } else {
             diag.tiingo.failure = `http_${res.status}`;
           }
-        } catch (err: any) {
-          diag.tiingo.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+        } catch (err: unknown) {
+          diag.tiingo.failure = fetchFailure(err);
           console.warn(`[Live Quote] Tiingo error for ${symbol}: ${diag.tiingo.failure}`);
         }
       } else {
@@ -174,8 +192,8 @@ export async function fetchLiveQuotesAction(
           } else {
             diag.finnhub.failure = `http_${res.status}`;
           }
-        } catch (err: any) {
-          diag.finnhub.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+        } catch (err: unknown) {
+          diag.finnhub.failure = fetchFailure(err);
           console.warn(`[Live Quote] Finnhub error for ${symbol}: ${diag.finnhub.failure}`);
         }
       } else {
@@ -228,8 +246,8 @@ export async function fetchLiveQuotesAction(
           } else {
             diag.yahoo.failure = `http_${res.status}`;
           }
-        } catch (err: any) {
-          diag.yahoo.failure = err?.name === 'TimeoutError' ? 'timeout' : (err?.message || 'fetch_error');
+        } catch (err: unknown) {
+          diag.yahoo.failure = fetchFailure(err);
           console.warn(`[Live Quote] Yahoo error for ${symbol} via ${host}: ${diag.yahoo.failure}`);
         }
       }
@@ -289,7 +307,7 @@ export async function triggerRefreshCurrentIdeasAction(
         throw new Error(`Failed to query active recommendations: ${fetchErr.message}`);
       }
 
-      tickersToRefresh = (rows || []).map((r: any) => r.ticker).filter(Boolean);
+      tickersToRefresh = (rows || []).map((r: { ticker?: string | null }) => r.ticker).filter((t): t is string => Boolean(t));
     }
 
     // Strict validation and sanitization: only alphanumeric, dot, hyphen tickers
@@ -339,7 +357,7 @@ export async function triggerRefreshCurrentIdeasAction(
     }
 
     // Authoritative protection: query GitHub Actions for any existing queued or in_progress run (FAIL CLOSED)
-    let activeRunsData: any = null;
+    let activeRunsData: { workflow_runs?: WorkflowRun[] } | null = null;
     try {
       const activeRunsUrl = `https://api.github.com/repos/${repo}/actions/workflows/refresh_current_ideas.yml/runs?event=workflow_dispatch&per_page=5`;
       const activeRes = await fetch(activeRunsUrl, {
@@ -357,14 +375,14 @@ export async function triggerRefreshCurrentIdeasAction(
         };
       }
       activeRunsData = await activeRes.json();
-    } catch (checkErr) {
+    } catch {
       return {
         success: false,
         error: 'Unable to verify whether a refresh is already running. Please try again.',
       };
     }
 
-    const runs = (activeRunsData?.workflow_runs || []) as any[];
+    const runs = (activeRunsData?.workflow_runs || []) as WorkflowRun[];
     const existingRun = runs.find((r) => {
       const isMatchingBranch = !r.head_branch || r.head_branch === branch;
       const isActive = r.status === 'queued' || r.status === 'in_progress';
@@ -424,7 +442,7 @@ export async function triggerRefreshCurrentIdeasAction(
       });
       if (runsRes.status === 200) {
         const runsData = await runsRes.json();
-        const runs = (runsData?.workflow_runs || []) as any[];
+        const runs = (runsData?.workflow_runs || []) as WorkflowRun[];
         // STRICT CORRELATION: Run MUST have been created at or after dispatchedAt
         const matchingRun = runs.find((r) => {
           const runCreatedAt = new Date(r.created_at).getTime();
@@ -445,11 +463,11 @@ export async function triggerRefreshCurrentIdeasAction(
       tickers: sanitizedTickers,
       message: `Workflow dispatched for ${sanitizedTickers.join(', ')}`,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Failed to trigger refresh workflow:', error);
     return {
       success: false,
-      error: error?.message || 'Failed to trigger refresh workflow',
+      error: errorMessage(error, 'Failed to trigger refresh workflow'),
     };
   }
 }
@@ -478,7 +496,7 @@ export async function checkRefreshCurrentIdeasStatusAction(
       }`;
     const branch = process.env.GITHUB_BRANCH || 'main';
 
-    let targetRun: any = null;
+    let targetRun: WorkflowRun | null = null;
 
     if (runId) {
       const runUrl = `https://api.github.com/repos/${repo}/actions/runs/${runId}`;
@@ -512,13 +530,13 @@ export async function checkRefreshCurrentIdeasStatusAction(
       });
       if (res.status === 200) {
         const data = await res.json();
-        const runs = (data?.workflow_runs || []) as any[];
+        const runs = (data?.workflow_runs || []) as WorkflowRun[];
         targetRun = runs.find((r) => {
           const runCreatedAt = new Date(r.created_at).getTime();
           const matchTime = !dispatchedAt || runCreatedAt >= dispatchedAt;
           const matchBranch = !r.head_branch || r.head_branch === branch;
           return matchTime && matchBranch;
-        });
+        }) ?? null;
       }
     }
 
@@ -537,9 +555,9 @@ export async function checkRefreshCurrentIdeasStatusAction(
       runId: targetRun.id,
       runUrl: targetRun.html_url,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error checking workflow status:', error);
-    return { status: 'unknown', conclusion: null, error: error?.message };
+    return { status: 'unknown', conclusion: null, error: errorMessage(error, 'unknown error') };
   }
 }
 

@@ -180,8 +180,9 @@ export interface SwingSignalRecord {
     why_exit?: {
       summary: string;
     };
-    [key: string]: any;
+    [key: string]: unknown;
   };
+  mode?: 'LIVE' | 'LIVE-SP500' | 'SHADOW' | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -196,4 +197,22 @@ export interface SwingSleeveStatus {
   kill_status?: string;
   reasons?: string[];
   last_evaluated_at?: string;
+  research_run_id?: string | null;
+  details?: {
+    u2?: SleeveHoldoutStats | null;
+    u1?: SleeveHoldoutStats | null;
+    last_session?: string | null;   // latest session the nightly swing job evaluated
+    stale?: boolean | null;
+  } | null;
+}
+
+// Holdout (2008-01..2022-09) results of the GitHub research run recorded in config/swing_sleeves.json
+export interface SleeveHoldoutStats {
+  n_signals?: number | null;
+  mean_beta_adj_pct?: number | null;
+  ci95_beta_adj?: [number | null, number | null] | null;
+  placebo_percentile?: number | null;
+  paired_placebo_diff?: number | null;
+  paired_placebo_ci?: [number, number] | null;
+  break_even_bps_per_side?: number | null;
 }

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { ScanHistoryEntry } from '../types/database';
-import { Calendar, ChevronDown, ChevronUp, Sparkles, Filter, CheckCircle, ShieldAlert } from 'lucide-react';
+import { Calendar, ChevronDown, ChevronUp, Sparkles, Filter } from 'lucide-react';
 
 interface ScanHistoryViewProps {
   scanHistory: ScanHistoryEntry[];

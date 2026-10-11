@@ -40,8 +40,8 @@ export default function RemoveIdeaModal({
       if (!res.success) {
         setErrorMessage(res.error || 'Failed to remove recommendation.');
       }
-    } catch (err: any) {
-      setErrorMessage(err.message || 'An unexpected error occurred.');
+    } catch (err: unknown) {
+      setErrorMessage((err instanceof Error && err.message) || 'An unexpected error occurred.');
     } finally {
       setIsSubmitting(false);
     }

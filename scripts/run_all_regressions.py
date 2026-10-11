@@ -56,6 +56,7 @@ TEST_SUITES = [
     "scripts/test_research_program.py",
     "scripts/test_trade_hygiene.py",
     "tests/test_swing_phase1.py",
+    "tests/test_swing_engine.py",
 ]
 
 

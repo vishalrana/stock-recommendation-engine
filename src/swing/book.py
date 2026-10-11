@@ -22,6 +22,8 @@ from src.swing.exits import SwingTrade
 from src.swing.rules import SLEEVE_PRIORITY, SwingSignal
 from src.trade_hygiene import SessionCalendar
 
+SLEEVES = list(SLEEVE_PRIORITY)
+
 
 class SwingBook:
     """Simulates book lifecycle for standalone sleeve or combined sleeves."""

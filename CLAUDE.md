@@ -627,3 +627,59 @@ Trial list (record every run in outputs/research_trials.jsonl with phase "swing"
   - live K3, K12 and KDD checks, and L1 and D1 evaluations, as they occur.
 
 Registry location: `outputs/research_trials.jsonl`
+
+### Swing signals program: Decisions and Operations
+
+#### Holdout Evaluation Outcomes & Decisions
+Evaluated on the unseen 2008-01..2022-09 holdout period across point-in-time U2 (historical S&P 500) and broad U1:
+- **Sleeve T (Trend Following):**
+  - U1 mean beta-adjusted return: -0.2443%/trade (CI [-0.98, +0.48]).
+  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
+- **Sleeve E (Earnings Reaction):**
+  - U1 mean beta-adjusted return: -0.1309%/trade (CI [-0.85, +0.59]).
+  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
+- **Sleeve N (Catalyst Gap):**
+  - U1 mean beta-adjusted return: -2.3537%/trade.
+  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
+- **Sleeve P (Large-Cap Pullback):**
+  - U1 mean beta-adjusted return: -0.1444%/trade (CI [-0.72, +0.43]).
+  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
+- **Sleeve I (Insider Cluster Buying):**
+  - U1 mean beta-adjusted return: -0.2643%/trade (CI [-1.02, +0.49]).
+  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
+
+#### Current Status
+- **All 5 sleeves (T, E, N, P, I) are in SHADOW mode.** No live orders are recommended or placed.
+- The UI Signals tab displays shadow candidates in a collapsed drawer clearly marked: *"Not validated - do not trade"*.
+- The live daily engine runs nightly via GitHub Actions, tracks forward performance, updates the immutable audit ledger, and logs live records against kill rules (K3, K12, KDD).
+
+#### Operations
+- **Nightly GitHub Actions Workflow:** `.github/workflows/swing_signals.yml` (Mon-Fri 21:30 UTC / 03:00 IST).
+- **Forward-Only Ledger:** Daily events logged to `ledger/YYYY-MM-DD.jsonl` and committed to orphan audit branch `signals-ledger`.
+- **Supported Optional Secrets:**
+  - `APPRISE_URLS`: Comma-separated notification endpoints (e.g., Telegram, Discord, Slack) for nightly SELL/BUY/WARN alerts.
+  - `GROQ_API_KEY`: Fast free-tier LLM classification for news items.
+  - `GEMINI_API_KEY`: Fallback free-tier LLM classification.
+  - `FINNHUB_API_KEY`: Real-time news and analyst recommendation trend archive.
+  - `FMP_API_KEY`: Secondary analyst snapshot provider.
+  - If any secret is missing, the engine degrades gracefully to neutral/unavailable without breaking.
+
+#### Known Limitations
+- **Survivorship by Year:** S&P 500 historical constituents are reconstructed from end-of-year snapshots; stocks added and removed within the same calendar year are omitted.
+- **Earnings Dates:** Historical earnings dates from 8-K item 2.02 filings are treated as known up to 5 sessions ahead for blackout enforcement; in live trading, companies typically pre-announce report dates 2-4 weeks ahead.
+- **Insider Filing Timing:** Form 4 transactions are filed up to 2 business days after execution; execution timing is pinned to session $t$ strictly after filing date $D$.
+- **FINRA Short Interest Revisions:** Historical FINRA files reflect revisions that overwrite earlier publications.
+- **Adjusted vs Actual Prices:** Split adjustments are back-propagated; actual historical penny execution limits are enforced via `unadjusted_close >= $5.00`.
+- **LLM Labels:** LLM news classification is forward-only; backtest classification is strictly blocked to prevent lookahead bias.
+
+#### Credits and Licenses
+- RyanJHamby (MIT License): SEC Form 4 and Form 8-K extraction conventions.
+- xang1234 (Apache-2.0 License): Point-in-time corporate action handling.
+- tradermonty (MIT License): S&P 500 historical constituent mapping.
+- PKScreener (MIT License): Indicator pipeline architecture.
+- freqtrade: Lookahead analysis and truncation testing design.
+- Jesse (MIT License): Event replay architecture.
+- neurotrader888 (MIT License): Statistical testing and deflated Sharpe ratio implementation.
+- fja05680 (MIT License): Historical S&P 500 constituents reference dataset (`data/reference/sp500_ticker_start_end.csv`).
+- Apprise (BSD-2-Clause License): Alert dispatcher and notification multi-channel formatting.
+- Strict license policy: No GPL/AGPL code (pysystemtrade, backtesting.py, OpenBB) or unlicensed code.

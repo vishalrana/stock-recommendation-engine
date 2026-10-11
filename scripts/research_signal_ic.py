@@ -332,7 +332,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--patterns", action="store_true", help="Also evaluate the Phase 5 pattern features (R4)")
     ap.add_argument("--no-alphalens", action="store_true")
-    ap.add_argument("--no-trials", action="store_true", help="Do not write the trials registry (re-runs for artifacts)")
+    ap.add_argument("--no-trials", action="store_true", help="Do not record the signal trials again (re-runs for artifacts or Phase 7)")
+    ap.add_argument("--ml", action="store_true", help="Phase 7: LightGBM ranker study (R5)")
+    ap.add_argument("--no-ml-trial", action="store_true", help="Do not record the ML trial (local code checks)")
     args = ap.parse_args()
     t0 = time.time()
     close, high, low, volume, spy, etf_close, sectors = load_panel(args.universe, args.limit)
@@ -415,6 +417,22 @@ def main() -> int:
             r4[name] = s
         result["r4_incremental_ic"] = r4
 
+    if args.ml:
+        dates = month_ends(close.index, EVAL_START, close.index[-DECISION_HORIZON - 1])
+        result["r5_ml_ranker"] = ml_ranker_study(feats, tgt[DECISION_HORIZON], mask, dates,
+                                                 ics_by_feat["C6"][DECISION_HORIZON])
+        logger.info("R5 LightGBM ranker: %s", {k: result["r5_ml_ranker"][k] for k in ("oos", "r5_decision")})
+        from src.research.trials import record_trial
+        r5 = result["r5_ml_ranker"]
+        record = (lambda **k: None) if args.no_ml_trial else record_trial
+        record(name="lightgbm_ranker", phase="phase7",
+                     params={"horizon": DECISION_HORIZON, "universe": args.universe, "limit": args.limit,
+                             "n_estimators": 200, "num_leaves": 15, "purge_months": 1, "min_train_months": 12},
+                     n_ideas=r5["oos_months"], mean_beta_adj=None, ci=r5["ml_minus_c6"]["full"].get("ci95"),
+                     late_mean=None, series_path="outputs/research/signal_ic_summary.json", smoke=bool(args.limit),
+                     extra={"metric": "OOS monthly rank IC minus C6", "r5_decision": r5["r5_decision"],
+                            "ml_minus_c6": r5["ml_minus_c6"]})
+
     # Trials registry (one record per adoptable signal; IC in place of beta-adjusted return)
     from src.research.trials import record_trial
     for name, e in ([] if args.no_trials else result["signals"].items()):
@@ -440,6 +458,52 @@ def main() -> int:
         except Exception as e:  # research extra: never fails the study
             logger.warning("alphalens tear sheets skipped: %s", e)
     return 0
+
+
+def ml_ranker_study(feats: Dict[str, pd.DataFrame], target: pd.DataFrame, mask: pd.DataFrame,
+                    dates: List[pd.Timestamp], c6_ics: Dict[str, float], min_train: int = 12) -> Dict[str, Any]:
+    """
+    Phase 7 (R5): LightGBM regression on cross-sectional feature ranks, purged walk-forward. For test
+    month i the model trains on months <= i-2 (the month before is purged: its 20-session targets
+    overlap the test month). Out-of-sample monthly rank IC is compared with C6's on the same months.
+    """
+    import lightgbm as lgb
+    names = [n for n in feats if n != "C6"]
+    X_by, y_by = {}, {}
+    for d in dates:
+        m = mask.loc[d] & target.loc[d].notna()
+        if m.sum() < MIN_NAMES:
+            continue
+        X = pd.DataFrame({n: feats[n].loc[d][m].rank(pct=True) for n in names}).fillna(0.5)
+        X_by[d], y_by[d] = X, target.loc[d][m].rank(pct=True)
+    usable = sorted(X_by)
+    oos: Dict[str, float] = {}
+    for i, d in enumerate(usable):
+        train = usable[: max(0, i - 1)]
+        if len(train) < min_train:
+            continue
+        Xt = pd.concat([X_by[t] for t in train])
+        yt = pd.concat([y_by[t] for t in train])
+        model = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=15, min_child_samples=200,
+                                  subsample=0.8, subsample_freq=1, colsample_bytree=0.8, random_state=7, verbose=-1)
+        model.fit(Xt.to_numpy(), yt.to_numpy())
+        pred = model.predict(X_by[d].to_numpy())
+        v = spearman(pred, y_by[d].to_numpy())
+        if v is not None:
+            oos[d.date().isoformat()] = v
+    common = sorted(set(oos) & set(c6_ics))
+    half = len(common) // 2
+    def pdiff(ms):
+        return paired_monthly_diff({m: oos[m] for m in ms}, {m: c6_ics[m] for m in ms})
+    full, first, second = pdiff(common), pdiff(common[:half]), pdiff(common[half:])
+    late = pdiff([m for m in common if m >= LATE_FROM])
+    ok = all(x.get("ci95") is not None for x in (full, first, second, late))
+    adopt = bool(ok and full["ci95"][0] > 0 and first["diff"] > 0 and second["diff"] > 0 and late["diff"] > 0)
+    return {"features": names, "oos_months": len(oos), "oos": summarize_ic(oos),
+            "c6_same_months": summarize_ic({m: c6_ics[m] for m in common}),
+            "ml_minus_c6": {"full": full, "first_half": first, "second_half": second, "late": late},
+            "r5_decision": "ADOPT" if adopt else "KILL",
+            "r5_rule": "adopt only if the paired OOS IC diff vs C6 has a CI above zero, and is positive in both halves and LATE"}
 
 
 def alphalens_sheets(close: pd.DataFrame, feats: Dict[str, pd.DataFrame], mask: pd.DataFrame) -> None:

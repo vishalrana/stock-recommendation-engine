@@ -2,7 +2,7 @@ name: Research - signal IC study
 
 # Profitability program, Phases 3 and 5 (rules R3 and R4 in CLAUDE.md): monthly rank IC of the
 # pre-registered signals (and, with patterns=true, the pattern features) on the production
-# universe. Research only: nothing here changes production settings (run 2).
+# universe. Research only: nothing here changes production settings (run 3: Phase 7).
 
 on:
   # A workflow only on a branch cannot be dispatched by hand, so a push of this file on the
@@ -36,6 +36,8 @@ jobs:
       SKIP_NLP: 'true'
       LIMIT_ARG: ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
       PATTERNS_ARG: ${{ (github.event_name == 'push' || inputs.patterns == 'true') && '--patterns' || '' }}
+      # Pushes after the Phase 3 decision run the Phase 7 ML study (R5) without re-recording signal trials
+      ML_ARG: ${{ github.event_name == 'push' && '--ml --no-trials' || '' }}
 
     steps:
       - name: Checkout Code
@@ -66,7 +68,7 @@ jobs:
             ${{ runner.os }}-backtest-history-
 
       - name: Signal IC study
-        run: python scripts/research_signal_ic.py --universe production $LIMIT_ARG $PATTERNS_ARG
+        run: python scripts/research_signal_ic.py --universe production $LIMIT_ARG $PATTERNS_ARG $ML_ARG
 
       - name: Upload results
         if: always()

@@ -337,5 +337,60 @@ class TestSurvivorshipGauge(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(PROJECT_ROOT, "data", "reference", "sp500_LICENSE.txt")))
 
 
+def _bars(rows, atr=1.0):
+    idx = pd.bdate_range("2025-01-02", periods=len(rows))
+    f = pd.DataFrame(rows, index=idx, columns=["OPEN", "HIGH", "LOW", "CLOSE"])
+    f["ATR_14"] = atr
+    return f
+
+
+class TestPhase4Exits(unittest.TestCase):
+    def test_trail_after_t1(self):
+        from scripts.validate_backtest_pipeline import trail_after_t1_outcome
+        base = [(100, 100, 100, 100)]                     # signal bar (loc 0)
+        f = _bars(base + [(100, 103, 99, 102), (102, 106, 101, 105), (105, 108, 104, 107), (106, 106, 103, 103)])
+        r = trail_after_t1_outcome(f, 0, 100.0, 95.0, 105.0, 110.0, None, 20)
+        self.assertEqual((r["exit_reason"], r["outcome"], r["holding_days"]), ("stop", "hit_t1", 4))
+        self.assertAlmostEqual(r["realized_return_pct"], 0.6 * 5 + 0.4 * 4)   # trail 107 - 3 = 104
+        # STOP_FIRST: the T1 bar also reaches the breakeven stop
+        f = _bars(base + [(100, 103, 99, 102), (102, 106, 99.5, 105)])
+        r = trail_after_t1_outcome(f, 0, 100.0, 95.0, 105.0, 110.0, None, 20)
+        self.assertAlmostEqual(r["realized_return_pct"], 0.6 * 5)
+        # Before T1 the strategy's holding period applies
+        f = _bars(base + [(100, 101.5, 99, 101), (101, 102.5, 100, 102), (102, 102.5, 100.5, 101)])
+        r = trail_after_t1_outcome(f, 0, 100.0, 95.0, 105.0, None, None, 3)
+        self.assertEqual((r["exit_reason"], r["holding_days"]), ("expiry", 3))
+        self.assertAlmostEqual(r["realized_return_pct"], 1.0)
+        # After T1 the 40-session limit applies (steady rise, trail never hit)
+        rows = base + [(100, 106, 100.5, 105)] + [(105 + k, 106 + k, 104.5 + k, 106 + k) for k in range(45)]
+        r = trail_after_t1_outcome(_bars(rows), 0, 100.0, 95.0, 105.0, None, None, 20)
+        self.assertEqual((r["exit_reason"], r["holding_days"]), ("expiry", 40))
+        self.assertIsNone(trail_after_t1_outcome(_bars(base + [(100, 101, 99, 100)] * 3), 0, 100.0, 95.0, 105.0, None, None, 20))
+
+    def test_momentum_rank_book_exits(self):
+        from scripts.validate_backtest_pipeline import momentum_rank_book
+        n = 320
+        idx = pd.bdate_range("2024-01-01", periods=n)
+        c = 50 * np.exp(np.linspace(0, 0.6, n))
+        f = pd.DataFrame({"OPEN": c, "HIGH": c * 1.005, "LOW": c * 0.995, "CLOSE": c, "VOLUME": 1e6, "ATR_14": c * 0.01}, index=idx)
+        pct = pd.DataFrame({"AAA": 0.95}, index=idx)
+        pct.iloc[260:, 0] = 0.5                             # falls below the 70th percentile
+        trades, censored, funnel = momentum_rank_book({"AAA": f}, pct, list(idx[230:]), {}, None)
+        self.assertGreaterEqual(len(trades), 1)
+        first = trades[0]
+        self.assertEqual(first["exit_reason"], "rank_exit")
+        self.assertLessEqual(first["holding_days"], 60)
+        # 60-session limit when the rank stays high
+        trades, _, _ = momentum_rank_book({"AAA": f}, pd.DataFrame({"AAA": 0.95}, index=idx), list(idx[225:]), {}, None)
+        self.assertEqual(trades[0]["exit_reason"], "expiry")
+        self.assertEqual(trades[0]["holding_days"], 60)
+        # A gap below the 3 x ATR stop exits at the open
+        g = f.copy()
+        g.iloc[240:, :4] = g.iloc[240:, :4].to_numpy() * 0.9
+        trades, _, _ = momentum_rank_book({"AAA": g}, pd.DataFrame({"AAA": 0.95}, index=idx), list(idx[230:]), {}, None)
+        self.assertEqual(trades[0]["exit_reason"], "stop")
+        self.assertAlmostEqual(trades[0]["exit_price"], round(float(g["OPEN"].iat[240]), 4))
+
+
 if __name__ == "__main__":
     unittest.main()

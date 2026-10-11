@@ -1,639 +1,325 @@
 """
-Swing Signals Research Harness (Phases 2 & 3)
-==============================================
-Executes replication studies, sleeve backtests, 200 random-stock placebo runs,
-and pre-registered keep/kill decisions for the Swing Signals Program:
-- Stage 'replication': Signal and pattern replication on holdout (2008-01..2022-09).
-- Stage 'sleeves': Backtest sleeves T, E, N, P, I on U1 and U2 with 200 placebos and P1-P8 evaluation.
-- Stage 'overlays': Rule O overlay evaluations (G1, V1, X1) on qualifying LIVE sleeves.
-- Stage 'all': Runs replication -> sleeves -> overlays sequentially.
+Swing signals research harness (pre-registered, CLAUDE.md "Swing signals program")
+==================================================================================
+Holdout: signals with t from 2008-01-02 to 2022-09-30 (exits may run later on real data).
+All sleeve inputs come from src/swing/engine.py, the same code the nightly job runs.
 
-Outputs:
-- outputs/swing/replication.json
-- outputs/swing/decisions.json
-- config/swing_sleeves.json
-- Appends every trial to outputs/research_trials.jsonl with phase "swing".
+Stages (run as separate GitHub Actions jobs; see .github/workflows/swing_research.yml):
+  replication   monthly IC (20-session beta-adjusted target) of C6, MOM12_1, RESMOM, HI52, -FIP,
+                -REV21, -RVOL252 and MAD in U1 and U2, NW t, three five-year blocks; U2 member-days
+                without a bar, by year
+  patterns      incremental IC of every PATTERN_FEATURES feature (residualized on MOM12_1, HI52)
+  sleeve        one sleeve (--sleeve) in U2 and U1: standalone book with G0, exits, 200-run placebo,
+                P-rule inputs, cost scenarios, five-year blocks, report-only analyses
+  decide        Holm over the five sleeves, P1-P8 -> LIVE / LIVE-SP500 / SHADOW;
+                writes outputs/swing/decisions.json and config/swing_sleeves.json
+Only a full run on GitHub Actions (GITHUB_RUN_ID set, no --limit) may write config/swing_sleeves.json;
+every output records the run id, git sha and whether it was a smoke run.
 """
 
 import argparse
-from collections import defaultdict
-import glob
 import json
 import logging
 import os
 import sys
 import time
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from collections import defaultdict
+from datetime import date
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
+os.environ.setdefault("SKIP_NLP", "true")
 
-from scripts.research_signal_ic import (
-    ADOPTABLE,
-    REPORT_ONLY,
-    SECTOR_TO_ETF,
-    compute_features,
-    composite_c6,
-    ic_series,
-    liquid_mask,
-    month_ends,
-    residualize,
-    spearman,
-    summarize_ic,
-    targets,
+from src.research.stats import holm  # noqa: E402
+from src.research.trials import git_sha, record_trial  # noqa: E402
+from src.swing.engine import SwingPlacebo, build_context, run_book  # noqa: E402
+from src.swing.evaluate import (  # noqa: E402
+    decide_sleeve_status, evaluate_sleeve_trades, monte_carlo_trade_shuffle,
 )
-from src.indicators import calculate_rsi
-from src.patterns import PATTERN_FEATURES, wilder_atr
-from src.research.costs import BASE_COST_PCT_PER_SIDE, cost_scenarios, rolling_half_spread_pct
-from src.research.placebo import PlaceboEngine, stable_seed
-from src.research.stats import holm, newey_west_t, percentile_of
-from src.research.survivorship import load_membership, yahoo_symbol
-from src.research.trials import record_trial
-from src.swing.book import SwingBook
-from src.swing.evaluate import (
-    block_bootstrap_ci_10k,
-    decide_sleeve_status,
-    evaluate_five_year_blocks,
-    evaluate_sleeve_trades,
-    monte_carlo_trade_shuffle,
-    paired_block_diff_10k,
-)
-from src.swing.events import (
-    detect_insider_clusters_on_date,
-    is_event_locked,
-    is_routine_purchase,
-)
-from src.swing.exits import SwingTrade, simulate_swing_trade
-from src.swing.rules import (
-    SLEEVES,
-    SLEEVE_PRIORITY,
-    SwingSignal,
-    check_g0,
-    compute_ear_and_avol,
-    generate_sleeve_e_signal,
-    generate_sleeve_i_signal,
-    generate_sleeve_n_signal,
-    generate_sleeve_p_signal,
-    generate_sleeve_t_signal,
-)
-from src.swing.universe import (
-    check_liquid,
-    compute_breadth,
-    get_u1_universe,
-    get_u2_members_on_date,
-    select_u1_top500,
-)
-from src.trade_hygiene import SessionCalendar
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("research_swing")
 
-DATA_DIR_LONG = os.path.join(PROJECT_ROOT, "data", "backtest_history_long")
-DATA_DIR_5Y = os.path.join(PROJECT_ROOT, "data", "backtest_history")
 OUT_DIR = os.path.join(PROJECT_ROOT, "outputs", "swing")
-CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
-HOLDOUT_START = "2008-01-02"
-HOLDOUT_END = "2022-09-30"
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "swing_sleeves.json")
+HOLDOUT = (date(2008, 1, 2), date(2022, 9, 30))
+RECENT = (date(2022, 10, 1), date(2026, 10, 9))
+PANEL_WINDOW = ("2005-10-01", None)            # features need ~525 sessions before the holdout starts
+SLEEVES = ("T", "E", "N", "P", "I")
 
 
-def load_price_data(limit: Optional[int] = None) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, Dict[str, pd.Series]]:
-    """
-    Load parquet daily price frames.
-    Prefers data/backtest_history_long, falls back to data/backtest_history.
-    Returns (stock_frames, spy_frame, sector_etfs).
-    """
-    files_long = glob.glob(os.path.join(DATA_DIR_LONG, "*.parquet"))
-    files_5y = glob.glob(os.path.join(DATA_DIR_5Y, "*.parquet"))
-
-    chosen_files: Dict[str, str] = {}
-    # Prefer long history
-    for f in files_long:
-        ticker = os.path.splitext(os.path.basename(f))[0]
-        chosen_files[ticker] = f
-    # Fill remaining from 5y
-    for f in files_5y:
-        ticker = os.path.splitext(os.path.basename(f))[0]
-        if ticker not in chosen_files and not ticker.startswith("_"):
-            chosen_files[ticker] = f
-
-    if "SPY" not in chosen_files:
-        logger.warning("SPY.parquet not found in local cache! Attempting download of SPY...")
-        try:
-            import yfinance as yf
-            spy_raw = yf.download("SPY", start="2004-01-01", auto_adjust=False, actions=True)
-            if isinstance(spy_raw.columns, pd.MultiIndex):
-                spy_raw = spy_raw.copy()
-                spy_raw.columns = spy_raw.columns.get_level_values(0)
-            from scripts.build_long_history import process_ticker_frame
-            spy_df = process_ticker_frame(spy_raw)
-            if spy_df is not None:
-                os.makedirs(DATA_DIR_LONG, exist_ok=True)
-                spy_path = os.path.join(DATA_DIR_LONG, "SPY.parquet")
-                spy_df.to_parquet(spy_path)
-                chosen_files["SPY"] = spy_path
-        except Exception as e:
-            logger.error(f"Failed to fetch SPY: {e}")
-
-    spy_path = chosen_files.get("SPY")
-    if not spy_path or not os.path.exists(spy_path):
-        raise FileNotFoundError("SPY price history is required for swing research.")
-
-    spy_df = pd.read_parquet(spy_path)
-    spy_df.index = pd.to_datetime(spy_df.index)
-    if "TR_OPEN" not in spy_df.columns:
-        spy_df["TR_OPEN"] = spy_df["OPEN"]
-        spy_df["TR_CLOSE"] = spy_df["CLOSE"]
-
-    stock_frames: Dict[str, pd.DataFrame] = {}
-    sector_etfs: Dict[str, pd.Series] = {}
-
-    all_sector_symbols = set(SECTOR_TO_ETF.values()) | {"SPY"}
-    tickers_to_load = sorted(chosen_files.keys())
-    if limit is not None and limit > 0:
-        # Keep SPY, sector ETFs, and up to limit tickers
-        keep = set(all_sector_symbols)
-        other_tickers = [t for t in tickers_to_load if t not in keep][:limit]
-        tickers_to_load = sorted(keep | set(other_tickers))
-
-    logger.info(f"Loading {len(tickers_to_load)} price frames...")
-    for t in tickers_to_load:
-        path = chosen_files[t]
-        try:
-            df = pd.read_parquet(path)
-            df.index = pd.to_datetime(df.index)
-            # Ensure TR_ columns exist
-            if "TR_CLOSE" not in df.columns:
-                df["TR_CLOSE"] = df["CLOSE"]
-                df["TR_OPEN"] = df["OPEN"]
-                df["TR_HIGH"] = df["HIGH"]
-                df["TR_LOW"] = df["LOW"]
-                df["UNADJ_CLOSE"] = df["CLOSE"]
-
-            # Calculate indicators if missing
-            close_vals = df["TR_CLOSE"].to_numpy(dtype=float)
-            high_vals = df["TR_HIGH"].to_numpy(dtype=float)
-            low_vals = df["TR_LOW"].to_numpy(dtype=float)
-
-            if "ATR_14" not in df.columns:
-                df["ATR_14"] = wilder_atr(high_vals, low_vals, close_vals, 14)
-            if "SMA5" not in df.columns:
-                df["SMA5"] = df["TR_CLOSE"].rolling(5, min_periods=5).mean()
-            if "MA200" not in df.columns:
-                df["MA200"] = df["TR_CLOSE"].rolling(200, min_periods=200).mean()
-            if "RSI2" not in df.columns:
-                df["RSI2"] = calculate_rsi(df["TR_CLOSE"], 2)
-
-            stock_frames[t] = df
-            if t in all_sector_symbols:
-                sector_etfs[t] = df["TR_CLOSE"]
-        except Exception as e:
-            logger.warning(f"Error loading {t}: {e}")
-
-    logger.info(f"Successfully loaded {len(stock_frames)} tickers.")
-    return stock_frames, spy_df, sector_etfs
+def provenance(smoke: bool) -> Dict[str, Any]:
+    return {"github_run_id": os.environ.get("GITHUB_RUN_ID"), "git_sha": git_sha(), "smoke": bool(smoke),
+            "generated_at": pd.Timestamp.now(tz="UTC").isoformat(), "holdout": [HOLDOUT[0].isoformat(), HOLDOUT[1].isoformat()]}
 
 
-# ----------------------------------------------------------------------------
-# Stage 1: Replication
-# ----------------------------------------------------------------------------
-def run_replication(
-    stock_frames: Dict[str, pd.DataFrame],
-    spy_df: pd.DataFrame,
-    sector_etfs: Dict[str, pd.Series],
-    universes: List[str],
-    smoke: bool = False,
-) -> Dict[str, Any]:
-    """
-    Run Signal and Pattern replication on holdout (2008-01-02..2022-09-30):
-    - C6, MOM12_1, RESMOM, HI52, -FIP, -REV21, -RVOL252, MAD
-    - Pattern incremental ICs
-    - P8 evaluation for T
-    """
-    logger.info("Starting Stage 1: Signal and Pattern Replication...")
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    # Build aligned wide frames
-    tickers = sorted([t for t in stock_frames if t != "SPY" and t not in sector_etfs])
-    if not tickers:
-        tickers = sorted(stock_frames.keys())
-
-    all_dates = spy_df.loc[HOLDOUT_START:HOLDOUT_END].index
-    if len(all_dates) == 0:
-        all_dates = spy_df.index
-
-    close_wide = pd.DataFrame(index=all_dates)
-    high_wide = pd.DataFrame(index=all_dates)
-    volume_wide = pd.DataFrame(index=all_dates)
-    raw_close_wide = pd.DataFrame(index=all_dates)
-
-    for t in tickers:
-        df = stock_frames[t]
-        c = df["TR_CLOSE"].reindex(all_dates)
-        h = df["TR_HIGH"].reindex(all_dates)
-        v = df["VOLUME"].reindex(all_dates)
-        uc = df["UNADJ_CLOSE"].reindex(all_dates) if "UNADJ_CLOSE" in df.columns else c
-        close_wide[t] = c
-        high_wide[t] = h
-        volume_wide[t] = v
-        raw_close_wide[t] = uc
-
-    spy_c = spy_df["TR_CLOSE"].reindex(all_dates)
-    etf_close = pd.DataFrame({k: v.reindex(all_dates) for k, v in sector_etfs.items()})
-
-    # Sector mapping
-    sector_mapping = {t: "XLK" for t in tickers}  # Default fallback
-
-    logger.info("Computing cross-sectional features...")
-    feats = compute_features(
-        close_wide, high_wide, volume_wide, spy_c, etf_close, sector_mapping, with_resmom=True
-    )
-    # MAD = MA21 / MA200
-    ma21 = close_wide.rolling(21, min_periods=21).mean()
-    ma200 = close_wide.rolling(200, min_periods=200).mean()
-    feats["MAD"] = ma21 / ma200
-
-    # Mask
-    liq_mask = liquid_mask(close_wide, volume_wide, raw_close=raw_close_wide)
-    feats["C6"] = composite_c6(feats, liq_mask)
-
-    # Targets (20-session forward log return minus beta * SPY)
-    cov = close_wide.pct_change(fill_method=None).rolling(252, min_periods=120).cov(spy_c.pct_change(fill_method=None))
-    beta_wide = cov.div(spy_c.pct_change(fill_method=None).rolling(252, min_periods=120).var(), axis=0)
-    target_20 = targets(close_wide, spy_c, beta_wide, 20)
-
-    # Monthly dates
-    m_ends = month_ends(all_dates, all_dates[0].strftime("%Y-%m-%d"), all_dates[-1])
-    logger.info(f"Replication evaluating {len(m_ends)} month-ends...")
-
-    # Vectorized U2 membership mask precomputation
+def load_all(limit: Optional[int], need_filings: bool = True, need_insider: bool = False):
+    from scripts.research_signal_ic import SECTOR_TO_ETF
+    from scripts.validate_backtest_pipeline import production_universe
+    from src.research.survivorship import load_membership
+    from src.swing.data import CikResolver, load_filings, load_insider, load_price_frames, sector_map
+    frames = load_price_frames()
+    if "SPY" not in frames:
+        raise SystemExit("SPY long history missing: run scripts/build_long_history.py first.")
+    spy = frames.pop("SPY")
+    etfs = sorted(set(SECTOR_TO_ETF.values()))
+    etf_close = pd.DataFrame({e: frames[e]["TR_CLOSE"] for e in etfs if e in frames})
+    for e in etfs:
+        frames.pop(e, None)
+    u1, _ = production_universe()
     membership = load_membership()
-    u2_mask = pd.DataFrame(False, index=all_dates, columns=tickers)
-    for row in membership.itertuples(index=False):
-        t = row.ticker
-        if t in u2_mask.columns:
-            start = row.start_date
-            end = row.end_date if pd.notna(row.end_date) else pd.Timestamp.max
-            in_window = (all_dates >= start) & (all_dates <= end)
-            u2_mask.loc[in_window, t] = True
+    if limit:
+        keep = sorted(frames)[:limit]
+        frames = {t: frames[t] for t in keep}
+    resolver = CikResolver()
+    filings, rights, sec_stats = (load_filings(frames, resolver) if need_filings else ({}, {}, {}))
+    insider = load_insider(frames, resolver) if need_insider else None
+    logger.info("Loaded %d price frames, SEC %s, insider rows %s", len(frames), sec_stats,
+                None if insider is None else len(insider))
+    return frames, spy, etf_close, sector_map(frames), filings, rights, set(u1), membership, insider, sec_stats
 
-    results: Dict[str, Any] = {"universes": {}}
 
-    for u_name in universes:
-        logger.info(f"Evaluating replication for universe: {u_name}...")
-        sub_mask = u2_mask if u_name == "u2" else pd.DataFrame(True, index=all_dates, columns=tickers)
-
-        u_results: Dict[str, Any] = {}
-        for sig_name in ["C6", "MOM12_1", "RESMOM", "HI52", "FIP", "REV21", "RVOL252", "MAD"]:
-            if sig_name in feats:
-                ics = ic_series(feats[sig_name], target_20, liq_mask, m_ends, sub=sub_mask)
-                stats = summarize_ic(ics)
-                # 5-year blocks for IC
-                b1_vals = [v for k, v in ics.items() if "2008" <= k <= "2012"]
-                b2_vals = [v for k, v in ics.items() if "2013" <= k <= "2017"]
-                b3_vals = [v for k, v in ics.items() if "2018" <= k <= "2022"]
-                stats["blocks_5y"] = {
-                    "2008_2012": round(float(np.mean(b1_vals)), 4) if b1_vals else None,
-                    "2013_2017": round(float(np.mean(b2_vals)), 4) if b2_vals else None,
-                    "2018_2022": round(float(np.mean(b3_vals)), 4) if b3_vals else None,
-                }
-                u_results[sig_name] = stats
-
-        results["universes"][u_name] = u_results
-
-    # Check P8 on U2: C6 mean IC > 0 and NW t >= 2.0
-    u2_c6 = results["universes"].get("u2", {}).get("C6", {})
-    c6_mean_ic = u2_c6.get("mean_ic") or 0.0
-    c6_nw_t = u2_c6.get("nw_t") or 0.0
-    passes_p8 = bool(c6_mean_ic > 0 and c6_nw_t >= 2.0)
-    results["P8_C6_U2_PASS"] = passes_p8
-
-    # Record trial
-    record_trial(
-        name="swing_replication",
-        phase="swing",
-        params={"universes": universes, "signals": list(feats.keys())},
-        n_ideas=len(m_ends),
-        mean_beta_adj=c6_mean_ic,
-        ci=None,
-        late_mean=u2_c6.get("late_mean_ic"),
-        smoke=smoke,
-        extra={"c6_nw_t": c6_nw_t, "passes_p8": passes_p8},
+# ----------------------------------------------------------------------------
+def stage_replication(limit: Optional[int], smoke: bool) -> Dict[str, Any]:
+    from scripts.research_signal_ic import (
+        compute_features, composite_c6, ic_series, liquid_mask, month_ends, summarize_ic, targets,
     )
-
-    out_path = os.path.join(OUT_DIR, "replication.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, default=str)
-    logger.info(f"Replication results written to {out_path}")
-    return results
-
-
-# ----------------------------------------------------------------------------
-# Stage 2: Sleeves Backtests & Decisions
-# ----------------------------------------------------------------------------
-def run_sleeves_backtest(
-    stock_frames: Dict[str, pd.DataFrame],
-    spy_df: pd.DataFrame,
-    universes: List[str],
-    n_placebo: int = 200,
-    c6_stats: Optional[Dict[str, Any]] = None,
-    smoke: bool = False,
-) -> Dict[str, Any]:
-    """
-    Backtest sleeves T, E, N, P, I on holdout with 200 placebos and S-PASS rules.
-    """
-    logger.info("Starting Stage 2: Sleeves Backtest & Decisions...")
-    cal = SessionCalendar()
-    membership = load_membership()
-
-    holdout_start_dt = date(2008, 1, 2)
-    holdout_end_dt = date(2022, 9, 30)
-
-    # Dates present in SPY
-    session_dates = [
-        d.date() if isinstance(d, pd.Timestamp) else d
-        for d in spy_df.loc[HOLDOUT_START:HOLDOUT_END].index
-    ]
-    if not session_dates:
-        session_dates = [d.date() if isinstance(d, pd.Timestamp) else d for d in spy_df.index]
-
-    logger.info(f"Simulating sleeves over {len(session_dates)} trading sessions...")
-
-    # Precompute U2 membership by date for instant O(1) lookup
-    u2_members_by_date: Dict[date, Set[str]] = defaultdict(set)
+    from src.swing.engine import u2_membership
+    frames, spy, etf_close, sectors, _, _, u1, membership, _, _ = load_all(limit, need_filings=False)
+    idx = spy.loc[PANEL_WINDOW[0]:"2022-12-31"].index
+    wide = lambda col: pd.DataFrame({t: f[col] for t, f in frames.items()}).reindex(idx)
+    close, high, vol = wide("TR_CLOSE"), wide("TR_HIGH"), wide("VOLUME")
+    raw = pd.DataFrame({t: (f["UNADJ_CLOSE"] if "UNADJ_CLOSE" in f else f["CLOSE"]) for t, f in frames.items()}).reindex(idx)
+    nominal = wide("CLOSE")
+    spy_c = spy["TR_CLOSE"].reindex(idx)
+    etf = etf_close.reindex(idx)
+    sec = {t: (s if s in etf.columns else None) for t, s in sectors.items()}
+    feats = compute_features(close, high, vol, spy_c, etf, sec)
+    feats["MAD"] = close.rolling(21, min_periods=21).mean() / close.rolling(200, min_periods=200).mean()
+    liq = liquid_mask(nominal, vol, raw_close=raw)
+    tgt = targets(close, spy_c, feats["BETA252"], 20)
+    dates = month_ends(idx, HOLDOUT[0].isoformat(), pd.Timestamp(HOLDOUT[1]))
+    out: Dict[str, Any] = {"provenance": provenance(smoke), "universes": {}}
+    u2m = u2_membership(idx, list(close.columns), membership)
+    masks = {"u1": liq & pd.DataFrame({t: (t in u1) for t in close.columns}, index=idx), "u2": liq & u2m}
+    for u, mask in masks.items():
+        f = dict(feats)
+        f["C6"] = composite_c6(feats, mask)
+        res = {}
+        for name in ("C6", "MOM12_1", "RESMOM", "HI52", "FIP", "REV21", "RVOL252", "MAD"):
+            ics = ic_series(f[name], tgt, mask, dates)
+            s = summarize_ic(ics)
+            s["blocks_5y"] = {b: (round(float(np.mean(v)), 4) if v else None) for b, v in (
+                ("2008_2012", [x for k, x in ics.items() if k <= "2012-12-31"]),
+                ("2013_2017", [x for k, x in ics.items() if "2013-01-01" <= k <= "2017-12-31"]),
+                ("2018_2022", [x for k, x in ics.items() if k >= "2018-01-01"]))}
+            res[name] = s
+        out["universes"][u] = res
+        logger.info("Replication %s: %s", u, {k: (v.get("mean_ic"), v.get("nw_t")) for k, v in res.items()})
+    c6 = out["universes"]["u2"]["C6"]
+    out["P8_C6_U2_PASS"] = bool((c6.get("mean_ic") or 0) > 0 and (c6.get("nw_t") or 0) >= 2.0)
+    # U2 member-days without a bar, by year (survivorship of the point-in-time universe)
+    full_idx = spy.loc["2008-01-01":"2022-12-31"].index
+    have = {t: set(f.index) for t, f in frames.items()}
+    by_year = defaultdict(lambda: {"member_days": 0, "no_bar": 0})
+    late_first = []
     for row in membership.itertuples(index=False):
-        t = row.ticker
-        start_d = row.start_date.date()
-        end_d = row.end_date.date() if pd.notna(row.end_date) else date(2099, 12, 31)
-        for s_date in session_dates:
-            if start_d <= s_date <= end_d:
-                u2_members_by_date[s_date].add(t)
+        end = row.end_date if pd.notna(row.end_date) else full_idx[-1]
+        days = full_idx[(full_idx >= row.start_date) & (full_idx <= end)]
+        if not len(days):
+            continue
+        h = have.get(row.ticker)
+        if h and min(h) > days[0]:
+            late_first.append({"ticker": row.ticker, "member_from": str(row.start_date.date()), "first_bar": str(min(h).date())})
+        for d in days:
+            y = by_year[d.year]
+            y["member_days"] += 1
+            if not h or d not in h:
+                y["no_bar"] += 1
+    out["u2_member_days_without_bar_by_year"] = {
+        str(y): dict(v, share_pct=round(100.0 * v["no_bar"] / v["member_days"], 2)) for y, v in sorted(by_year.items())}
+    out["u2_symbols_first_bar_after_membership_start"] = late_first
+    record_trial("swing_replication", "swing", {"universes": ["u1", "u2"]}, len(dates), None, None, None,
+                 series_path="outputs/swing/replication.json", smoke=smoke,
+                 extra={"metric": "monthly rank IC", "u2_c6": c6, "u1_c6": out["universes"]["u1"]["C6"]})
+    return out
 
-    # Pre-extract numpy arrays and date maps for each ticker
-    ticker_arrays: Dict[str, Dict[str, Any]] = {}
-    for t, df in stock_frames.items():
-        c_arr = df["TR_CLOSE"].to_numpy(dtype=float)
-        o_arr = df["TR_OPEN"].to_numpy(dtype=float)
-        h_arr = df["TR_HIGH"].to_numpy(dtype=float)
-        l_arr = df["TR_LOW"].to_numpy(dtype=float)
-        v_arr = df["VOLUME"].to_numpy(dtype=float)
-        uc_arr = df["UNADJ_CLOSE"].to_numpy(dtype=float) if "UNADJ_CLOSE" in df.columns else c_arr
-        atr_arr = df["ATR_14"].to_numpy(dtype=float) if "ATR_14" in df.columns else np.zeros(len(c_arr))
-        ma_arr = df["MA200"].to_numpy(dtype=float) if "MA200" in df.columns else np.zeros(len(c_arr))
-        sma5_arr = df["SMA5"].to_numpy(dtype=float) if "SMA5" in df.columns else np.zeros(len(c_arr))
-        rsi2_arr = df["RSI2"].to_numpy(dtype=float) if "RSI2" in df.columns else np.zeros(len(c_arr))
-        adv20_arr = pd.Series(c_arr * v_arr).rolling(20, min_periods=20).mean().to_numpy(dtype=float)
-        vol20_mean = pd.Series(v_arr).rolling(20, min_periods=20).mean().to_numpy(dtype=float)
-        vol50_med = pd.Series(v_arr).rolling(50, min_periods=50).median().to_numpy(dtype=float)
-        date_map = {d.date() if isinstance(d, pd.Timestamp) else d: i for i, d in enumerate(df.index)}
-        ticker_arrays[t] = {
-            "c": c_arr, "o": o_arr, "h": h_arr, "l": l_arr, "v": v_arr, "uc": uc_arr,
-            "atr": atr_arr, "ma200": ma_arr, "sma5": sma5_arr, "rsi2": rsi2_arr, "adv20": adv20_arr,
-            "vol20_mean": vol20_mean, "vol50_med": vol50_med,
-            "date_map": date_map,
-        }
 
-    spy_open_map = {d.date() if isinstance(d, pd.Timestamp) else d: float(spy_df["TR_OPEN"].iloc[i]) for i, d in enumerate(spy_df.index)}
-    spy_close_map = {d.date() if isinstance(d, pd.Timestamp) else d: float(spy_df["TR_CLOSE"].iloc[i]) for i, d in enumerate(spy_df.index)}
-    spy_data = (spy_open_map, spy_close_map)
+def stage_patterns(limit: Optional[int], smoke: bool) -> Dict[str, Any]:
+    from scripts.research_signal_ic import compute_features, ic_series, liquid_mask, month_ends, residualize, summarize_ic, targets
+    from src.patterns import PATTERN_FEATURES, pattern_feature_panel
+    from src.swing.engine import u2_membership
+    frames, spy, etf_close, sectors, _, _, u1, membership, _, _ = load_all(limit, need_filings=False)
+    idx = spy.loc[PANEL_WINDOW[0]:"2022-12-31"].index
+    wide = lambda col: pd.DataFrame({t: f[col] for t, f in frames.items()}).reindex(idx)
+    close, high, low, vol = wide("TR_CLOSE"), wide("TR_HIGH"), wide("TR_LOW"), wide("VOLUME")
+    raw = pd.DataFrame({t: (f["UNADJ_CLOSE"] if "UNADJ_CLOSE" in f else f["CLOSE"]) for t, f in frames.items()}).reindex(idx)
+    spy_c = spy["TR_CLOSE"].reindex(idx)
+    etf = etf_close.reindex(idx)
+    feats = compute_features(close, high, vol, spy_c, etf, {t: (s if s in etf.columns else None) for t, s in sectors.items()},
+                             with_resmom=False)
+    liq = liquid_mask(wide("CLOSE"), vol, raw_close=raw)
+    dates = month_ends(idx, HOLDOUT[0].isoformat(), pd.Timestamp(HOLDOUT[1]))
+    pats = pattern_feature_panel(close, high, low, vol, dates)
+    tgt = targets(close, spy_c, feats["BETA252"], 20)
+    u2m = u2_membership(idx, list(close.columns), membership)
+    out: Dict[str, Any] = {"provenance": provenance(smoke), "universes": {}}
+    for u, mask in (("u1", liq & pd.DataFrame({t: (t in u1) for t in close.columns}, index=idx)), ("u2", liq & u2m)):
+        res = {}
+        for name in PATTERN_FEATURES:
+            r = residualize(pats[name], [feats["MOM12_1"], feats["HI52"]], mask, dates)
+            res[name] = summarize_ic(ic_series(r, tgt, mask, dates))
+        out["universes"][u] = res
+    out["candidate_vetoes_for_future_study"] = [
+        n for n in ("breakout_volume_ratio", "base_depth_pct")
+        if all((out["universes"][u][n].get("mean_ic") or 0) < 0 and (out["universes"][u][n].get("nw_t") or 0) <= -3 for u in ("u1", "u2"))]
+    record_trial("swing_pattern_replication", "swing", {"features": list(PATTERN_FEATURES)}, len(dates), None, None, None,
+                 series_path="outputs/swing/patterns.json", smoke=smoke, extra={"report_only": True})
+    return out
 
-    all_results: Dict[str, Any] = {"sleeves": {}, "decisions": {}}
-    p5_pvalues: Dict[str, float] = {}
 
-    for sleeve in SLEEVES:
-        logger.info(f"--- Simulating Sleeve {sleeve} ---")
-        sleeve_u_results: Dict[str, Any] = {}
+def _trade_rows(trades) -> List[Dict[str, Any]]:
+    return [{"ticker": t.ticker, "sleeve": t.sleeve, "signal_date": t.signal_date.isoformat(), "fill_date": t.fill_date.isoformat(),
+             "exit_date": t.exit_date.isoformat() if t.exit_date else None, "fill_price": t.fill_price, "exit_price": t.exit_price,
+             "stop_loss": t.stop_loss, "target": t.target, "exit_reason": t.exit_reason, "holding_sessions": t.holding_sessions,
+             "beta": t.beta, "net_return_pct": t.net_return_pct, "spy_return_pct": t.spy_return_pct,
+             "beta_adj_pct": t.beta_adj_pct, "half_spread_pct": t.half_spread_pct, **(t.details or {})} for t in trades]
 
-        for u_name in ["u2", "u1"]:
-            if u_name not in universes and "both" not in universes:
-                continue
 
-            executed_trades: List[SwingTrade] = []
-            busy_until: Dict[str, date] = {}
+def concurrency(trades) -> Dict[str, Any]:
+    if not trades:
+        return {"median": 0, "p95": 0, "max": 0}
+    ev = defaultdict(int)
+    for t in trades:
+        ev[t.fill_date] += 1
+        ev[t.exit_date] -= 1
+    cur, counts = 0, []
+    for d in sorted(ev):
+        cur += ev[d]
+        counts.append(cur)
+    return {"median": int(np.median(counts)), "p95": int(np.percentile(counts, 95)), "max": int(max(counts))}
 
-            # Chronological session-by-session simulation
-            for s_date in session_dates:
-                # Eligible members
-                if u_name == "u2":
-                    valid_members = u2_members_by_date.get(s_date, set())
-                else:
-                    valid_members = set(stock_frames.keys())
 
-                for ticker in sorted(valid_members):
-                    # Check if ticker is currently in a trade or in cooldown
-                    until_d = busy_until.get(ticker)
-                    if until_d is not None and s_date < until_d:
-                        continue
+def stage_sleeve(sleeve: str, limit: Optional[int], n_placebo: int, smoke: bool) -> Dict[str, Any]:
+    frames, spy, etf_close, sectors, filings, rights, u1, membership, insider, sec_stats = load_all(
+        limit, need_filings=True, need_insider=(sleeve == "I"))
+    out: Dict[str, Any] = {"provenance": provenance(smoke), "sleeve": sleeve, "sec": sec_stats, "universes": {}}
+    if sleeve == "I" and (insider is None or insider.empty):
+        out["untested"] = "insider data sets unavailable"
+        return out
+    from src.swing.engine import build_ticker_arrays
+    tick = build_ticker_arrays(frames, filings, rights)
+    frames = {t: None for t in tick}                       # free the raw frames; arrays hold what is needed
+    for u in ("u2", "u1"):
+        t0 = time.time()
+        ctx = build_context(u, frames, spy, etf_close, sectors, filings, rights, u1_tickers=u1, membership=membership,
+                            window=(PANEL_WINDOW[0], spy.index[-1].date().isoformat()), with_c6=(sleeve == "T"), insider=insider,
+                            tick=tick)
+        book = run_book(ctx, sleeve, *HOLDOUT)
+        trades = book["trades"]
+        logger.info("Sleeve %s %s: %d trades, %d censored, funnel %s (%.0fs)", sleeve, u, len(trades), len(book["censored"]),
+                    book["funnel"], time.time() - t0)
+        pl = SwingPlacebo(ctx).run(sleeve, trades, n_runs=n_placebo) if trades and n_placebo else {"means": [], "per_trade_median": []}
+        med = np.array(pl.get("per_trade_median", []), dtype=float)
+        paired = [(tr, m) for tr, m in zip(trades, med) if np.isfinite(m)] if len(med) == len(trades) else []
+        ev = evaluate_sleeve_trades([tr for tr, _ in paired] if paired else trades, sleeve, u,
+                                    placebo_means=pl.get("means"), placebo_trade_returns=[m for _, m in paired] if paired else None)
+        ev["placebo_coverage"] = pl.get("coverage")
+        ev["n_signals_all"] = len(trades)
+        ev["censored"] = len(book["censored"])
+        ev["funnel"] = book["funnel"]
+        ev["monte_carlo_drawdown_units"] = monte_carlo_trade_shuffle(trades)
+        ev["concurrent_open_signals"] = concurrency(trades)
+        # Report-only: close-checked stops, and the recent period (unseen only for E, N, P, I)
+        cc = run_book(ctx, sleeve, *HOLDOUT, close_checked_stops=True)["trades"]
+        ev["report_close_checked_stops_mean_beta_adj"] = (round(float(np.mean([x.beta_adj_pct for x in cc if x.beta_adj_pct is not None])), 4)
+                                                          if cc else None)
+        rec = run_book(ctx, sleeve, *RECENT)["trades"]
+        rb = [x.beta_adj_pct for x in rec if x.beta_adj_pct is not None]
+        ev["report_recent_period"] = {"n": len(rb), "mean_beta_adj": round(float(np.mean(rb)), 4) if rb else None,
+                                      "unseen": sleeve != "T"}
+        out["universes"][u] = ev
+        pd.DataFrame(_trade_rows(trades)).to_csv(os.path.join(OUT_DIR, f"trades_{sleeve}_{u}.csv"), index=False)
+        record_trial(f"S-{sleeve}", "swing", {"sleeve": sleeve, "universe": u, "n_placebo": n_placebo, "limit": limit},
+                     ev.get("n_signals", 0), ev.get("mean_beta_adj_pct"), ev.get("ci95_beta_adj"), None,
+                     series_path=f"outputs/swing/trades_{sleeve}_{u}.csv", smoke=smoke,
+                     extra={"placebo_percentile": ev.get("placebo_percentile"), "p_gt0": ev.get("p_gt0"),
+                            "break_even_bps": ev.get("break_even_bps_per_side")})
+    return out
 
-                    if ticker not in ticker_arrays:
-                        continue
-                    t_data = ticker_arrays[ticker]
-                    idx = t_data["date_map"].get(s_date)
-                    if idx is None or idx < 200:
-                        continue
 
-                    close = t_data["c"][idx]
-                    open_p = t_data["o"][idx]
-                    high_p = t_data["h"][idx]
-                    low_p = t_data["l"][idx]
-                    vol = t_data["v"][idx]
-                    unadj_c = t_data["uc"][idx]
-                    adv20 = t_data["adv20"][idx]
-
-                    is_liq = bool(unadj_c >= 5.0 and adv20 >= 5_000_000.0 and idx >= 251)
-                    if not is_liq:
-                        continue
-
-                    atr14 = t_data["atr"][idx]
-                    ma200 = t_data["ma200"][idx]
-                    ma200_lag20 = t_data["ma200"][idx - 20] if idx >= 20 else 0.0
-
-                    sig = None
-                    if sleeve == "T":
-                        c6_proxy = 0.95 if (close > ma200 and ma200 > ma200_lag20) else 0.50
-                        sig = generate_sleeve_t_signal(
-                            ticker, s_date, close, ma200, ma200_lag20, c6_proxy, atr14, True,
-                            unadj_close=unadj_c, adv20=adv20,
-                        )
-                    elif sleeve == "E":
-                        prev_c = t_data["c"][idx - 1] if idx >= 1 else 0.0
-                        ret1 = (close / prev_c - 1.0) if prev_c > 0 else 0.0
-                        v_base = t_data["vol20_mean"][idx]
-                        vol_ratio = vol / v_base if v_base > 0 else 1.0
-                        if ret1 > 0.03 and vol_ratio > 1.5:
-                            sig = generate_sleeve_e_signal(
-                                ticker, s_date, close, atr14, ret1, 0.85, 0.85, True,
-                                unadj_close=unadj_c, adv20=adv20,
-                            )
-                    elif sleeve == "N":
-                        prev_close = t_data["c"][idx - 1] if idx >= 1 else 0.0
-                        med_vol = t_data["vol50_med"][idx]
-                        pre_gap_atr = t_data["atr"][idx - 1] if idx >= 1 else atr14
-                        sig = generate_sleeve_n_signal(
-                            ticker, s_date, open_p, high_p, low_p, close, prev_close, vol, med_vol,
-                            pre_gap_atr, has_8k_or_6k=True, has_neg8k=False, is_g0=True,
-                            unadj_close=unadj_c, adv20=adv20,
-                        )
-                    elif sleeve == "P":
-                        rsi2 = t_data["rsi2"][idx]
-                        sma5 = t_data["sma5"][idx]
-                        sig = generate_sleeve_p_signal(
-                            ticker, s_date, close, ma200, ma200_lag20, rsi2, sma5, atr14, True,
-                            unadj_close=unadj_c, adv20=adv20,
-                        )
-                    elif sleeve == "I":
-                        cluster_info = {"total_value": 150000.0, "distinct_owners": 2}
-                        sig = generate_sleeve_i_signal(
-                            ticker, s_date, close, atr14, cluster_info, True,
-                            unadj_close=unadj_c, adv20=adv20,
-                        )
-
-                    if sig is not None:
-                        df = stock_frames[sig.ticker]
-                        trade = simulate_swing_trade(
-                            ticker=sig.ticker,
-                            sleeve=sig.sleeve,
-                            signal_date=sig.signal_date,
-                            stop_loss=sig.stop_loss,
-                            target=sig.target,
-                            bars=df,
-                            spy_bars=spy_data,
-                            beta=sig.beta or 1.0,
-                            cost_per_side=BASE_COST_PCT_PER_SIDE,
-                        )
-                        if trade is not None and trade.exit_price is not None and trade.exit_date is not None:
-                            executed_trades.append(trade)
-                            # Busy during trade + 10 sessions cooldown
-                            busy_until[ticker] = cal.shift(trade.exit_date, 11)
-                        else:
-                            # Censored or failed fill: don't retry until next session
-                            busy_until[ticker] = cal.shift(s_date, 1)
-
-            logger.info(f"Sleeve {sleeve} [{u_name}] executed {len(executed_trades)} completed trades.")
-
-            # Placebo simulation
-            placebo_means: List[float] = []
-            if len(executed_trades) >= 5 and n_placebo > 0:
-                logger.info(f"Running {n_placebo} placebo runs for Sleeve {sleeve} [{u_name}]...")
-                for run_idx in range(n_placebo):
-                    seed = stable_seed(sleeve, u_name, run_idx)
-                    rng = np.random.default_rng(seed)
-                    # Simulated placebo mean
-                    p_rets = [
-                        t.beta_adj_pct + float(rng.normal(0.0, 1.5)) - 0.20
-                        for t in executed_trades if t.beta_adj_pct is not None
-                    ]
-                    if p_rets:
-                        placebo_means.append(float(np.mean(p_rets)))
-
-            eval_res = evaluate_sleeve_trades(
-                executed_trades,
-                sleeve=sleeve,
-                universe_name=u_name,
-                c6_ic_stats=c6_stats,
-                placebo_means=placebo_means,
-            )
-            sleeve_u_results[u_name] = eval_res
-
-            if u_name == "u2":
-                p5_pvalues[sleeve] = eval_res.get("p_gt0", 1.0) or 1.0
-
-            # Record trial
-            record_trial(
-                name=f"S-{sleeve}",
-                phase="swing",
-                params={"sleeve": sleeve, "universe": u_name, "n_placebo": n_placebo},
-                n_ideas=eval_res.get("n_signals", 0),
-                mean_beta_adj=eval_res.get("mean_beta_adj_pct"),
-                ci=eval_res.get("ci95_beta_adj"),
-                late_mean=None,
-                smoke=smoke,
-                extra={"break_even_bps": eval_res.get("break_even_bps_per_side")},
-            )
-
-        all_results["sleeves"][sleeve] = sleeve_u_results
-
-    # Multiple testing: Holm over the 5 sleeves
-    sleeve_list = list(p5_pvalues.keys())
-    raw_p = [p5_pvalues[s] for s in sleeve_list]
-    adj_p = holm(raw_p)
-    holm_dict = {s: adj_p[i] for i, s in enumerate(sleeve_list)}
-    all_results["holm_pvalues"] = holm_dict
-
-    # Final decisions
-    decisions: Dict[str, Any] = {}
-    config_sleeves: Dict[str, Any] = {}
-
-    for sleeve in SLEEVES:
-        u2_res = all_results["sleeves"].get(sleeve, {}).get("u2", {"sleeve": sleeve, "n_signals": 0})
-        u1_res = all_results["sleeves"].get(sleeve, {}).get("u1", {"sleeve": sleeve, "n_signals": 0})
-        h_p = holm_dict.get(sleeve, 1.0)
-        status, reasons = decide_sleeve_status(u2_res, u1_res, h_p)
-
-        decisions[sleeve] = {
+def stage_decide(smoke: bool) -> Dict[str, Any]:
+    rep_path = os.path.join(OUT_DIR, "replication.json")
+    rep = json.load(open(rep_path)) if os.path.exists(rep_path) else {}
+    c6_u2 = rep.get("universes", {}).get("u2", {}).get("C6")
+    res = {}
+    for s in SLEEVES:
+        p = os.path.join(OUT_DIR, f"sleeve_{s}.json")
+        res[s] = json.load(open(p)) if os.path.exists(p) else {"untested": "sleeve job produced no result"}
+    pvals = {s: (r.get("universes", {}).get("u2", {}).get("p_gt0") if "untested" not in r else None) for s, r in res.items()}
+    tested = [s for s in SLEEVES if pvals[s] is not None]
+    adj = dict(zip(tested, holm([pvals[s] for s in tested]))) if tested else {}
+    decisions, config = {}, {}
+    any_smoke = smoke or any(r.get("provenance", {}).get("smoke") for r in res.values()) or bool(rep.get("provenance", {}).get("smoke"))
+    for s in SLEEVES:
+        r = res[s]
+        if "untested" in r:
+            status, reasons = "SHADOW", [f"untested: {r['untested']}"]
+            u2 = u1 = {}
+        else:
+            u2 = dict(r["universes"].get("u2", {"sleeve": s, "n_signals": 0}))
+            u1 = r["universes"].get("u1", {"sleeve": s, "n_signals": 0})
+            if s == "T":                                   # P8 from the U2 replication of C6
+                u2.setdefault("p_rules", {})["P8"] = bool(((c6_u2 or {}).get("mean_ic") or 0) > 0
+                                                         and ((c6_u2 or {}).get("nw_t") or 0) >= 2.0)
+            status, reasons = decide_sleeve_status(u2, u1, adj.get(s, 1.0))
+        decisions[s] = {"status": status, "reasons": reasons, "holm_adjusted_p": adj.get(s), "u2": u2, "u1": u1}
+        config[s] = {
             "status": status,
-            "reasons": reasons,
-            "holm_adjusted_p": round(h_p, 4),
-            "u2_metrics": u2_res,
-            "u1_metrics": u1_res,
-        }
-        config_sleeves[sleeve] = {
-            "status": status,
-            "universe": "u1" if status == "LIVE" else ("u2" if status == "LIVE-SP500" else "shadow"),
-            "evaluated_holdout": "2008-01..2022-09",
-            "u2_beta_adj": u2_res.get("mean_beta_adj_pct"),
-            "u1_beta_adj": u1_res.get("mean_beta_adj_pct"),
+            "universe": "u1" if status == "LIVE" else ("sp500" if status == "LIVE-SP500" else "shadow"),
+            "holdout": [HOLDOUT[0].isoformat(), HOLDOUT[1].isoformat()],
+            "u2": {k: u2.get(k) for k in ("n_signals", "mean_beta_adj_pct", "ci95_beta_adj", "placebo_percentile",
+                                           "paired_placebo_diff", "paired_placebo_ci", "break_even_bps_per_side")} if u2 else None,
+            "u1": {k: u1.get(k) for k in ("n_signals", "mean_beta_adj_pct", "ci95_beta_adj", "placebo_percentile")} if u1 else None,
             "reasons": reasons,
         }
-
-    all_results["decisions"] = decisions
-
-    # Write decisions.json and config/swing_sleeves.json
-    out_decisions = os.path.join(OUT_DIR, "decisions.json")
-    with open(out_decisions, "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, default=str)
-    logger.info(f"Sleeve decisions written to {out_decisions}")
-
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    out_config = os.path.join(CONFIG_DIR, "swing_sleeves.json")
-    with open(out_config, "w", encoding="utf-8") as f:
-        json.dump(config_sleeves, f, indent=2, default=str)
-    logger.info(f"Sleeve configuration written to {out_config}")
-
-    return all_results
+    out = {"provenance": provenance(any_smoke), "holm_adjusted_p": adj, "decisions": decisions,
+           "overlays": "not run: overlays are evaluated only on LIVE sleeves" if not any(
+               d["status"].startswith("LIVE") for d in decisions.values()) else "pending",
+           "config": config}
+    return out
 
 
-# ----------------------------------------------------------------------------
-# Main CLI
-# ----------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Swing Research Harness")
-    parser.add_argument("--stage", choices=["replication", "sleeves", "overlays", "all"], default="all")
-    parser.add_argument("--universe", choices=["u1", "u2", "both"], default="both")
-    parser.add_argument("--placebo", type=int, default=200)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--smoke", action="store_true")
-    args = parser.parse_args()
-
-    smoke = args.smoke or (args.limit is not None and args.limit > 0)
-    target_universes = ["u2", "u1"] if args.universe == "both" else [args.universe]
-
-    logger.info(f"Running Swing Research: stage={args.stage}, universes={target_universes}, placebo={args.placebo}, limit={args.limit}")
-
-    stock_frames, spy_df, sector_etfs = load_price_data(limit=args.limit)
-
-    c6_stats = None
-    if args.stage in ("replication", "all"):
-        rep_res = run_replication(stock_frames, spy_df, sector_etfs, target_universes, smoke=smoke)
-        c6_stats = rep_res.get("universes", {}).get("u2", {}).get("C6")
-
-    if args.stage in ("sleeves", "all"):
-        run_sleeves_backtest(stock_frames, spy_df, target_universes, n_placebo=args.placebo, c6_stats=c6_stats, smoke=smoke)
-
-    logger.info("Swing Research complete.")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stage", choices=("replication", "patterns", "sleeve", "decide"), required=True)
+    ap.add_argument("--sleeve", choices=SLEEVES)
+    ap.add_argument("--placebo", type=int, default=200)
+    ap.add_argument("--limit", type=int, default=None)
+    args = ap.parse_args()
+    smoke = bool(args.limit) or not os.environ.get("GITHUB_RUN_ID")
+    os.makedirs(OUT_DIR, exist_ok=True)
+    if args.stage == "replication":
+        out, name = stage_replication(args.limit, smoke), "replication.json"
+    elif args.stage == "patterns":
+        out, name = stage_patterns(args.limit, smoke), "patterns.json"
+    elif args.stage == "sleeve":
+        out, name = stage_sleeve(args.sleeve, args.limit, args.placebo, smoke), f"sleeve_{args.sleeve}.json"
+    else:
+        out, name = stage_decide(smoke), "decisions.json"
+        if not out["provenance"]["smoke"]:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump({"provenance": out["provenance"], "sleeves": out["config"]}, f, indent=2, default=str)
+            logger.info("Wrote %s from run %s", CONFIG_PATH, out["provenance"]["github_run_id"])
+        else:
+            logger.warning("Smoke or local run: config/swing_sleeves.json NOT written.")
+    with open(os.path.join(OUT_DIR, name), "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, default=str)
+    logger.info("Wrote outputs/swing/%s", name)
 
 
 if __name__ == "__main__":

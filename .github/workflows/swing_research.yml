@@ -146,10 +146,12 @@ jobs:
       - name: Collect sleeve and replication outputs
         run: |
           mkdir -p outputs/swing
-          cp artifacts/swing-replication/*.json outputs/swing/ 2>/dev/null || true
-          for s in T E N P I; do cp artifacts/swing-sleeve-$s/sleeve_$s.json outputs/swing/ 2>/dev/null || true; done
+          # artifacts keep their paths relative to outputs/ (e.g. swing/sleeve_T.json)
+          find artifacts -name 'replication.json' -exec cp {} outputs/swing/ \;
+          find artifacts -name 'patterns.json' -exec cp {} outputs/swing/ \;
+          find artifacts -name 'sleeve_*.json' -exec cp {} outputs/swing/ \;
           ls -la outputs/swing
-      - run: python scripts/research_swing.py --stage decide
+      - run: python scripts/research_swing.py --stage decide $LIMIT_ARG
       - uses: actions/upload-artifact@v4
         with:
           name: swing-decisions

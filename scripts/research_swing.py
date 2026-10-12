@@ -264,7 +264,13 @@ def stage_decide(smoke: bool) -> Dict[str, Any]:
     tested = [s for s in SLEEVES if pvals[s] is not None]
     adj = dict(zip(tested, holm([pvals[s] for s in tested]))) if tested else {}
     decisions, config = {}, {}
-    any_smoke = smoke or any(r.get("provenance", {}).get("smoke") for r in res.values()) or bool(rep.get("provenance", {}).get("smoke"))
+    missing = [s for s, r in res.items() if r.get("untested") == "sleeve job produced no result"]
+    any_smoke = (smoke or bool(missing) or not rep
+                 or any(r.get("provenance", {}).get("smoke") for r in res.values() if "provenance" in r)
+                 or bool(rep.get("provenance", {}).get("smoke")))
+    if missing or not rep:
+        logger.error("Incomplete research inputs (missing sleeves %s, replication %s): config is not written.",
+                     missing, "present" if rep else "missing")
     for s in SLEEVES:
         r = res[s]
         if "untested" in r:

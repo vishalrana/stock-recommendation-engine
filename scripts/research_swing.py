@@ -50,6 +50,7 @@ HOLDOUT = (date(2008, 1, 2), date(2022, 9, 30))
 RECENT = (date(2022, 10, 1), date(2026, 10, 9))
 PANEL_WINDOW = ("2005-10-01", None)            # features need ~525 sessions before the holdout starts
 SLEEVES = ("T", "E", "N", "P", "I")
+MIN_U1_COVERAGE_PCT = 98.0     # adoption gate: share of today's U1 tickers with price history
 
 
 def provenance(smoke: bool) -> Dict[str, Any]:
@@ -265,7 +266,15 @@ def stage_decide(smoke: bool) -> Dict[str, Any]:
     adj = dict(zip(tested, holm([pvals[s] for s in tested]))) if tested else {}
     decisions, config = {}, {}
     missing = [s for s, r in res.items() if r.get("untested") == "sleeve job produced no result"]
-    any_smoke = (smoke or bool(missing) or not rep
+    # Data-quality gate: the U1 universe must be (almost) fully covered by price history
+    summ_path = os.path.join(OUT_DIR, "data_summary.json")
+    coverage = None
+    if os.path.exists(summ_path):
+        coverage = (json.load(open(summ_path)).get("prices") or {}).get("u1_coverage_pct")
+    data_ok = coverage is not None and coverage >= MIN_U1_COVERAGE_PCT
+    if not data_ok:
+        logger.error("U1 price coverage %s%% < %s%%: results are not adopted.", coverage, MIN_U1_COVERAGE_PCT)
+    any_smoke = (smoke or bool(missing) or not rep or not data_ok
                  or any(r.get("provenance", {}).get("smoke") for r in res.values() if "provenance" in r)
                  or bool(rep.get("provenance", {}).get("smoke")))
     if missing or not rep:
@@ -293,7 +302,7 @@ def stage_decide(smoke: bool) -> Dict[str, Any]:
             "u1": {k: u1.get(k) for k in ("n_signals", "mean_beta_adj_pct", "ci95_beta_adj", "placebo_percentile")} if u1 else None,
             "reasons": reasons,
         }
-    out = {"provenance": provenance(any_smoke), "holm_adjusted_p": adj, "decisions": decisions,
+    out = {"provenance": dict(provenance(any_smoke), u1_price_coverage_pct=coverage), "holm_adjusted_p": adj, "decisions": decisions,
            "overlays": "not run: overlays are evaluated only on LIVE sleeves" if not any(
                d["status"].startswith("LIVE") for d in decisions.values()) else "pending",
            "config": config}

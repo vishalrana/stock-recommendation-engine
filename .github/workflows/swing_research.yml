@@ -150,6 +150,7 @@ jobs:
           find artifacts -name 'replication.json' -exec cp {} outputs/swing/ \;
           find artifacts -name 'patterns.json' -exec cp {} outputs/swing/ \;
           find artifacts -name 'sleeve_*.json' -exec cp {} outputs/swing/ \;
+          find artifacts -name 'data_summary.json' -exec cp {} outputs/swing/ \;
           ls -la outputs/swing
       - run: python scripts/research_swing.py --stage decide $LIMIT_ARG
       - uses: actions/upload-artifact@v4

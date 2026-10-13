@@ -1,0 +1,598 @@
+{
+  "provenance": {
+    "github_run_id": "38436737951",
+    "git_sha": "e1190aa839417f60e86350ab76f1a254c2766540",
+    "smoke": false,
+    "generated_at": "2026-10-13T17:30:56.049493+00:00",
+    "holdout": [
+      "2008-01-02",
+      "2022-09-30"
+    ]
+  },
+  "universes": {
+    "u1": {
+      "C6": {
+        "months": 177,
+        "mean_ic": 0.0309,
+        "nw_t": 2.85,
+        "first_half_mean_ic": 0.0232,
+        "second_half_mean_ic": 0.0385,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.582,
+        "blocks_5y": {
+          "2008_2012": 0.0188,
+          "2013_2017": 0.0403,
+          "2018_2022": 0.0338
+        }
+      },
+      "MOM12_1": {
+        "months": 177,
+        "mean_ic": 0.0019,
+        "nw_t": 0.16,
+        "first_half_mean_ic": -0.0025,
+        "second_half_mean_ic": 0.0062,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.486,
+        "blocks_5y": {
+          "2008_2012": -0.008,
+          "2013_2017": 0.0088,
+          "2018_2022": 0.0049
+        }
+      },
+      "RESMOM": {
+        "months": 177,
+        "mean_ic": 0.0012,
+        "nw_t": 0.15,
+        "first_half_mean_ic": -0.0074,
+        "second_half_mean_ic": 0.0096,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.492,
+        "blocks_5y": {
+          "2008_2012": -0.0054,
+          "2013_2017": 0.0025,
+          "2018_2022": 0.0067
+        }
+      },
+      "HI52": {
+        "months": 177,
+        "mean_ic": 0.023,
+        "nw_t": 1.84,
+        "first_half_mean_ic": 0.0094,
+        "second_half_mean_ic": 0.0365,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.582,
+        "blocks_5y": {
+          "2008_2012": -0.0065,
+          "2013_2017": 0.0393,
+          "2018_2022": 0.0371
+        }
+      },
+      "FIP": {
+        "months": 177,
+        "mean_ic": 0.0089,
+        "nw_t": 1.54,
+        "first_half_mean_ic": 0.01,
+        "second_half_mean_ic": 0.0077,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.52,
+        "blocks_5y": {
+          "2008_2012": 0.0159,
+          "2013_2017": 0.0018,
+          "2018_2022": 0.0089
+        }
+      },
+      "REV21": {
+        "months": 177,
+        "mean_ic": 0.0123,
+        "nw_t": 2.0,
+        "first_half_mean_ic": 0.0139,
+        "second_half_mean_ic": 0.0108,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.537,
+        "blocks_5y": {
+          "2008_2012": 0.0161,
+          "2013_2017": 0.0071,
+          "2018_2022": 0.0138
+        }
+      },
+      "RVOL252": {
+        "months": 177,
+        "mean_ic": 0.0579,
+        "nw_t": 4.41,
+        "first_half_mean_ic": 0.056,
+        "second_half_mean_ic": 0.0599,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.599,
+        "blocks_5y": {
+          "2008_2012": 0.0517,
+          "2013_2017": 0.0726,
+          "2018_2022": 0.0491
+        }
+      },
+      "MAD": {
+        "months": 177,
+        "mean_ic": -0.0046,
+        "nw_t": -0.39,
+        "first_half_mean_ic": -0.0188,
+        "second_half_mean_ic": 0.0095,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.486,
+        "blocks_5y": {
+          "2008_2012": -0.0293,
+          "2013_2017": 0.0049,
+          "2018_2022": 0.0115
+        }
+      }
+    },
+    "u2": {
+      "C6": {
+        "months": 177,
+        "mean_ic": 0.0221,
+        "nw_t": 1.65,
+        "first_half_mean_ic": 0.0252,
+        "second_half_mean_ic": 0.019,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.548,
+        "blocks_5y": {
+          "2008_2012": 0.0261,
+          "2013_2017": 0.0313,
+          "2018_2022": 0.0081
+        }
+      },
+      "MOM12_1": {
+        "months": 177,
+        "mean_ic": -0.0059,
+        "nw_t": -0.41,
+        "first_half_mean_ic": -0.0035,
+        "second_half_mean_ic": -0.0082,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.514,
+        "blocks_5y": {
+          "2008_2012": -0.0027,
+          "2013_2017": -0.0022,
+          "2018_2022": -0.013
+        }
+      },
+      "RESMOM": {
+        "months": 177,
+        "mean_ic": -0.0012,
+        "nw_t": -0.14,
+        "first_half_mean_ic": -0.0043,
+        "second_half_mean_ic": 0.0018,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.52,
+        "blocks_5y": {
+          "2008_2012": -0.0041,
+          "2013_2017": 0.0002,
+          "2018_2022": 0.0003
+        }
+      },
+      "HI52": {
+        "months": 177,
+        "mean_ic": 0.0075,
+        "nw_t": 0.51,
+        "first_half_mean_ic": 0.0079,
+        "second_half_mean_ic": 0.0071,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.52,
+        "blocks_5y": {
+          "2008_2012": 0.0087,
+          "2013_2017": 0.0169,
+          "2018_2022": -0.0037
+        }
+      },
+      "FIP": {
+        "months": 177,
+        "mean_ic": 0.0085,
+        "nw_t": 0.98,
+        "first_half_mean_ic": 0.0117,
+        "second_half_mean_ic": 0.0053,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.559,
+        "blocks_5y": {
+          "2008_2012": 0.0135,
+          "2013_2017": 0.0099,
+          "2018_2022": 0.0018
+        }
+      },
+      "REV21": {
+        "months": 177,
+        "mean_ic": 0.0118,
+        "nw_t": 1.47,
+        "first_half_mean_ic": 0.0093,
+        "second_half_mean_ic": 0.0142,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.537,
+        "blocks_5y": {
+          "2008_2012": 0.0047,
+          "2013_2017": 0.0044,
+          "2018_2022": 0.027
+        }
+      },
+      "RVOL252": {
+        "months": 177,
+        "mean_ic": 0.0551,
+        "nw_t": 3.56,
+        "first_half_mean_ic": 0.0642,
+        "second_half_mean_ic": 0.0461,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.571,
+        "blocks_5y": {
+          "2008_2012": 0.0686,
+          "2013_2017": 0.0675,
+          "2018_2022": 0.0279
+        }
+      },
+      "MAD": {
+        "months": 177,
+        "mean_ic": -0.0146,
+        "nw_t": -1.01,
+        "first_half_mean_ic": -0.0256,
+        "second_half_mean_ic": -0.0037,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.492,
+        "blocks_5y": {
+          "2008_2012": -0.0282,
+          "2013_2017": -0.0044,
+          "2018_2022": -0.011
+        }
+      }
+    }
+  },
+  "P8_C6_U2_PASS": false,
+  "u2_member_days_without_bar_by_year": {
+    "2008": {
+      "member_days": 125875,
+      "no_bar": 49397,
+      "share_pct": 39.24
+    },
+    "2009": {
+      "member_days": 125718,
+      "no_bar": 46282,
+      "share_pct": 36.81
+    },
+    "2010": {
+      "member_days": 125553,
+      "no_bar": 43293,
+      "share_pct": 34.48
+    },
+    "2011": {
+      "member_days": 125261,
+      "no_bar": 42086,
+      "share_pct": 33.6
+    },
+    "2012": {
+      "member_days": 124260,
+      "no_bar": 39127,
+      "share_pct": 31.49
+    },
+    "2013": {
+      "member_days": 125260,
+      "no_bar": 36768,
+      "share_pct": 29.35
+    },
+    "2014": {
+      "member_days": 125548,
+      "no_bar": 35522,
+      "share_pct": 28.29
+    },
+    "2015": {
+      "member_days": 126174,
+      "no_bar": 33477,
+      "share_pct": 26.53
+    },
+    "2016": {
+      "member_days": 127383,
+      "no_bar": 29864,
+      "share_pct": 23.44
+    },
+    "2017": {
+      "member_days": 127023,
+      "no_bar": 26077,
+      "share_pct": 20.53
+    },
+    "2018": {
+      "member_days": 126941,
+      "no_bar": 23749,
+      "share_pct": 18.71
+    },
+    "2019": {
+      "member_days": 127288,
+      "no_bar": 20270,
+      "share_pct": 15.92
+    },
+    "2020": {
+      "member_days": 127787,
+      "no_bar": 16380,
+      "share_pct": 12.82
+    },
+    "2021": {
+      "member_days": 127281,
+      "no_bar": 13899,
+      "share_pct": 10.92
+    },
+    "2022": {
+      "member_days": 126461,
+      "no_bar": 10468,
+      "share_pct": 8.28
+    }
+  },
+  "u2_symbols_first_bar_after_membership_start": [
+    {
+      "ticker": "ABI",
+      "member_from": "1996-01-02",
+      "first_bar": "2025-06-26"
+    },
+    {
+      "ticker": "ADT",
+      "member_from": "2012-10-02",
+      "first_bar": "2018-01-19"
+    },
+    {
+      "ticker": "APC",
+      "member_from": "1997-07-28",
+      "first_bar": "2026-02-12"
+    },
+    {
+      "ticker": "AVB",
+      "member_from": "2007-01-10",
+      "first_bar": "2026-08-14"
+    },
+    {
+      "ticker": "BBBY",
+      "member_from": "1999-10-01",
+      "first_bar": "2026-07-17"
+    },
+    {
+      "ticker": "BEAM",
+      "member_from": "1996-01-02",
+      "first_bar": "2020-02-06"
+    },
+    {
+      "ticker": "BUD",
+      "member_from": "1996-01-02",
+      "first_bar": "2009-07-01"
+    },
+    {
+      "ticker": "CAM",
+      "member_from": "2008-01-29",
+      "first_bar": "2025-10-06"
+    },
+    {
+      "ticker": "CEG",
+      "member_from": "1996-01-02",
+      "first_bar": "2022-01-19"
+    },
+    {
+      "ticker": "CSRA",
+      "member_from": "2015-11-30",
+      "first_bar": "2026-08-12"
+    },
+    {
+      "ticker": "DDS",
+      "member_from": "1996-01-02",
+      "first_bar": "2026-07-17"
+    },
+    {
+      "ticker": "DELL",
+      "member_from": "1996-09-06",
+      "first_bar": "2016-08-17"
+    },
+    {
+      "ticker": "DOW",
+      "member_from": "1996-01-02",
+      "first_bar": "2019-03-20"
+    },
+    {
+      "ticker": "DYN",
+      "member_from": "2000-10-03",
+      "first_bar": "2020-09-17"
+    },
+    {
+      "ticker": "EA",
+      "member_from": "2002-07-22",
+      "first_bar": "2026-08-04"
+    },
+    {
+      "ticker": "EMC",
+      "member_from": "1996-03-28",
+      "first_bar": "2023-05-15"
+    },
+    {
+      "ticker": "EQ",
+      "member_from": "2006-05-18",
+      "first_bar": "2018-10-12"
+    },
+    {
+      "ticker": "EQR",
+      "member_from": "2001-12-03",
+      "first_bar": "2026-08-17"
+    },
+    {
+      "ticker": "FB",
+      "member_from": "2013-12-23",
+      "first_bar": "2025-06-26"
+    },
+    {
+      "ticker": "FOX",
+      "member_from": "2015-09-21",
+      "first_bar": "2019-03-13"
+    },
+    {
+      "ticker": "FOXA",
+      "member_from": "2004-12-20",
+      "first_bar": "2019-03-12"
+    },
+    {
+      "ticker": "GENZ",
+      "member_from": "2001-12-14",
+      "first_bar": "2008-01-24"
+    },
+    {
+      "ticker": "INFO",
+      "member_from": "2017-06-02",
+      "first_bar": "2024-10-10"
+    },
+    {
+      "ticker": "IR",
+      "member_from": "1996-01-02",
+      "first_bar": "2017-05-12"
+    },
+    {
+      "ticker": "IR",
+      "member_from": "2010-11-17",
+      "first_bar": "2017-05-12"
+    },
+    {
+      "ticker": "JAVA",
+      "member_from": "1996-01-02",
+      "first_bar": "2021-10-05"
+    },
+    {
+      "ticker": "KG",
+      "member_from": "2000-10-03",
+      "first_bar": "2008-05-06"
+    },
+    {
+      "ticker": "LB",
+      "member_from": "1996-01-02",
+      "first_bar": "2024-06-28"
+    },
+    {
+      "ticker": "LEG",
+      "member_from": "1999-10-18",
+      "first_bar": "2026-08-26"
+    },
+    {
+      "ticker": "LIFE",
+      "member_from": "2008-11-24",
+      "first_bar": "2026-01-29"
+    },
+    {
+      "ticker": "MI",
+      "member_from": "2002-02-11",
+      "first_bar": "2015-11-25"
+    },
+    {
+      "ticker": "MMI",
+      "member_from": "2011-01-04",
+      "first_bar": "2013-10-31"
+    },
+    {
+      "ticker": "NE",
+      "member_from": "2001-01-16",
+      "first_bar": "2021-06-09"
+    },
+    {
+      "ticker": "NE",
+      "member_from": "2011-01-18",
+      "first_bar": "2021-06-09"
+    },
+    {
+      "ticker": "NFX",
+      "member_from": "2010-12-20",
+      "first_bar": "2026-07-07"
+    },
+    {
+      "ticker": "PCL",
+      "member_from": "2002-01-17",
+      "first_bar": "2025-08-05"
+    },
+    {
+      "ticker": "POM",
+      "member_from": "2007-11-09",
+      "first_bar": "2025-10-08"
+    },
+    {
+      "ticker": "Q",
+      "member_from": "2000-07-06",
+      "first_bar": "2025-10-27"
+    },
+    {
+      "ticker": "QRVO",
+      "member_from": "2015-06-12",
+      "first_bar": "2026-07-29"
+    },
+    {
+      "ticker": "S",
+      "member_from": "1996-01-02",
+      "first_bar": "2021-06-30"
+    },
+    {
+      "ticker": "SBNY",
+      "member_from": "2021-12-20",
+      "first_bar": "2024-08-15"
+    },
+    {
+      "ticker": "SE",
+      "member_from": "2007-01-03",
+      "first_bar": "2017-10-20"
+    },
+    {
+      "ticker": "SGP",
+      "member_from": "1996-01-02",
+      "first_bar": "2026-02-06"
+    },
+    {
+      "ticker": "SHLD",
+      "member_from": "2005-03-28",
+      "first_bar": "2023-09-14"
+    },
+    {
+      "ticker": "SII",
+      "member_from": "2006-10-02",
+      "first_bar": "2010-02-22"
+    },
+    {
+      "ticker": "SNDK",
+      "member_from": "2006-04-20",
+      "first_bar": "2025-02-13"
+    },
+    {
+      "ticker": "SPLS",
+      "member_from": "1998-10-07",
+      "first_bar": "2026-01-16"
+    },
+    {
+      "ticker": "STI",
+      "member_from": "1996-01-02",
+      "first_bar": "2022-05-02"
+    },
+    {
+      "ticker": "SUN",
+      "member_from": "1996-01-02",
+      "first_bar": "2026-07-17"
+    },
+    {
+      "ticker": "TE",
+      "member_from": "2001-10-10",
+      "first_bar": "2020-01-10"
+    },
+    {
+      "ticker": "UST",
+      "member_from": "1996-01-02",
+      "first_bar": "2010-02-02"
+    },
+    {
+      "ticker": "WB",
+      "member_from": "1996-01-02",
+      "first_bar": "2014-04-17"
+    }
+  ]
+}

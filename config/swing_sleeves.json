@@ -1,8 +1,226 @@
 {
   "provenance": {
-    "github_run_id": null,
-    "smoke": null,
-    "note": "Not yet tested: the pre-registered holdout research has not run. Every sleeve is SHADOW until a successful swing_research.yml run writes this file."
+    "github_run_id": "38436737951",
+    "git_sha": "e1190aa839417f60e86350ab76f1a254c2766540",
+    "smoke": false,
+    "generated_at": "2026-10-13T17:55:30.461634+00:00",
+    "holdout": [
+      "2008-01-02",
+      "2022-09-30"
+    ],
+    "u1_price_coverage_pct": 99.98,
+    "price_history_check": {
+      "cached_files": 5631,
+      "fresh_started_later": 1,
+      "recovered_on_retry": 0,
+      "kept_cached_longer": 1,
+      "kept_cached_on_failure": 0,
+      "examples": [
+        {
+          "ticker": "SKIN",
+          "cached_first": "2020-11-24",
+          "fresh_first": "2026-10-12"
+        }
+      ]
+    }
   },
-  "sleeves": {}
+  "sleeves": {
+    "T": {
+      "status": "SHADOW",
+      "universe": "shadow",
+      "holdout": [
+        "2008-01-02",
+        "2022-09-30"
+      ],
+      "u2": {
+        "n_signals": 5669,
+        "mean_beta_adj_pct": -0.1533,
+        "ci95_beta_adj": [
+          -0.4293,
+          0.1243
+        ],
+        "placebo_percentile": 37.5,
+        "paired_placebo_diff": 1.0187,
+        "paired_placebo_ci": [
+          0.6559,
+          1.3721
+        ],
+        "break_even_bps_per_side": 2.33
+      },
+      "u1": {
+        "n_signals": 20476,
+        "mean_beta_adj_pct": -0.3023,
+        "ci95_beta_adj": [
+          -0.5984,
+          -0.0067
+        ],
+        "placebo_percentile": 93.5
+      },
+      "reasons": [
+        "P1 failed on U2",
+        "P2 failed on U2",
+        "P4 failed on U2",
+        "P5 failed on U2",
+        "P6 failed on U2",
+        "P8 failed on U2",
+        "P3 failed on U1 confirmation"
+      ]
+    },
+    "E": {
+      "status": "SHADOW",
+      "universe": "shadow",
+      "holdout": [
+        "2008-01-02",
+        "2022-09-30"
+      ],
+      "u2": {
+        "n_signals": 1144,
+        "mean_beta_adj_pct": 0.1694,
+        "ci95_beta_adj": [
+          -0.697,
+          1.1051
+        ],
+        "placebo_percentile": 85.5,
+        "paired_placebo_diff": 2.2593,
+        "paired_placebo_ci": [
+          1.394,
+          3.1902
+        ],
+        "break_even_bps_per_side": 18.47
+      },
+      "u1": {
+        "n_signals": 4073,
+        "mean_beta_adj_pct": 0.2408,
+        "ci95_beta_adj": [
+          -0.7961,
+          1.3166
+        ],
+        "placebo_percentile": 98.0
+      },
+      "reasons": [
+        "P1 failed on U2",
+        "P2 failed on U2",
+        "P4 failed on U2",
+        "P5 failed on U2"
+      ]
+    },
+    "N": {
+      "status": "SHADOW",
+      "universe": "shadow",
+      "holdout": [
+        "2008-01-02",
+        "2022-09-30"
+      ],
+      "u2": {
+        "n_signals": 411,
+        "mean_beta_adj_pct": -0.714,
+        "ci95_beta_adj": [
+          -1.7383,
+          0.2892
+        ],
+        "placebo_percentile": 14.5,
+        "paired_placebo_diff": 0.4921,
+        "paired_placebo_ci": [
+          -0.4498,
+          1.4821
+        ],
+        "break_even_bps_per_side": -25.7
+      },
+      "u1": {
+        "n_signals": 2242,
+        "mean_beta_adj_pct": -0.9169,
+        "ci95_beta_adj": [
+          -1.8287,
+          0.0458
+        ],
+        "placebo_percentile": 1.0
+      },
+      "reasons": [
+        "P1 failed on U2",
+        "P2 failed on U2",
+        "P4 failed on U2",
+        "P5 failed on U2",
+        "P6 failed on U2",
+        "P3 failed on U1 confirmation"
+      ]
+    },
+    "P": {
+      "status": "SHADOW",
+      "universe": "shadow",
+      "holdout": [
+        "2008-01-02",
+        "2022-09-30"
+      ],
+      "u2": {
+        "n_signals": 22696,
+        "mean_beta_adj_pct": -0.1614,
+        "ci95_beta_adj": [
+          -0.2277,
+          -0.0951
+        ],
+        "placebo_percentile": 99.5,
+        "paired_placebo_diff": 0.0811,
+        "paired_placebo_ci": [
+          0.028,
+          0.136
+        ],
+        "break_even_bps_per_side": 1.93
+      },
+      "u1": {
+        "n_signals": 31233,
+        "mean_beta_adj_pct": -0.128,
+        "ci95_beta_adj": [
+          -0.2036,
+          -0.0495
+        ],
+        "placebo_percentile": 100.0
+      },
+      "reasons": [
+        "P1 failed on U2",
+        "P4 failed on U2",
+        "P5 failed on U2",
+        "P6 failed on U2",
+        "P3 failed on U1 confirmation"
+      ]
+    },
+    "I": {
+      "status": "SHADOW",
+      "universe": "shadow",
+      "holdout": [
+        "2008-01-02",
+        "2022-09-30"
+      ],
+      "u2": {
+        "n_signals": 694,
+        "mean_beta_adj_pct": 0.3041,
+        "ci95_beta_adj": [
+          -0.7398,
+          1.4389
+        ],
+        "placebo_percentile": 87.0,
+        "paired_placebo_diff": 1.4603,
+        "paired_placebo_ci": [
+          0.6402,
+          2.3454
+        ],
+        "break_even_bps_per_side": 25.21
+      },
+      "u1": {
+        "n_signals": 3008,
+        "mean_beta_adj_pct": -0.1401,
+        "ci95_beta_adj": [
+          -1.2262,
+          1.0451
+        ],
+        "placebo_percentile": 68.5
+      },
+      "reasons": [
+        "P1 failed on U2",
+        "P2 failed on U2",
+        "P4 failed on U2",
+        "P5 failed on U2",
+        "P3 failed on U1 confirmation"
+      ]
+    }
+  }
 }

@@ -29,8 +29,10 @@ def main() -> int:
     from scripts.build_long_history import build_long_history, verify_adjustment_identities
     from src.swing.data import CikResolver, load_filings, load_price_frames
     summary = {"insider": build_insider()}
-    ok, failed = build_long_history(limit=args.limit)
-    summary["prices"] = {"ok": ok, "failed": failed, "identities_pass": verify_adjustment_identities()}
+    history_check: dict = {}
+    ok, failed = build_long_history(limit=args.limit, history_check=history_check)
+    summary["prices"] = {"ok": ok, "failed": failed, "identities_pass": verify_adjustment_identities(),
+                         "history_check": history_check}
     frames = load_price_frames()
     from scripts.validate_backtest_pipeline import production_universe
     u1, _ = production_universe()

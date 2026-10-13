@@ -268,12 +268,16 @@ def stage_decide(smoke: bool) -> Dict[str, Any]:
     missing = [s for s, r in res.items() if r.get("untested") == "sleeve job produced no result"]
     # Data-quality gate: the U1 universe must be (almost) fully covered by price history
     summ_path = os.path.join(OUT_DIR, "data_summary.json")
-    coverage = None
+    coverage, hist = None, None
     if os.path.exists(summ_path):
-        coverage = (json.load(open(summ_path)).get("prices") or {}).get("u1_coverage_pct")
-    data_ok = coverage is not None and coverage >= MIN_U1_COVERAGE_PCT
+        prices = json.load(open(summ_path)).get("prices") or {}
+        coverage, hist = prices.get("u1_coverage_pct"), prices.get("history_check")
+    # The history check (scripts/build_long_history.py) must have run: it guards against Yahoo
+    # silently returning truncated histories, which a coverage count cannot detect.
+    data_ok = coverage is not None and coverage >= MIN_U1_COVERAGE_PCT and bool(hist)
     if not data_ok:
-        logger.error("U1 price coverage %s%% < %s%%: results are not adopted.", coverage, MIN_U1_COVERAGE_PCT)
+        logger.error("U1 price coverage %s%% (min %s%%), history check %s: results are not adopted.",
+                     coverage, MIN_U1_COVERAGE_PCT, "ran" if hist else "missing")
     any_smoke = (smoke or bool(missing) or not rep or not data_ok
                  or any(r.get("provenance", {}).get("smoke") for r in res.values() if "provenance" in r)
                  or bool(rep.get("provenance", {}).get("smoke")))
@@ -302,7 +306,7 @@ def stage_decide(smoke: bool) -> Dict[str, Any]:
             "u1": {k: u1.get(k) for k in ("n_signals", "mean_beta_adj_pct", "ci95_beta_adj", "placebo_percentile")} if u1 else None,
             "reasons": reasons,
         }
-    out = {"provenance": dict(provenance(any_smoke), u1_price_coverage_pct=coverage), "holm_adjusted_p": adj, "decisions": decisions,
+    out = {"provenance": dict(provenance(any_smoke), u1_price_coverage_pct=coverage, price_history_check=hist), "holm_adjusted_p": adj, "decisions": decisions,
            "overlays": "not run: overlays are evaluated only on LIVE sleeves" if not any(
                d["status"].startswith("LIVE") for d in decisions.values()) else "pending",
            "config": config}

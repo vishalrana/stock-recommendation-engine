@@ -3,10 +3,11 @@
 // Display-only position-sizing guidance (profitability program, Phase 6). The account size and
 // risk per idea live only in this browser's localStorage: never sent to the server, never stored
 // in Supabase, and never used by the engine. Nothing here places or suggests an order.
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 
 const KEY_ACCOUNT = 'sizing_account_usd';
 const KEY_RISK = 'sizing_risk_pct';
+const EVENT = 'sizing-settings-changed';
 export const DEFAULT_RISK_PCT = 0.5;
 
 function read(key: string): number | null {
@@ -24,22 +25,29 @@ function write(key: string, value: number | null) {
     if (value === null) window.localStorage.removeItem(key);
     else window.localStorage.setItem(key, String(value));
   } catch {
-    // storage blocked (private window): keep the value for this page view only
+    // storage blocked (private window): the value is not kept
   }
+  window.dispatchEvent(new Event(EVENT));
+}
+
+function subscribe(onChange: () => void) {
+  window.addEventListener('storage', onChange);
+  window.addEventListener(EVENT, onChange);
+  return () => {
+    window.removeEventListener('storage', onChange);
+    window.removeEventListener(EVENT, onChange);
+  };
 }
 
 export function useSizing() {
-  const [account, setAccountState] = useState<number | null>(null);
-  const [riskPct, setRiskState] = useState<number>(DEFAULT_RISK_PCT);
-  useEffect(() => {
-    setAccountState(read(KEY_ACCOUNT));
-    setRiskState(read(KEY_RISK) ?? DEFAULT_RISK_PCT);
-  }, []);
+  // The server render has no browser storage: no account size until the client reads it.
+  const account = useSyncExternalStore(subscribe, () => read(KEY_ACCOUNT), () => null);
+  const riskPct = useSyncExternalStore(subscribe, () => read(KEY_RISK) ?? DEFAULT_RISK_PCT, () => DEFAULT_RISK_PCT);
   return {
     account,
     riskPct,
-    setAccount: (v: number | null) => { setAccountState(v); write(KEY_ACCOUNT, v); },
-    setRiskPct: (v: number) => { setRiskState(v); write(KEY_RISK, v); },
+    setAccount: (v: number | null) => write(KEY_ACCOUNT, v),
+    setRiskPct: (v: number) => write(KEY_RISK, v),
   };
 }
 

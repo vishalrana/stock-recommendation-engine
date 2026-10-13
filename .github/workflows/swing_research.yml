@@ -1,209 +1,163 @@
 name: Swing Research Pipeline
 
+# Pre-registered swing signals holdout study (CLAUDE.md, "Swing signals program"): full universe,
+# U1 and U2, 200 placebos, holdout 2008-01-02..2022-09-30. One job per sleeve. The decide job
+# writes outputs/swing/decisions.json and config/swing_sleeves.json with this run's id; they are
+# committed only from a successful run of this workflow.
+
 on:
   workflow_dispatch:
     inputs:
-      stage:
-        description: 'Research Stage (data | replication | sleeves | overlays | all)'
-        required: true
-        default: 'all'
-        type: choice
-        options:
-          - data
-          - replication
-          - sleeves
-          - overlays
-          - all
-      universe:
-        description: 'Evaluated Universe (u1 | u2 | both)'
-        required: true
-        default: 'both'
-        type: choice
-        options:
-          - u1
-          - u2
-          - both
       placebo:
-        description: 'Number of random-stock placebo iterations'
-        required: true
+        description: 'Random-stock placebo runs per sleeve and universe'
+        required: false
         default: '200'
-        type: string
       limit:
-        description: 'Limit number of tickers / runs for smoke testing (leave empty for full run)'
+        description: 'Smoke test: first N tickers (empty = full universe; results are marked smoke and never adopted)'
         required: false
         default: ''
-        type: string
-  push:
-    branches:
-      - swing-signals
-    paths:
-      - '.github/swing_research_trigger.json'
 
 concurrency:
-  group: swing-research-${{ github.ref }}
+  group: swing-research
   cancel-in-progress: false
 
+env:
+  PYTHONPATH: .
+  SKIP_NLP: 'true'
+  SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+  LIMIT_ARG: ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+
 jobs:
-  build-data:
-    name: Build Long History Data
+  data:
+    name: Build data (prices 2004+, SEC 2006+, insider data sets)
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-research.txt
-
-      - name: Cache Long History Data
-        id: cache-long-history
-        uses: actions/cache@v4
+          pip install -r requirements.txt -r jobs/requirements.txt -r requirements-research.txt
+      - name: Restore research data
+        uses: actions/cache/restore@v4
         with:
           path: |
             data/backtest_history_long
-            data/cache/sec_filings
-          key: swing-data-long-${{ hashFiles('data/reference/sp500_ticker_start_end.csv') }}-v1
-          restore-keys: |
-            swing-data-long-
-
-      - name: Determine Trigger Inputs
-        id: inputs
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "stage=${{ github.event.inputs.stage }}" >> $GITHUB_OUTPUT
-            echo "universe=${{ github.event.inputs.universe }}" >> $GITHUB_OUTPUT
-            echo "placebo=${{ github.event.inputs.placebo }}" >> $GITHUB_OUTPUT
-            echo "limit=${{ github.event.inputs.limit }}" >> $GITHUB_OUTPUT
-          else
-            STAGE=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('stage', 'all'))")
-            UNIVERSE=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('universe', 'both'))")
-            PLACEBO=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('placebo', 200))")
-            LIMIT=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('limit') or '')")
-            echo "stage=$STAGE" >> $GITHUB_OUTPUT
-            echo "universe=$UNIVERSE" >> $GITHUB_OUTPUT
-            echo "placebo=$PLACEBO" >> $GITHUB_OUTPUT
-            echo "limit=$LIMIT" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build Price Data (2004 Onward)
-        if: steps.inputs.outputs.stage == 'data' || steps.inputs.outputs.stage == 'all'
-        run: |
-          LIMIT_FLAG=""
-          if [ -n "${{ steps.inputs.outputs.limit }}" ]; then
-            LIMIT_FLAG="--limit ${{ steps.inputs.outputs.limit }}"
-          fi
-          python scripts/build_long_history.py $LIMIT_FLAG
-
-      - name: Build SEC Long History
-        if: steps.inputs.outputs.stage == 'data' || steps.inputs.outputs.stage == 'all'
-        env:
-          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-        run: |
-          LIMIT_FLAG=""
-          if [ -n "${{ steps.inputs.outputs.limit }}" ]; then
-            LIMIT_FLAG="--limit ${{ steps.inputs.outputs.limit }}"
-          fi
-          python scripts/build_sec_history.py $LIMIT_FLAG
-
-      - name: Build Short Interest History
-        if: steps.inputs.outputs.stage == 'data' || steps.inputs.outputs.stage == 'all'
-        run: |
-          python scripts/build_short_interest.py
-
-      - name: Evaluate Survivorship By Year
-        run: |
-          python scripts/report_survivorship_by_year.py
-
-      - name: Upload Data Artifacts
-        uses: actions/upload-artifact@v4
+            data/cache/universe
+          key: swing-research-data-v2-${{ github.run_id }}
+          restore-keys: swing-research-data-v2-
+      - name: Build data
+        run: python scripts/build_swing_data.py $LIMIT_ARG
+      - name: Save research data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/backtest_history_long
+            data/cache/universe
+          key: swing-research-data-v2-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: swing-data-outputs
-          path: |
-            outputs/swing/
-            outputs/research_trials.jsonl
-          if-no-files-found: ignore
+          name: swing-data-summary
+          path: outputs/swing/
+          if-no-files-found: warn
 
-  research-run:
-    name: Research & Sleeves Evaluation
-    needs: build-data
+  replication:
+    needs: data
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-research.txt
-
-      - name: Restore Long History Data Cache
-        uses: actions/cache@v4
+      - run: pip install -r requirements.txt -r jobs/requirements.txt -r requirements-research.txt
+      - uses: actions/cache/restore@v4
         with:
           path: |
             data/backtest_history_long
-            data/cache/sec_filings
-          key: swing-data-long-${{ hashFiles('data/reference/sp500_ticker_start_end.csv') }}-v1
-          restore-keys: |
-            swing-data-long-
-
-      - name: Determine Trigger Inputs
-        id: inputs
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "stage=${{ github.event.inputs.stage }}" >> $GITHUB_OUTPUT
-            echo "universe=${{ github.event.inputs.universe }}" >> $GITHUB_OUTPUT
-            echo "placebo=${{ github.event.inputs.placebo }}" >> $GITHUB_OUTPUT
-            echo "limit=${{ github.event.inputs.limit }}" >> $GITHUB_OUTPUT
-          else
-            STAGE=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('stage', 'all'))")
-            UNIVERSE=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('universe', 'both'))")
-            PLACEBO=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('placebo', 200))")
-            LIMIT=$(python -c "import json; d=json.load(open('.github/swing_research_trigger.json')); print(d.get('limit') or '')")
-            echo "stage=$STAGE" >> $GITHUB_OUTPUT
-            echo "universe=$UNIVERSE" >> $GITHUB_OUTPUT
-            echo "placebo=$PLACEBO" >> $GITHUB_OUTPUT
-            echo "limit=$LIMIT" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Execute Swing Research Suite
-        env:
-          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-        run: |
-          LIMIT_FLAG=""
-          if [ -n "${{ steps.inputs.outputs.limit }}" ]; then
-            LIMIT_FLAG="--limit ${{ steps.inputs.outputs.limit }}"
-          fi
-          python scripts/research_swing.py \
-            --stage "${{ steps.inputs.outputs.stage }}" \
-            --universe "${{ steps.inputs.outputs.universe }}" \
-            --placebo "${{ steps.inputs.outputs.placebo }}" \
-            $LIMIT_FLAG
-
-      - name: Upload Research Artifacts
-        uses: actions/upload-artifact@v4
+            data/cache/universe
+          key: swing-research-data-v2-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - run: python scripts/research_swing.py --stage replication $LIMIT_ARG
+      - run: python scripts/research_swing.py --stage patterns $LIMIT_ARG
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: swing-research-outputs
+          name: swing-replication
           path: |
-            outputs/swing/
+            outputs/swing/replication.json
+            outputs/swing/patterns.json
             outputs/research_trials.jsonl
+
+  sleeve:
+    needs: data
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        sleeve: [T, E, N, P, I]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt -r jobs/requirements.txt -r requirements-research.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/backtest_history_long
+            data/cache/universe
+          key: swing-research-data-v2-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - run: python scripts/research_swing.py --stage sleeve --sleeve ${{ matrix.sleeve }} --placebo ${{ inputs.placebo || '200' }} $LIMIT_ARG
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swing-sleeve-${{ matrix.sleeve }}
+          path: |
+            outputs/swing/sleeve_${{ matrix.sleeve }}.json
+            outputs/swing/trades_${{ matrix.sleeve }}_*.csv
+            outputs/research_trials.jsonl
+
+  decide:
+    needs: [replication, sleeve]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt -r jobs/requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect sleeve and replication outputs
+        run: |
+          mkdir -p outputs/swing
+          # artifacts keep their paths relative to outputs/ (e.g. swing/sleeve_T.json)
+          find artifacts -name 'replication.json' -exec cp {} outputs/swing/ \;
+          find artifacts -name 'patterns.json' -exec cp {} outputs/swing/ \;
+          find artifacts -name 'sleeve_*.json' -exec cp {} outputs/swing/ \;
+          find artifacts -name 'data_summary.json' -exec cp {} outputs/swing/ \;
+          ls -la outputs/swing
+      - run: python scripts/research_swing.py --stage decide $LIMIT_ARG
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swing-decisions
+          path: |
+            outputs/swing/decisions.json
+            outputs/swing/replication.json
+            outputs/swing/patterns.json
             config/swing_sleeves.json
-          if-no-files-found: ignore

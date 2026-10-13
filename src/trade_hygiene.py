@@ -42,9 +42,8 @@ class SessionCalendar:
             j = i + n
             if 0 <= j < len(s):
                 return s[j].astype(object)
-        from src.utils.market_date import _nyse_holidays
-        lo, hi = date(day.year - 2, 1, 1), date(day.year + 2, 12, 31)
-        out = np.busday_offset(d64, n, roll="forward" if n >= 0 else "backward", holidays=_nyse_holidays(lo, hi))
+        from src.utils.market_date import nyse_busdaycal
+        out = np.busday_offset(d64, n, roll="forward" if n >= 0 else "backward", busdaycal=nyse_busdaycal())
         return out.astype(object)
 
 

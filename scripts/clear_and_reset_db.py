@@ -27,8 +27,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-CLEAR_TABLES = ("signals", "signals_history", "scan_log", "context_cache")
-EMPTY_DECOMMISSIONED = ("portfolio_state",)
+# 2026-10-12 (swing-fix): the Ideas and swing tables, the decommissioned portfolio_state and the
+# shadow-only news / analyst archives are cleared; reference data in KEEP_TABLES is kept.
+CLEAR_TABLES = ("signals", "signals_history", "scan_log", "context_cache", "portfolio_state",
+                "swing_signals", "swing_events", "swing_sleeve_status", "swing_ledger",
+                "news_items", "news_labels", "analyst_snapshots")
+EMPTY_DECOMMISSIONED: tuple = ()
 KEEP_TABLES = ("earnings_calendar", "ticker_metrics", "delisted_tickers")
 PAGE_SIZE = 1000
 # Code that would still depend on a decommissioned table (the reset script itself and the test that
@@ -132,6 +136,8 @@ def plan(relations: dict) -> tuple:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Back up, then clear the recommendation data in Supabase")
     parser.add_argument("--yes", action="store_true", help="Actually back up and delete (default: dry run)")
+    parser.add_argument("--reseed-sleeves", action="store_true",
+                        help="After clearing, reseed swing_sleeve_status from config/swing_sleeves.json")
     args = parser.parse_args(argv)
 
     from dotenv import load_dotenv
@@ -155,6 +161,11 @@ def main(argv=None) -> int:
         print(f"  {t}: still referenced by {users}; not emptied")
     if views:
         print(f"  views (derived from the tables, not backed up): {', '.join(views)}")
+    others = [t for t in sorted(relations) if t not in targets and t not in KEEP_TABLES]
+    print(f"  other tables found (left alone): {', '.join(others) if others else 'none'}")
+    missing = [t for t in CLEAR_TABLES if t not in relations]
+    if missing:
+        print(f"  listed for clearing but not in the database: {', '.join(missing)}")
 
     if not args.yes:
         print(f"\nDRY RUN: nothing backed up or deleted. With --yes: back up {len(relations)} tables to "
@@ -187,7 +198,24 @@ def main(argv=None) -> int:
         print("PROBLEMS: " + "; ".join(problems))
         return 1
     print("Cleared tables are empty; every other table is unchanged.")
+    if args.reseed_sleeves:
+        reseed_sleeve_status(client)
     return 0
+
+
+def reseed_sleeve_status(client) -> None:
+    """swing_sleeve_status from config/swing_sleeves.json (the committed research run), or SHADOW / not tested."""
+    from jobs.generate_swing_signals import SLEEVE_NAMES, load_config
+    cfg, prov = load_config()
+    for s, c in cfg.items():
+        client.table("swing_sleeve_status").upsert({
+            "sleeve": s, "name": SLEEVE_NAMES[s], "status": c["status"], "universe": c.get("universe", "shadow"),
+            "u2_beta_adj": (c.get("u2") or {}).get("mean_beta_adj_pct"), "u1_beta_adj": (c.get("u1") or {}).get("mean_beta_adj_pct"),
+            "reasons": c.get("reasons") or [], "details": {"u2": c.get("u2"), "u1": c.get("u1")},
+            "research_run_id": prov.get("github_run_id"),
+        }, on_conflict="sleeve").execute()
+    modes = ", ".join("%s=%s" % (s, c["status"]) for s, c in cfg.items())
+    print(f"Reseeded swing_sleeve_status: {modes} (research run {prov.get('github_run_id')})")
 
 
 if __name__ == "__main__":

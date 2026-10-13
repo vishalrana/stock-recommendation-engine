@@ -40,15 +40,10 @@ def get_target_tickers() -> List[str]:
     # 1. Sector ETFs and benchmark
     tickers.update(SECTOR_ETFS)
 
-    # 2. U1 Production universe
-    try:
-        import jobs.generate_signals as gs
-        u1_tickers, _, _ = gs.load_universe("expanded")
-        for t in u1_tickers:
-            if t and isinstance(t, str):
-                tickers.add(yahoo_symbol(t))
-    except Exception as e:
-        logger.warning(f"Could not load U1 universe from generate_signals: {e}")
+    # 2. U1: today's security master. Fails loudly rather than silently building a smaller universe.
+    from scripts.validate_backtest_pipeline import production_universe
+    stocks, _ = production_universe()
+    tickers.update(yahoo_symbol(t) for t in stocks if t)
 
     # 3. S&P 500 historical membership overlapping 2008-2022
     try:
@@ -215,18 +210,33 @@ def download_chunk(tickers: List[str], start_date: str = "2004-01-01",
     return results
 
 
+def _first_bar(path: str) -> Optional[pd.Timestamp]:
+    try:
+        idx = pd.read_parquet(path, columns=["CLOSE"]).index
+        return idx[0] if len(idx) else None
+    except Exception:
+        return None
+
+
 def build_long_history(
     tickers: Optional[List[str]] = None,
     start_date: str = "2004-01-01",
     output_dir: str = OUTPUT_DIR,
-    chunk_size: int = 200,
+    chunk_size: int = 100,
     limit: Optional[int] = None,
-    skip_existing: bool = True,
+    skip_existing: bool = False,
+    history_check: Optional[Dict] = None,
 ) -> Tuple[int, int]:
     """
     Main long history build process.
     Downloads tickers, writes parquets, logs failures.
     Returns (success_count, fail_count).
+
+    Every ticker is re-downloaded (skip_existing=False). Yahoo bulk responses can silently return
+    a truncated history (run 38189718125 had NVDA from 2024 and EQR/AVB from 2026), so a fresh
+    download never replaces a cached file that starts earlier; a ticker whose fresh history starts
+    more than 5 days after its cached one is re-requested in small chunks, and if it still starts
+    later the cached file is kept. Counts go into history_check.
     """
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(FAILURES_CSV), exist_ok=True)
@@ -241,36 +251,97 @@ def build_long_history(
 
     logger.info(f"Target tickers count: {len(all_tickers)}")
 
+    cached_first: Dict[str, pd.Timestamp] = {}
     to_download = []
     already_have = 0
     for t in all_tickers:
         p = os.path.join(output_dir, f"{t}.parquet")
-        if skip_existing and os.path.exists(p) and os.path.getsize(p) > 1024:
-            already_have += 1
-        else:
-            to_download.append(t)
+        if os.path.exists(p) and os.path.getsize(p) > 1024:
+            fb = _first_bar(p)
+            if fb is not None:
+                cached_first[t] = fb
+            if skip_existing:
+                already_have += 1
+                continue
+        to_download.append(t)
 
-    logger.info(f"Already cached: {already_have}. Need download: {len(to_download)}")
+    logger.info(f"Cached files: {len(cached_first)}. Downloading: {len(to_download)}")
 
-    success_count = already_have
-    failed_tickers: List[Tuple[str, str]] = []
+    check = {"cached_files": len(cached_first), "fresh_started_later": 0, "recovered_on_retry": 0,
+             "kept_cached_longer": 0, "kept_cached_on_failure": 0, "examples": []}
+    tolerance = pd.Timedelta(days=5)
+    written: Set[str] = set()
+    later: Dict[str, pd.DataFrame] = {}
 
-    for i in range(0, len(to_download), chunk_size):
-        chunk = to_download[i:i + chunk_size]
-        logger.info(f"Downloading chunk {i//chunk_size + 1}/{(len(to_download) + chunk_size - 1)//chunk_size} ({len(chunk)} tickers)...")
+    def accept(t: str, df: pd.DataFrame) -> bool:
+        cf = cached_first.get(t)
+        if cf is not None and df.index[0] > cf + tolerance:
+            later[t] = df
+            return False
+        df.to_parquet(os.path.join(output_dir, f"{t}.parquet"), engine="pyarrow", compression="snappy")
+        written.add(t)
+        later.pop(t, None)
+        return True
 
-        chunk_res = download_chunk(chunk, start_date=start_date)
+    # Yahoo throttles bursts: modest chunks with pauses, then retry passes with growing back-off.
+    # A retry pass that recovers nothing ends the retries (the rest are delisted or unknown symbols).
+    pending = list(to_download)
+    reasons: Dict[str, str] = {}
+    for attempt, (size, pause) in enumerate([(chunk_size, 2.0), (50, 30.0), (25, 60.0), (10, 120.0), (5, 240.0)]):
+        if not pending:
+            break
+        if attempt:
+            logger.info(f"Retry pass {attempt}: {len(pending)} tickers, chunks of {size}, {pause:.0f}s pauses")
+            time.sleep(pause)
+        still: List[str] = []
+        for i in range(0, len(pending), size):
+            chunk = pending[i:i + size]
+            logger.info(f"Downloading {i // size + 1}/{(len(pending) + size - 1) // size} ({len(chunk)} tickers)...")
+            chunk_res = download_chunk(chunk, start_date=start_date)
+            for t in chunk:
+                df = chunk_res.get(t)
+                if df is not None and not df.empty:
+                    accept(t, df)
+                else:
+                    still.append(t)
+            time.sleep(pause if attempt else 2.0)
+        if attempt and len(still) == len(pending):
+            pending = still
+            break
+        pending = still
 
-        for t in chunk:
-            df = chunk_res.get(t)
-            if df is not None and not df.empty:
-                out_path = os.path.join(output_dir, f"{t}.parquet")
-                df.to_parquet(out_path, engine="pyarrow", compression="snappy")
-                success_count += 1
-            else:
-                failed_tickers.append((t, "No valid price data returned"))
+    # Fresh history starts later than the cached one: re-request, then fall back to the cached file.
+    check["fresh_started_later"] = len(later)
+    for attempt in range(3):
+        if not later:
+            break
+        retry = sorted(later)
+        logger.info(f"History check pass {attempt + 1}: {len(retry)} tickers started later than their cached file")
+        time.sleep(30.0)
+        for i in range(0, len(retry), 10):
+            chunk = retry[i:i + 10]
+            res = download_chunk(chunk, start_date=start_date)
+            for t in chunk:
+                df = res.get(t)
+                if df is not None and not df.empty and accept(t, df):
+                    check["recovered_on_retry"] += 1
+            time.sleep(10.0)
+    for t, df in later.items():
+        check["kept_cached_longer"] += 1
+        if len(check["examples"]) < 30:
+            check["examples"].append({"ticker": t, "cached_first": str(cached_first[t].date()),
+                                      "fresh_first": str(df.index[0].date())})
+    # Download failed now but a cached file exists: keep the cached file (counts as valid).
+    for t in list(pending):
+        if t in cached_first:
+            pending.remove(t)
+            check["kept_cached_on_failure"] += 1
 
-        time.sleep(0.5)
+    success_count = already_have + len(written) + check["kept_cached_longer"] + check["kept_cached_on_failure"]
+    failed_tickers = [(t, reasons.get(t, "no valid price data after retries")) for t in pending]
+    if history_check is not None:
+        history_check.update(check)
+    logger.info(f"History check: {check}")
 
     if failed_tickers:
         fail_df = pd.DataFrame(failed_tickers, columns=["ticker", "reason"])
@@ -324,7 +395,7 @@ def verify_adjustment_identities(output_dir: str = OUTPUT_DIR) -> bool:
     # 2. NVDA 10:1 split (2024-06-10)
     nvda_path = os.path.join(output_dir, "NVDA.parquet")
     if not os.path.exists(nvda_path):
-        res = download_chunk(["NVDA"], start_date="2024-05-01")
+        res = download_chunk(["NVDA"], start_date="2004-01-01")
         if "NVDA" in res:
             res["NVDA"].to_parquet(nvda_path)
 
@@ -347,7 +418,7 @@ def verify_adjustment_identities(output_dir: str = OUTPUT_DIR) -> bool:
     # 3. AAPL 4:1 split (2020-08-31)
     aapl_path = os.path.join(output_dir, "AAPL.parquet")
     if not os.path.exists(aapl_path):
-        res = download_chunk(["AAPL"], start_date="2020-08-01")
+        res = download_chunk(["AAPL"], start_date="2004-01-01")
         if "AAPL" in res:
             res["AAPL"].to_parquet(aapl_path)
 

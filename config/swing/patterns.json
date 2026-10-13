@@ -1,0 +1,161 @@
+{
+  "provenance": {
+    "github_run_id": "38436737951",
+    "git_sha": "e1190aa839417f60e86350ab76f1a254c2766540",
+    "smoke": false,
+    "generated_at": "2026-10-13T17:38:49.586114+00:00",
+    "holdout": [
+      "2008-01-02",
+      "2022-09-30"
+    ]
+  },
+  "universes": {
+    "u1": {
+      "hs_top_confirmed_20d": {
+        "months": 177,
+        "mean_ic": 0.0096,
+        "nw_t": 1.36,
+        "first_half_mean_ic": 0.0187,
+        "second_half_mean_ic": 0.0006,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.542
+      },
+      "inv_hs_confirmed_20d": {
+        "months": 177,
+        "mean_ic": 0.0027,
+        "nw_t": 0.34,
+        "first_half_mean_ic": 0.0072,
+        "second_half_mean_ic": -0.0018,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.548
+      },
+      "double_bottom_breakout_20d": {
+        "months": 177,
+        "mean_ic": -0.0133,
+        "nw_t": -2.01,
+        "first_half_mean_ic": -0.0028,
+        "second_half_mean_ic": -0.0237,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.424
+      },
+      "base_depth_pct": {
+        "months": 177,
+        "mean_ic": -0.0394,
+        "nw_t": -4.54,
+        "first_half_mean_ic": -0.0477,
+        "second_half_mean_ic": -0.0313,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.339
+      },
+      "contraction_count": {
+        "months": 177,
+        "mean_ic": -0.004,
+        "nw_t": -1.02,
+        "first_half_mean_ic": 0.002,
+        "second_half_mean_ic": -0.01,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.475
+      },
+      "dist_to_neckline_atr": {
+        "months": 177,
+        "mean_ic": -0.0156,
+        "nw_t": -3.54,
+        "first_half_mean_ic": -0.0173,
+        "second_half_mean_ic": -0.014,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.407
+      },
+      "breakout_volume_ratio": {
+        "months": 177,
+        "mean_ic": -0.0133,
+        "nw_t": -2.7,
+        "first_half_mean_ic": -0.0148,
+        "second_half_mean_ic": -0.0118,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.452
+      }
+    },
+    "u2": {
+      "hs_top_confirmed_20d": {
+        "months": 177,
+        "mean_ic": 0.0076,
+        "nw_t": 0.94,
+        "first_half_mean_ic": 0.0068,
+        "second_half_mean_ic": 0.0084,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.503
+      },
+      "inv_hs_confirmed_20d": {
+        "months": 177,
+        "mean_ic": 0.002,
+        "nw_t": 0.17,
+        "first_half_mean_ic": -0.009,
+        "second_half_mean_ic": 0.0128,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.537
+      },
+      "double_bottom_breakout_20d": {
+        "months": 177,
+        "mean_ic": -0.0095,
+        "nw_t": -1.24,
+        "first_half_mean_ic": 0.001,
+        "second_half_mean_ic": -0.0199,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.407
+      },
+      "base_depth_pct": {
+        "months": 177,
+        "mean_ic": -0.0394,
+        "nw_t": -4.2,
+        "first_half_mean_ic": -0.0531,
+        "second_half_mean_ic": -0.0259,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.35
+      },
+      "contraction_count": {
+        "months": 177,
+        "mean_ic": -0.0042,
+        "nw_t": -0.83,
+        "first_half_mean_ic": -0.0027,
+        "second_half_mean_ic": -0.0058,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.486
+      },
+      "dist_to_neckline_atr": {
+        "months": 177,
+        "mean_ic": -0.0156,
+        "nw_t": -2.63,
+        "first_half_mean_ic": -0.0198,
+        "second_half_mean_ic": -0.0113,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.407
+      },
+      "breakout_volume_ratio": {
+        "months": 176,
+        "mean_ic": -0.0099,
+        "nw_t": -1.49,
+        "first_half_mean_ic": -0.0135,
+        "second_half_mean_ic": -0.0064,
+        "late_mean_ic": null,
+        "late_months": 0,
+        "share_months_positive": 0.483
+      }
+    }
+  },
+  "candidate_vetoes_for_future_study": [
+    "base_depth_pct"
+  ]
+}

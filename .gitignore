@@ -47,3 +47,7 @@ scratch/
 
 # Supabase backups made by scripts/clear_and_reset_db.py (real data; the repo is public)
 backups/
+
+# Swing signals: live job cache (bars, SEC, Form 4s); research results are committed under config/swing/
+data/swing_live/
+!config/swing/*.json

@@ -1,5 +1,26 @@
 import { getSupabase } from './supabase';
-import { Recommendation, ScanLog, ScanHistoryEntry } from '../types/database';
+import { Recommendation, ScanLog, ScanHistoryEntry, SwingSignalRecord, SwingSleeveStatus } from '../types/database';
+
+interface TickerMetricRow {
+  ticker?: string | null;
+  win_rate?: number | null;
+  wins?: number | null;
+  losses?: number | null;
+  expectancy_pct?: number | null;
+}
+
+interface ScanSignalRow {
+  scan_date: string;
+  ticker?: string | null;
+  company_name?: string | null;
+  strategy?: string | null;
+  strategy_name?: string | null;
+  status?: string | null;
+  outcome?: string | null;
+  rejection_reason?: string | null;
+  sell_signal_reason?: string | null;
+  composite_score?: number | null;
+}
 
 export async function fetchActiveRecommendations(): Promise<Recommendation[]> {
   const supabase = getSupabase();
@@ -17,24 +38,24 @@ export async function fetchActiveRecommendations(): Promise<Recommendation[]> {
 
   // Fetch ticker metrics for win rates and trades
   const { data: metricsData } = await supabase.from('ticker_metrics').select('*');
-  const metricsMap = new Map((metricsData || []).map((m: any) => [m.ticker?.toUpperCase(), m]));
+  const metricsMap = new Map(((metricsData || []) as TickerMetricRow[]).map((m) => [m.ticker?.toUpperCase(), m]));
 
-  const activeFormatted = (activeSignals || []).map((s: any) => {
-    const m = metricsMap.get(s.ticker?.toUpperCase()) || {};
+  const activeFormatted = ((activeSignals || []) as Recommendation[]).map((s) => {
+    const m: TickerMetricRow = metricsMap.get(s.ticker?.toUpperCase()) || {};
     return {
       ...s,
       tier_label: s.tier_label || (Number(s.composite_score) >= 80 ? 'Strong Buy' : Number(s.composite_score) >= 65 ? 'Buy' : 'Hold'),
       status: s.status || 'open',
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate !== undefined && m.win_rate !== null ? m.win_rate : null,
-      total_trades: (m.wins !== undefined && m.losses !== undefined) ? (m.wins + m.losses) : null,
+      total_trades: (m.wins !== undefined && m.wins !== null && m.losses !== undefined && m.losses !== null) ? (m.wins + m.losses) : null,
       expectancy_pct: m.expectancy_pct !== undefined && m.expectancy_pct !== null ? m.expectancy_pct : null,
       wins: m.wins ?? null,
       losses: m.losses ?? null,
     };
   });
 
-  activeFormatted.sort((a: any, b: any) => {
+  activeFormatted.sort((a, b) => {
     const dateA = new Date(a.scan_date || 0).getTime();
     const dateB = new Date(b.scan_date || 0).getTime();
     if (dateB !== dateA) return dateB - dateA;
@@ -77,7 +98,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
 
   // Attach ticker metrics
   const { data: metricsData } = await supabase.from('ticker_metrics').select('*');
-  const metricsMap = new Map((metricsData || []).map((m: any) => [m.ticker?.toUpperCase(), m]));
+  const metricsMap = new Map(((metricsData || []) as TickerMetricRow[]).map((m) => [m.ticker?.toUpperCase(), m]));
 
   const seenKeys = new Set<string>();
   const combined: Recommendation[] = [];
@@ -119,7 +140,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
       sell_signal_reason: reason,
       sell_price: h.exit_price || h.price,
       past_win_rate: m.win_rate !== undefined && m.win_rate !== null ? m.win_rate : null,
-      total_trades: (m.wins !== undefined && m.losses !== undefined) ? (m.wins + m.losses) : null,
+      total_trades: (m.wins !== undefined && m.wins !== null && m.losses !== undefined && m.losses !== null) ? (m.wins + m.losses) : null,
       expectancy_pct: m.expectancy_pct !== undefined && m.expectancy_pct !== null ? m.expectancy_pct : null,
       wins: m.wins ?? null,
       losses: m.losses ?? null,
@@ -138,7 +159,7 @@ export async function fetchScanLogSignals(): Promise<Recommendation[]> {
       tier_label: s.tier_label || (s.status === 'rejected' ? 'Rejected' : Number(s.composite_score) >= 80 ? 'Strong Buy' : Number(s.composite_score) >= 65 ? 'Buy' : 'Hold'),
       entry_date: s.entry_date || s.scan_date,
       past_win_rate: m.win_rate !== undefined && m.win_rate !== null ? m.win_rate : null,
-      total_trades: (m.wins !== undefined && m.losses !== undefined) ? (m.wins + m.losses) : null,
+      total_trades: (m.wins !== undefined && m.wins !== null && m.losses !== undefined && m.losses !== null) ? (m.wins + m.losses) : null,
       expectancy_pct: m.expectancy_pct !== undefined && m.expectancy_pct !== null ? m.expectancy_pct : null,
       wins: m.wins ?? null,
       losses: m.losses ?? null,
@@ -249,7 +270,7 @@ export async function fetchScanHistory(limit = 14): Promise<ScanHistoryEntry[]> 
       return [];
     }
 
-    const scanDates = logs.map((l: any) => l.scan_date);
+    const scanDates = (logs as ScanLog[]).map((l) => l.scan_date);
 
     // Fetch signals and history across these scan dates
     const [signalsRes, historyRes] = await Promise.all([
@@ -263,13 +284,13 @@ export async function fetchScanHistory(limit = 14): Promise<ScanHistoryEntry[]> 
         .in('scan_date', scanDates),
     ]);
 
-    const signalsData = signalsRes.data || [];
-    const historyData = historyRes.data || [];
+    const signalsData = (signalsRes.data || []) as ScanSignalRow[];
+    const historyData = (historyRes.data || []) as ScanSignalRow[];
 
-    return logs.map((log: any) => {
+    return (logs as ScanLog[]).map((log) => {
       const sDate = log.scan_date;
-      const dateSignals = signalsData.filter((s: any) => s.scan_date === sDate);
-      const dateHistory = historyData.filter((h: any) => h.scan_date === sDate);
+      const dateSignals = signalsData.filter((s) => s.scan_date === sDate);
+      const dateHistory = historyData.filter((h) => h.scan_date === sDate);
 
       const qualifiedMap = new Map<string, { ticker: string; strategy: string; company_name?: string | null }>();
       const filteredMap = new Map<string, { ticker: string; strategy?: string | null; reason: string }>();
@@ -287,7 +308,7 @@ export async function fetchScanHistory(limit = 14): Promise<ScanHistoryEntry[]> 
           filteredMap.set(ticker, {
             ticker,
             strategy: s.strategy_name || s.strategy,
-            reason: getRejectionReason(s as any),
+            reason: getRejectionReason(s as unknown as Recommendation),
           });
         }
       }
@@ -408,11 +429,11 @@ export async function fetchSwingData(): Promise<{
     if (slvErr) console.warn('Swing sleeve status fetch warning:', slvErr.message);
 
     return {
-      signals: (signals || []) as import('../types/database').SwingSignalRecord[],
-      sleeves: (sleeves || []) as import('../types/database').SwingSleeveStatus[],
+      signals: (signals || []) as SwingSignalRecord[],
+      sleeves: (sleeves || []) as SwingSleeveStatus[],
     };
-  } catch (err: any) {
-    console.warn('Could not fetch swing signals data:', err.message);
+  } catch (err: unknown) {
+    console.warn('Could not fetch swing signals data:', err instanceof Error ? err.message : err);
     return { signals: [], sleeves: [] };
   }
 }

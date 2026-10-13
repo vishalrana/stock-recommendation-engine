@@ -474,7 +474,11 @@ export default function StockIdeasApp({
           <SignalsView
             signals={swingSignals}
             sleeves={swingSleeves}
-            latestDataDate={latestScanLog?.scan_date}
+            latestDataDate={swingSleeves
+              .map((s) => s.details?.last_session || '')
+              .filter(Boolean)
+              .sort()
+              .pop() || undefined}
           />
         )}
 
@@ -484,7 +488,7 @@ export default function StockIdeasApp({
             <div className="flex items-center justify-between mb-4 px-1">
               <div>
                 <h2 className="text-sm font-extrabold text-white uppercase tracking-wider">
-                  Current Stock Ideas
+                  Swing ideas - backtest shows no edge vs SPY
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Tap an idea to inspect the live technical chart and trade setup.

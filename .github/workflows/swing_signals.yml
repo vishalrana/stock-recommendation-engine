@@ -1,16 +1,23 @@
 name: Daily Swing Signals Scanner
 
+# Nightly swing signals (jobs/generate_swing_signals.py). The schedule stays disabled until the
+# pre-registered research run has completed and its decisions are committed; until then run it by
+# hand (workflow_dispatch). When enabled it runs at 01:20 UTC Tue-Sat, after the US close in both
+# summer (EDT) and winter (EST) time.
+
 on:
-  schedule:
-    # 21:30 UTC = 17:30 ET (after NYSE close and official settlement), Mon-Fri
-    - cron: '30 21 * * 1-5'
+  # schedule:
+  #   - cron: '20 1 * * 2-6'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run (do not write to DB or alert)'
+        description: 'Dry run (no database writes, no alerts, no ledger push)'
         required: false
         default: false
         type: boolean
+
+permissions:
+  contents: write          # ledger push to the signals-ledger branch
 
 concurrency:
   group: swing-signals-daily
@@ -20,7 +27,10 @@ jobs:
   scan-and-reconcile:
     name: Scan & Reconcile Swing Signals
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 150
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -39,23 +49,25 @@ jobs:
           pip install -r requirements.txt
           pip install -r jobs/requirements.txt
 
-      - name: Restore Price & SEC Cache
+      # Own incremental cache: daily bars, SEC submissions, EDGAR daily indexes, Form 4s, insider data sets
+      - name: Restore swing live cache
         uses: actions/cache/restore@v4
         with:
           path: |
-            data/backtest_history
-            data/cache/fundamentals
-          key: ${{ runner.os }}-backtest-history-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-backtest-history-
-            swing-live-cache-
+            data/swing_live
+            data/backtest_history_long/insider_zips
+            data/backtest_history_long/insider_purchases.parquet
+            data/backtest_history_long/insider_symbol_cik.parquet
+            data/cache/universe
+          key: swing-live-v2-${{ github.run_id }}
+          restore-keys: swing-live-v2-
 
       - name: Run Swing Signals Engine
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-          APPRISE_ALERTS_URL: ${{ secrets.APPRISE_ALERTS_URL }}
+          APPRISE_URLS: ${{ secrets.APPRISE_URLS }}
         run: |
           DRY_RUN_FLAG=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
@@ -63,27 +75,44 @@ jobs:
           fi
           python jobs/generate_swing_signals.py $DRY_RUN_FLAG
 
-      - name: Push Forward Ledger to signals-ledger Branch
+      - name: Save swing live cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/swing_live
+            data/backtest_history_long/insider_zips
+            data/backtest_history_long/insider_purchases.parquet
+            data/backtest_history_long/insider_symbol_cik.parquet
+            data/cache/universe
+          key: swing-live-v2-${{ github.run_id }}
+
+      - name: Push forward ledger to the signals-ledger branch
         if: github.event.inputs.dry_run != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -d "ledger" ] && [ -n "$(ls -A ledger)" ]; then
-            mkdir -p /tmp/ledger_backup
-            cp -r ledger/* /tmp/ledger_backup/
-            # Check if signals-ledger branch exists on remote
+          if [ -d ledger ] && [ -n "$(ls -A ledger)" ]; then
+            mkdir -p /tmp/ledger_new && cp -r ledger/* /tmp/ledger_new/
             if git ls-remote --exit-code --heads origin signals-ledger; then
               git fetch origin signals-ledger
               git checkout -B signals-ledger origin/signals-ledger
             else
               git checkout --orphan signals-ledger
-              git rm -rf .
+              git rm -rf . > /dev/null
             fi
             mkdir -p ledger
-            cp -r /tmp/ledger_backup/* ledger/
+            for f in /tmp/ledger_new/*.jsonl; do
+              # append tonight's lines without duplicating ones already on the branch
+              touch "ledger/$(basename "$f")"
+              cat "$f" >> "ledger/$(basename "$f")"
+              sort -u -o "ledger/$(basename "$f")" "ledger/$(basename "$f")"
+            done
             git add -f ledger/
             if ! git diff --staged --quiet; then
-              git commit -m "Automated forward swing signals ledger: $(date -u +'%Y-%m-%d')"
+              git commit -m "Swing signals ledger: $(date -u +'%Y-%m-%d')"
               git push origin signals-ledger
             fi
+          else
+            echo "No ledger entries tonight."
           fi

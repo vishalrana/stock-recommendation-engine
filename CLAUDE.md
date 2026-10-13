@@ -628,58 +628,100 @@ Trial list (record every run in outputs/research_trials.jsonl with phase "swing"
 
 Registry location: `outputs/research_trials.jsonl`
 
-### Swing signals program: Decisions and Operations
+### Swing signals program: results and operations
 
-#### Holdout Evaluation Outcomes & Decisions
-Evaluated on the unseen 2008-01..2022-09 holdout period across point-in-time U2 (historical S&P 500) and broad U1:
-- **Sleeve T (Trend Following):**
-  - U1 mean beta-adjusted return: -0.2443%/trade (CI [-0.98, +0.48]).
-  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
-- **Sleeve E (Earnings Reaction):**
-  - U1 mean beta-adjusted return: -0.1309%/trade (CI [-0.85, +0.59]).
-  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
-- **Sleeve N (Catalyst Gap):**
-  - U1 mean beta-adjusted return: -2.3537%/trade.
-  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
-- **Sleeve P (Large-Cap Pullback):**
-  - U1 mean beta-adjusted return: -0.1444%/trade (CI [-0.72, +0.43]).
-  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
-- **Sleeve I (Insider Cluster Buying):**
-  - U1 mean beta-adjusted return: -0.2643%/trade (CI [-1.02, +0.49]).
-  - Verdict: **SHADOW** (failed P1 on U2 and P3 confirmation on U1; not validated for live trading).
+#### Swing fix (2026-10-12 to 2026-10-14, branch `swing-fix`, PR #3)
+- PR #2 had been merged with placeholder logic and fabricated results. Its research and live scripts used constants instead of inputs:
+  - `c6_pct = 0.95`, EAR/AVOL percentiles `0.85`;
+  - `has_8k_or_6k=True`, `has_neg8k=False`, `is_g0=True`;
+  - a fixed $150,000 insider cluster, `rsi2 = 8.5`, `beta or 1.0`;
+  - a noise "placebo".
+  The sleeve results, the pattern "t < -2.5" statement and the replication figures previously recorded here were not produced by any run. They have been removed.
+- Research and live now share `src/swing/` (`engine.py`, `data.py`, `live.py`, `exits.py`), so both use the same point-in-time definitions:
+  - T uses C6pct;
+  - E uses 8-K item 2.02 reactions, EAR vs the sector ETF, AVOL, and percentiles against the prior 63 sessions' announcers;
+  - N uses real 8-K/6-K lookups with a 20:00 ET cutoff;
+  - I uses the SEC Form 3/4/5 data sets plus live Form 4 XML;
+  - G0 runs the real checks, and beta is BETA252;
+  - the placebo is a `PlaceboEngine` subclass that draws random eligible stocks, 200 runs.
+- Tests:
+  - `tests/test_swing_pit.py`: placeholder scan, input variation, truncation look-ahead harness, G0 gates and placebo;
+  - `tests/test_long_history.py`: guard against truncated price histories.
+  CI runs pytest.
+- Live job (`jobs/generate_swing_signals.py`):
+  - It keeps its own incremental price cache (`swing-live-v2-*`).
+  - It issues no BUYs unless the latest bar is the latest completed NYSE session, but still reconciles exits on stale data.
+  - Only LIVE sleeves alert.
+- The decide stage writes `config/swing_sleeves.json` and `config/swing/{decisions,replication,patterns}.json` only from a non-smoke GitHub run, with all five sleeves and replication present, at least 98% U1 price coverage, and the price-history check run. Each file records the run id.
+- Run 38189718125 (2026-10-12) was not adopted. It reused cached files from a throttled run, and the split check had written NVDA from 2024 only. `scripts/build_long_history.py` now re-downloads every ticker, never replaces a cached file with a history that starts later, and stops retrying once a retry pass recovers nothing.
 
-#### Current Status
-- **All 5 sleeves (T, E, N, P, I) are in SHADOW mode.** No live orders are recommended or placed.
-- The UI Signals tab displays shadow candidates in a collapsed drawer clearly marked: *"Not validated - do not trade"*.
-- The live daily engine runs nightly via GitHub Actions, tracks forward performance, updates the immutable audit ledger, and logs live records against kill rules (K3, K12, KDD).
+#### Holdout results (GitHub run 38436737951, 2026-10-13, sha e1190aa; holdout signals 2008-01-02..2022-09-30)
+- Data:
+  - U1 price coverage 99.98% (5,591 of 5,592).
+  - SEC filings for 5,617 of 5,636 tickers.
+  - Insider data sets: 84 quarters (2026Q2–Q4 not yet published).
+- Beta-adjusted %/signal at 10 bps/side, with signal-month block-bootstrap 95% CIs. "Placebo pct" is the book's percentile among 200 random-stock placebo means.
+
+| Sleeve | U2 signals | U2 beta-adj (CI) | U2 placebo pct | U1 signals | U1 beta-adj (CI) | U1 placebo pct | Mode |
+|---|---|---|---|---|---|---|---|
+| T Trend | 5,669 | −0.15 (−0.43 to +0.12) | 37.5 | 20,476 | −0.30 (−0.60 to −0.01) | 93.5 | SHADOW |
+| E Earnings reaction | 1,144 | +0.17 (−0.70 to +1.11) | 85.5 | 4,073 | +0.24 (−0.80 to +1.32) | 98.0 | SHADOW |
+| N Catalyst gap | 411 | −0.71 (−1.74 to +0.29) | 14.5 | 2,242 | −0.92 (−1.83 to +0.05) | 1.0 | SHADOW |
+| P Large-cap pullback | 22,696 | −0.16 (−0.23 to −0.10) | 99.5 | 31,233 | −0.13 (−0.20 to −0.05) | 100.0 | SHADOW |
+| I Insider cluster | 694 | +0.30 (−0.74 to +1.44) | 87.0 | 3,008 | −0.14 (−1.23 to +1.05) | 68.5 | SHADOW |
+
+- P1 failed for every sleeve, so **all five are SHADOW**. The Holm-adjusted p (P5) is 1.00 for every sleeve.
+  - E failed P1, P2, P4 and P5. Its U2 blocks were +1.75, +0.33 and −1.26.
+  - I failed P1–P5. Its U2 blocks were +2.10, −0.78 and −0.59.
+  - P beats its placebo but loses after beta in both universes, so it fails P1 and P6. Its break-even cost is about 2 bps/side.
+  - T fails P8: C6 has U2 IC t 1.65.
+- Overlays (G1, V1, X1) were not run, because they apply only to LIVE sleeves.
+- Recent period (signals from Oct 2022, report-only), U2 beta-adj: T −0.66, E −0.03, N −0.40, P −0.19, I −1.78.
+
+#### Replication (report-only; same run; monthly 20-session beta-adjusted IC, 177 months)
+
+| Signal | U2 IC (NW t) | U1 IC (NW t) |
+|---|---|---|
+| C6 | +0.022 (1.65) | +0.031 (2.85) |
+| MOM12_1 | −0.006 (−0.41) | +0.002 (0.16) |
+| RESMOM | −0.001 (−0.14) | +0.001 (0.15) |
+| HI52 | +0.008 (0.51) | +0.023 (1.84) |
+| −FIP | +0.009 (0.98) | +0.009 (1.54) |
+| −REV21 | +0.012 (1.47) | +0.012 (2.00) |
+| −RVOL252 | +0.055 (3.56) | +0.058 (4.41) |
+| MAD | −0.015 (−1.01) | −0.005 (−0.39) |
+
+- In the holdout, plain 12-1 momentum does not rank stocks. Low volatility is the only strong component.
+- Pattern features (incremental IC, residualized on MOM12_1 and HI52):
+  - `base_depth_pct` is −0.039 in both universes (t −4.20 U2, −4.54 U1). Under the pre-registered rule it is recorded as a **candidate veto for a future pre-registered study**, not used now.
+  - `breakout_volume_ratio` is t −1.49 in U2 and −2.70 in U1, so it does not qualify.
+  - The others are within ±2.7 t.
+
+#### Current status
+- All five sleeves are SHADOW: computed, tracked and shown, never alerted as a BUY.
+- The Signals tab shows them in a collapsed "Not validated - do not trade" drawer with no BUY action.
 
 #### Operations
-- **Nightly GitHub Actions Workflow:** `.github/workflows/swing_signals.yml` (Mon-Fri 21:30 UTC / 03:00 IST).
-- **Forward-Only Ledger:** Daily events logged to `ledger/YYYY-MM-DD.jsonl` and committed to orphan audit branch `signals-ledger`.
-- **Supported Optional Secrets:**
-  - `APPRISE_URLS`: Comma-separated notification endpoints (e.g., Telegram, Discord, Slack) for nightly SELL/BUY/WARN alerts.
-  - `GROQ_API_KEY`: Fast free-tier LLM classification for news items.
-  - `GEMINI_API_KEY`: Fallback free-tier LLM classification.
-  - `FINNHUB_API_KEY`: Real-time news and analyst recommendation trend archive.
-  - `FMP_API_KEY`: Secondary analyst snapshot provider.
-  - If any secret is missing, the engine degrades gracefully to neutral/unavailable without breaking.
+- Nightly workflow: `.github/workflows/swing_signals.yml`, schedule `20 1 * * 2-6` (01:20 UTC, Tuesday–Saturday, after each US session).
+- Ledger: daily events go to `ledger/YYYY-MM-DD.jsonl` on the orphan branch `signals-ledger`.
+- Research: `.github/workflows/swing_research.yml`, which has data, replication, a per-sleeve matrix and decide jobs. The first full run takes about 1 h with a warm cache and about 5–6 h cold.
+- Optional secrets: `APPRISE_URLS` (alerts; LIVE sleeves only), `GROQ_API_KEY` / `GEMINI_API_KEY` (shadow LLM labels), `FINNHUB_API_KEY` / `FMP_API_KEY` (analyst archive). Missing secrets degrade to unavailable. As of 2026-10-14 only `SEC_USER_AGENT`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` and `TIINGO_API_KEY` are set.
 
-#### Known Limitations
-- **Survivorship by Year:** S&P 500 historical constituents are reconstructed from end-of-year snapshots; stocks added and removed within the same calendar year are omitted.
-- **Earnings Dates:** Historical earnings dates from 8-K item 2.02 filings are treated as known up to 5 sessions ahead for blackout enforcement; in live trading, companies typically pre-announce report dates 2-4 weeks ahead.
-- **Insider Filing Timing:** Form 4 transactions are filed up to 2 business days after execution; execution timing is pinned to session $t$ strictly after filing date $D$.
-- **FINRA Short Interest Revisions:** Historical FINRA files reflect revisions that overwrite earlier publications.
-- **Adjusted vs Actual Prices:** Split adjustments are back-propagated; actual historical penny execution limits are enforced via `unadjusted_close >= $5.00`.
-- **LLM Labels:** LLM news classification is forward-only; backtest classification is strictly blocked to prevent lookahead bias.
+#### Known limitations (measured)
+- U2 survivorship: S&P 500 membership is daily (fja05680 start/end dates). Yahoo, however, has no history for most members that later delisted or were acquired; it keeps a stub row for such symbols (AVB, EA and QRVO stopped trading in 2026).
+  - Member-days with no bar: 39% in 2008, falling to 8% in 2022.
+  - 52 symbols have a first bar after their membership start (recycled or renamed symbols, and stubs); their earlier member-days are excluded.
+- U1 is today's security master, so delisted stocks are missing throughout.
+- Earnings dates come from SEC 8-K item 2.02 and are assumed known 5 sessions ahead. Foreign 6-K filers have none.
+- The insider data sets carry a filing date, not a time, so t is the first session after the filing date.
 
-#### Credits and Licenses
-- RyanJHamby (MIT License): SEC Form 4 and Form 8-K extraction conventions.
-- xang1234 (Apache-2.0 License): Point-in-time corporate action handling.
-- tradermonty (MIT License): S&P 500 historical constituent mapping.
-- PKScreener (MIT License): Indicator pipeline architecture.
-- freqtrade: Lookahead analysis and truncation testing design.
-- Jesse (MIT License): Event replay architecture.
-- neurotrader888 (MIT License): Statistical testing and deflated Sharpe ratio implementation.
-- fja05680 (MIT License): Historical S&P 500 constituents reference dataset (`data/reference/sp500_ticker_start_end.csv`).
-- Apprise (BSD-2-Clause License): Alert dispatcher and notification multi-channel formatting.
-- Strict license policy: No GPL/AGPL code (pysystemtrade, backtesting.py, OpenBB) or unlicensed code.
+#### Credits and licences
+- fja05680/sp500 (MIT): historical S&P 500 membership (`data/reference/sp500_ticker_start_end.csv`).
+- neurotrader888/TechnicalAnalysisAutomation (MIT): pivot design adapted in `src/patterns.py`.
+- Apprise (BSD-2-Clause): alert library.
+- RyanJHamby/stock-screener (G1) and Jesse (Monte Carlo shuffle): ideas only, no code used.
+- No GPL/AGPL code.
+
+#### Database reset (2026-10-14)
+- Reason: clear the records written by the placeholder swing engine and the demo data before the fixed engine's first scan.
+- See the reset entry under Current status for tables and row counts.

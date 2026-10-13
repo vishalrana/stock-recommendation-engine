@@ -31,8 +31,8 @@ export default async function Page() {
     latestScanLog = scanLog;
     swingSignals = swingData.signals;
     swingSleeves = swingData.sleeves;
-  } catch (e: any) {
-    errorMsg = e.message || 'Failed to load stock recommendations';
+  } catch (e: unknown) {
+    errorMsg = (e instanceof Error && e.message) || 'Failed to load stock recommendations';
   }
 
   if (errorMsg) {

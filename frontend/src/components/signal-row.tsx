@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState } from 'react';
+import React from 'react';
 import { SwingSignalRecord } from '../types/database';
-import { AlertTriangle, ArrowUpRight, ArrowDownRight, ExternalLink, ChevronDown, ChevronUp, ShieldAlert, Tag } from 'lucide-react';
+import { AlertTriangle, ExternalLink } from 'lucide-react';
 
 interface SignalRowProps {
   signal: SwingSignalRecord;
@@ -11,7 +11,6 @@ interface SignalRowProps {
 }
 
 export default function SignalRow({ signal, mode, isLiveSleeve = false }: SignalRowProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
 
   const sleeveBadgeColors: Record<string, string> = {
     T: 'bg-emerald-950/60 text-emerald-300 border-emerald-800/80',
@@ -51,7 +50,7 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
           <div className="flex items-center gap-4 text-xs font-semibold">
             <div className="text-right">
               <span className="text-[10px] text-slate-400 block">Exit / Fill</span>
-              <span className="text-slate-200">${Number(signal.exit_price ?? signal.entry_signal_close).toFixed(2)}</span>
+              <span className="text-slate-200">{signal.exit_price !== null && signal.exit_price !== undefined ? `$${Number(signal.exit_price).toFixed(2)}` : 'next open'}</span>
             </div>
             <div className="text-right">
               <span className="text-[10px] text-slate-400 block">Held</span>
@@ -67,9 +66,9 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
         </div>
 
         <div className="mt-2 text-[11px] text-slate-400 flex items-center justify-between border-t border-slate-800/60 pt-2">
-          <span>Reason: <strong className="text-slate-200">{signal.exit_reason || 'Rule exit'}</strong></span>
+          <span>Reason: <strong className="text-slate-200">{signal.exit_reason || String(signal.details?.pending_exit || 'rule exit')}</strong></span>
           {signal.details?.why_exit?.summary && (
-            <span className="italic text-slate-400/90 truncate max-w-md">"{signal.details.why_exit.summary}"</span>
+            <span className="italic text-slate-400/90 truncate max-w-md">&ldquo;{signal.details.why_exit.summary}&rdquo;</span>
           )}
         </div>
       </div>
@@ -163,7 +162,11 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
             </span>
           </div>
           <p className="text-amber-200/90 mt-1">
-            {signal.details?.warning || signal.earnings_date ? `Earnings report within 5 sessions (${signal.earnings_date})` : 'Catalyst or adverse movement alert'}
+            {signal.details?.warning
+              ? String(signal.details.warning)
+              : signal.earnings_unknown
+                ? 'Earnings date unknown: check before acting'
+                : `Earnings report ${signal.earnings_date ? `on ${signal.earnings_date}` : 'date not available'}`}
           </p>
         </div>
       </div>

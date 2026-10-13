@@ -221,16 +221,13 @@ def simulate_swing_trade(
         if rule_exit_reason is None and s_day in event_lock_set:
             rule_exit_reason = "event_lock"
 
-        # Overlay X1 pre-earnings exit (T only)
+        # Overlay X1 pre-earnings exit (T only): decided at the close of d0 - 2, executed at the
+        # open of d0 - 1, where d0 is the next confirmed reaction session inside the hold.
         if rule_exit_reason is None and sleeve == "T" and overlay_x1 and next_reaction:
-            # decided at close of d0 - 2, executed at open of d0 - 1
-            # Check if tomorrow is d0 - 1
-            if cur_i + 1 < len(dates):
-                next_day = dates[cur_i + 1].date() if isinstance(dates[cur_i + 1], pd.Timestamp) else dates[cur_i + 1]
-                # If s_day is 2 sessions before next_reaction, tomorrow is 1 session before
-                # In SessionCalendar terms, check if next_day is session immediately before next_reaction
-                # Or check if next_reaction session index is cur_i + 2
-                pass
+            if cur_i + 2 < len(dates):
+                d_plus2 = dates[cur_i + 2].date() if isinstance(dates[cur_i + 2], pd.Timestamp) else dates[cur_i + 2]
+                if d_plus2 == next_reaction:
+                    rule_exit_reason = "pre_earnings_x1"
 
         # Sleeve E next-earnings exit: decided at close of next reaction session d0' + 1
         if rule_exit_reason is None and sleeve == "E" and next_reaction:
@@ -263,8 +260,12 @@ def simulate_swing_trade(
                     trade.exit_reason = rule_exit_reason
                     trade.holding_sessions = h_idx
                     return _finalize_returns(trade, spy_bars, cost_per_side)
-            # If cur_i + 1 does not exist, data ran out: censored
-            return None
+            # Decided at the last available close: the exit executes at the next open, which has no
+            # bar yet. Unresolved for backtests (exit_date None); live announces the pending SELL.
+            trade.exit_reason = rule_exit_reason
+            trade.holding_sessions = h_idx
+            trade.details = dict(trade.details or {}, pending_exit=True, decided_on=s_day.isoformat())
+            return trade
 
         cur_i += 1
 

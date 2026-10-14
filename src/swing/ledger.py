@@ -7,16 +7,37 @@ maintains forward audit records on the orphan branch `signals-ledger`.
 
 import json
 import logging
+import math
 import os
 import subprocess
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import numpy as np
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LEDGER_DIR = os.path.join(PROJECT_ROOT, "ledger")
 
 logger = logging.getLogger("swing_ledger")
 
+
+
+def native(obj: Any) -> Any:
+    """JSON-safe copy: numpy scalars to Python numbers, NaN/inf to None, dates to ISO strings."""
+    if isinstance(obj, dict):
+        return {str(k): native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [native(v) for v in obj]
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        v = float(obj)
+        return v if math.isfinite(v) else None
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    return obj
 
 def record_ledger_entry(
     session_date: date,
@@ -37,7 +58,7 @@ def record_ledger_entry(
         "sleeve": sleeve,
         "price": round(float(price), 4),
         "units": units,
-        "details": details or {},
+        "details": native(details or {}),
     }
     file_path = os.path.join(LEDGER_DIR, f"{session_date.isoformat()}.jsonl")
     with open(file_path, "a", encoding="utf-8") as f:

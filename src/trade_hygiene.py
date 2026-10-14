@@ -68,6 +68,11 @@ def earnings_hold_rejection(window: Tuple[date, date], confirmed: Iterable[date]
     return None
 
 
+def rr_stop_enabled() -> bool:
+    """Whether the stop cap / R:R floor check runs; the live scan and the backtest both ask here."""
+    return bool(qc.STOP_CAP_ENABLED or qc.RR_FLOOR_ENABLED)
+
+
 def rr_stop_rejection(entry: float, stop: float, target_1: Optional[float], atr: Optional[float]) -> Optional[str]:
     """Reason to reject for a stop beyond the cap or a T1 R:R below the floor, else None."""
     try:
@@ -77,14 +82,14 @@ def rr_stop_rejection(entry: float, stop: float, target_1: Optional[float], atr:
     risk = entry - stop
     if not (entry > 0 and risk > 0):
         return None  # plan validity is checked by the trade-plan builder
-    if getattr(qc, "STOP_CAP_ENABLED", True):
+    if qc.STOP_CAP_ENABLED:
         cap = qc.STOP_CAP_PCT * entry
         if atr is not None and np.isfinite(atr) and atr > 0:
             cap = min(cap, qc.STOP_CAP_ATR_MULT * float(atr))
         if risk > cap * (1 + 1e-9):
             return (f"Stop {risk / entry * 100:.1f}% below entry exceeds the cap of {cap / entry * 100:.1f}% "
                     f"(min of {qc.STOP_CAP_ATR_MULT:g} x ATR14 and {qc.STOP_CAP_PCT * 100:g}%)")
-    if getattr(qc, "RR_FLOOR_ENABLED", False):
+    if qc.RR_FLOOR_ENABLED:
         if target_1 is not None:
             rr1 = (float(target_1) - entry) / risk
             if rr1 < qc.RR_FLOOR - 1e-9:

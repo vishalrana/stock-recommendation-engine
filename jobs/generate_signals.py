@@ -561,13 +561,13 @@ def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFra
     from src.quant_config import normalize_strategy_key
     from src.pipeline_steps import holding_days_for
     from src.trade_hygiene import (SessionCalendar, full_hold_window, earnings_hold_rejection,
-                                   rr_stop_rejection, estimate_next_earnings)
+                                   rr_stop_enabled, rr_stop_rejection, estimate_next_earnings)
     from src.filters.earnings_filter import PROVIDER_CONFIRMED_DATES, normalize_date_str
     from datetime import date as _date, timedelta as _td
 
     ticker = sig["ticker"].upper()
     is_etf = bool(sig.get("is_etf")) or normalize_strategy_key(sig["strategy"]) == "sector_rotation"
-    if getattr(qc, "STOP_CAP_ENABLED", False) or getattr(qc, "RR_FLOOR_ENABLED", False):
+    if rr_stop_enabled():
         reason = rr_stop_rejection(sig.get("entry_price"), sig.get("stop_loss"), sig.get("target_1"), sig.get("atr_14"))
         if reason:
             return f"Stop cap / R:R floor: {reason}"

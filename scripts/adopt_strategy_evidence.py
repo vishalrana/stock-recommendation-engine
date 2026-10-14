@@ -125,10 +125,15 @@ def main() -> int:
         "rebuilt_from": ARTIFACT_SETUPS,
     }
     out["strategy_evidence"] = rebuilt
-    issued = {"run_id": str(args.run_id), "strategies": issued_by_strategy(args.artifact_dir)}
-    out["issued_ideas_by_strategy"] = issued
-    with open(FRONTEND_ISSUED, "w", encoding="utf-8") as f:
-        json.dump(issued, f, indent=2)
+    if os.path.exists(os.path.join(args.artifact_dir, ARTIFACT_TRADES)):
+        issued = {"run_id": str(args.run_id), "strategies": issued_by_strategy(args.artifact_dir)}
+        out["issued_ideas_by_strategy"] = issued
+        if os.path.abspath(args.out) == os.path.abspath(EVIDENCE_PATH):   # the cards follow the adopted config only
+            with open(FRONTEND_ISSUED, "w", encoding="utf-8") as f:
+                json.dump(issued, f, indent=2)
+            print(f"Wrote {FRONTEND_ISSUED}")
+    else:
+        print(f"No {ARTIFACT_TRADES} in the artifact: issued-idea stats not written.")
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
     print(f"Wrote {args.out}")

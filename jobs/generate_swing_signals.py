@@ -168,11 +168,19 @@ def main() -> int:
         frames.pop(e, None)
     last_bar = spy.index[-1].date()
     stale = last_bar != session
+    u1_set = set(u1)
+    fresh_pct, fresh_n = live.fresh_share({t: f for t, f in frames.items() if t in u1_set}, session)
     health["latest_bar"] = last_bar.isoformat()
-    health["stale"] = stale
+    health["fresh_pct"] = round(fresh_pct, 2)
     if stale:
         logger.warning("[STALE DATA] SPY's latest bar %s is not the latest completed session %s: "
                        "no BUYs tonight; open signals are reconciled on the bars that exist.", last_bar, session)
+    elif fresh_pct < live.MIN_FRESH_PCT:
+        stale = True
+        logger.warning("[STALE DATA] only %.1f%% of %d recently trading tickers have the %s bar (minimum %.0f%%): "
+                       "no BUYs tonight; open signals are reconciled on the bars that exist.",
+                       fresh_pct, fresh_n, session, live.MIN_FRESH_PCT)
+    health["stale"] = stale
 
     # 2. SEC filings (refresh companies with new filings since the last run) and insider data
     sec = get_sec_provider()

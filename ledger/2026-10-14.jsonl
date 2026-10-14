@@ -1,0 +1,2 @@
+{"timestamp": "2026-10-14T16:11:08.210330+00:00", "session_date": "2026-10-14", "action": "SELL", "ticker": "PEB", "sleeve": "T", "price": 18.0968, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
+{"timestamp": "2026-10-14T16:11:39.591554+00:00", "session_date": "2026-10-14", "action": "SELL", "ticker": "CMBT", "sleeve": "T", "price": 19.2066, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

@@ -54,6 +54,13 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 
 ## Current status (as of 2026-10-11)
 
+- **2026-10-14: swing fix merged (PR #3) and recommendation data reset.** All five swing sleeves are SHADOW (research run 38436737951; see "Swing signals program: results and operations").
+  - Why reset: remove the records written by the placeholder swing engine and earlier scans before the fixed engine's first run.
+  - How: `scripts/clear_and_reset_db.py --yes --reseed-sleeves`. It first backed up all 15 tables (2,797 rows) to `backups/supabase_20261013T230522Z/`, which is kept locally only, gitignored, and must never be committed.
+  - Cleared (rows before): `signals` (180), `signals_history` (369), `scan_log` (2), `context_cache` (21). `portfolio_state`, `swing_signals`, `swing_events`, `swing_sleeve_status`, `swing_ledger`, `news_items`, `news_labels` and `analyst_snapshots` were already empty.
+  - Kept, unchanged: `earnings_calendar` (1,710), `ticker_metrics` (515), `delisted_tickers` (0). No other tables exist; the `recommendations` view rebuilds from the tables.
+  - Afterwards, `swing_sleeve_status` was reseeded from `config/swing_sleeves.json` (T, E, N, P, I all SHADOW). There was no `signals-ledger` branch to delete.
+
 - **2026-10-11: profitability program completed** (see that section). Production now applies the full-hold earnings blackout, the event lock and the stop cap / R:R floor (about 2–3 new ideas a month). Evidence comes from run 38122679781. The final verdict is no edge.
 
 - Import errors in the universe provider and Supabase client were fixed. A project report claims 39 regression suites passed and a benchmark dry run succeeded.
@@ -723,5 +730,4 @@ Registry location: `outputs/research_trials.jsonl`
 - No GPL/AGPL code.
 
 #### Database reset (2026-10-14)
-- Reason: clear the records written by the placeholder swing engine and the demo data before the fixed engine's first scan.
-- See the reset entry under Current status for tables and row counts.
+- See the 2026-10-14 entry under Current status for the reason, the backup and the row counts.

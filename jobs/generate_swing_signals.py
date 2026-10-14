@@ -38,7 +38,7 @@ os.environ.setdefault("SKIP_NLP", "true")
 
 from src.swing.engine import build_context, run_book  # noqa: E402
 from src.swing.exits import max_holding_sessions_for_sleeve, simulate_swing_trade  # noqa: E402
-from src.swing.ledger import record_ledger_entry  # noqa: E402
+from src.swing.ledger import native, record_ledger_entry  # noqa: E402
 from src.swing.rules import SLEEVE_PRIORITY  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -263,7 +263,7 @@ def main() -> int:
                           "net_return_pct": None, "holding_sessions": tr.holding_sessions,
                           "is_live": r.get("mode") in LIVE_MODES})
         if client is not None:
-            client.table("swing_signals").update(upd).eq("id", r["id"]).execute()
+            client.table("swing_signals").update(native(upd)).eq("id", r["id"]).execute()
     health["reconciled_open"] = len(open_rows)
     health["closed_tonight"] = sum(1 for s in sells if s["fill"] is not None)
 
@@ -305,35 +305,35 @@ def main() -> int:
                     "atr14": round(float(s.atr14), 4), "c6_pct": s.c6_pct, "ear_pct": s.ear_pct, "avol_pct": s.avol_pct,
                     "cluster_value": s.cluster_value, "gap_pct": s.gap_pct, "rsi2": s.rsi2, "beta": s.beta,
                     "earnings_unknown": bool(s.earnings_unknown), "earnings_date": fut[0].isoformat() if fut else None,
-                    "details": {k: (v.isoformat() if isinstance(v, date) else v) for k, v in (s.details or {}).items()
-                                if isinstance(v, (int, float, str, bool, date)) or v is None},
+                    "details": native({k: v for k, v in (s.details or {}).items()
+                                     if isinstance(v, (int, float, str, bool, date, np.generic)) or v is None}),
                     "created_at": now, "updated_at": now,
                 })
                 record_ledger_entry(s.signal_date, "BUY", s.ticker, sl, s.entry_signal_close,
                                     details={"mode": mode, "stop_loss": s.stop_loss, "target": s.target})
         for row in new_rows:
             if client is not None:
-                client.table("swing_signals").upsert(row, on_conflict="sleeve,ticker,signal_date").execute()
-                client.table("swing_ledger").insert({"session_date": row["signal_date"], "action": "BUY", "ticker": row["ticker"],
+                client.table("swing_signals").upsert(native(row), on_conflict="sleeve,ticker,signal_date").execute()
+                client.table("swing_ledger").insert(native({"session_date": row["signal_date"], "action": "BUY", "ticker": row["ticker"],
                                                      "sleeve": row["sleeve"], "price": row["entry_signal_close"],
-                                                     "details": {"mode": row["mode"]}}).execute()
+                                                     "details": {"mode": row["mode"]}})).execute()
     for s in sells:
         if client is not None and s["fill"] is not None:
-            client.table("swing_ledger").insert({"session_date": session.isoformat(), "action": "SELL", "ticker": s["ticker"],
+            client.table("swing_ledger").insert(native({"session_date": session.isoformat(), "action": "SELL", "ticker": s["ticker"],
                                                  "sleeve": s["sleeve"], "price": s["fill"],
-                                                 "details": {"exit_reason": s["reason"]}}).execute()
+                                                 "details": {"exit_reason": s["reason"]}})).execute()
 
     # 6. Sleeve status (real research numbers or "not yet tested")
     if client is not None:
         for sl in SLEEVES:
             c = cfg[sl]
-            client.table("swing_sleeve_status").upsert({
+            client.table("swing_sleeve_status").upsert(native({
                 "sleeve": sl, "name": SLEEVE_NAMES[sl], "status": c["status"], "universe": c.get("universe", "shadow"),
                 "u2_beta_adj": (c.get("u2") or {}).get("mean_beta_adj_pct"), "u1_beta_adj": (c.get("u1") or {}).get("mean_beta_adj_pct"),
                 "reasons": c.get("reasons") or [],
                 "details": {"u2": c.get("u2"), "u1": c.get("u1"), "last_session": last_bar.isoformat(), "stale": stale},
                 "research_run_id": prov.get("github_run_id"), "last_evaluated_at": now,
-            }, on_conflict="sleeve").execute()
+            }), on_conflict="sleeve").execute()
         if not stale:
             client.table("swing_ledger").select("id").limit(1).execute()
 

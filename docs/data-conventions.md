@@ -1,0 +1,60 @@
+# Data, lifecycle and strategy conventions
+
+Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules and links here.
+
+## Lifecycle and outcome conventions (since 2026-10-09)
+
+- Open recommendations are tracked by replaying every bar after the signal date through `PositionScaleOutTracker` (`reconcile_recommendation_lifecycle`). A missed nightly run never hides a stop or target hit.
+- The tracked fill is the open of the first bar after the signal date (`entry_fill_price`). `entry_price` is the indicative entry shown at issuance. Returns are measured from the fill.
+- Stop, targets, reach probabilities, R:R and strategy are frozen at issuance. A re-scan refreshes only analytical fields (score, tier, indicators, P/E).
+- Same-bar ambiguity is STOP_FIRST, including the ratcheted stop on the bar where a target fills. A target fills at the open when the bar gaps above it. Trades whose data runs out are left unresolved, never force-closed.
+- If context data is missing or times out, it is excluded from the composite score and the remaining weights are renormalized. It is not scored as 0.
+- Migration `supabase/migration_lifecycle_replay_and_pe.sql` adds the columns these depend on.
+
+## Data and context conventions (since 2026-10-10)
+
+- `CacheManager.refresh_cache(start, end)` treats `end` as inclusive and adds a day for yfinance, whose `end` is exclusive. Before this, every nightly scan ran one session behind its regime date. If the cache still does not reach the market date after refresh, the scan publishes no new ideas and logs `stale_data`.
+- Context (analyst, fundamentals, news) counts only when the provider actually returned data (`DataQuality.VALID`). Provider failures make context unavailable, so the weights are renormalized. `ContextScorer` has no technical fallback, because RSI, ADX and volume already sit in the momentum score. Failed fetches are never written to `context_cache`.
+- The context score is the share of available points earned (earned ÷ available × 100). It counts only components that have data and are listed in `CONTEXT_SCORE_COMPONENTS` (`src/quant_config.py`, default: analyst + news). A missing component is excluded, never scored as 0. Rows carry `context_max_points` so the ranker uses the same denominator.
+- Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
+- News sentiment is the mean over all scored headlines, with neutral headlines counted as 0.
+- D/E display: `negative_equity` (stored with each idea) is True when total equity is zero or negative. The card then shows "Neg. equity", and a D/E above 10 is shown as ">10", with the reason on hover. Yahoo's D/E is never used for a negative-equity company, and an older D/E on an open idea is cleared once equity turns negative.
+- **Strategy evidence on cards:**
+  - Each idea stores `strategy_beta_adjusted_pct` and `strategy_excess_vs_spy_pct` (migration `migration_2026_10_10_strategy_vs_spy.sql`), frozen at issuance like the other `strategy_*` fields.
+  - The card shows "54% of N trades · +0.12%/trade" and, below it in the same type or bolder, "−0.77%/trade vs SPY after beta" (rose when negative). Hovering shows the plain vs-SPY figure.
+  - Tiers and labels are unchanged.
+- **Universe loading:**
+  - The order is the broad universe (`USEquitiesUniverseProvider`), then the S&P 500 + Nasdaq-100 benchmark from Wikipedia (ideas are still published, with status `degraded_universe`). There is no further fallback: the 100-row `outputs/backtest_summary.csv` substitute was removed.
+  - If neither loads, the nightly publishes no new ideas. It re-evaluates the open ideas through the targeted path so lifecycle tracking continues, and logs `degraded_universe` with the reason in `scan_log`.
+  - The degraded check now uses the effective source (the `UNIVERSE_SOURCE` default); passing no source used to skip it.
+- P/E, D/E and current ratio are display-only, refreshed nightly for every open idea, and never used in qualification. This is enforced: fundamentals are left out of `CONTEXT_SCORE_COMPONENTS`, so their points and the D/E–current-ratio distress veto cannot move the score. In the point-in-time test they carried no information at the setup level. Adding them to the score changed issued-trade returns by only +0.05%/trade beta-adjusted (CI −0.08 to +0.19); see Research findings.
+- **Fundamentals source (since 2026-10-10):** SEC EDGAR company facts come first (`src/providers/context/sec_fundamentals.py`). Yahoo `.info` only fills gaps, because Yahoo blocks GitHub's runners.
+  - SEC requires a contact User-Agent. Set it in the `SEC_USER_AGENT` repository secret and in the local `.env`, never in a committed file. Without it, SEC is disabled and Yahoo alone is used.
+  - TTM EPS uses the 10-K, then 10-K + current YTD − prior YTD, then the last four quarters. If reported EPS differs from TTM net income ÷ latest diluted shares by more than 35% on the same period end, the net-income figure is used, which catches splits between filings. EPS ≤ 0 means "Loss", with no P/E.
+  - D/E is all borrowings (including current maturities and commercial paper) plus finance and operating leases, divided by total equity including non-controlling interest. If borrowings were tagged in other periods but not on the latest balance sheet, D/E is unknown, never 0.
+  - Data older than 200 days is not used. `fundamentals_source` and `fundamentals_as_of` (balance-sheet date) are stored with each idea.
+  - A holding-company reorganisation starts a new SEC filer with no history: XOM (August 2026), BLK (2024), BG (2023). Until the new filer has a 10-K or four quarters, its TTM EPS (and so P/E) comes only from Yahoo, which means none in CI. D/E and current ratio are unaffected. The value shows as missing, never as a wrong number.
+  - Summaries are cached for 72 hours in `data/cache/fundamentals/`, which the workflows cache.
+- Each scan prints a "Provider health" GitHub notice: SEC and Yahoo success counts, and context and display-fundamentals coverage. It is readable from the run's check annotations without admin rights.
+- `supabase/migration_2026_10_10_fundamentals.sql` adds `eps_ttm`, `fundamentals_source` and `fundamentals_as_of`. It also adds the never-applied `reference_entry_price`, `weighted_scaleout_rr` and `entry_location_zone` columns, and it is idempotent.
+- Inserts drop only the specific unmigrated column the database names (`write_with_missing_column_retry`). If the logs show `[SCHEMA] Wrote without unmigrated column(s)`, apply the missing migration.
+- **Applying migrations:** `python scripts/apply_migration.py <file.sql>` applies a migration file statement by statement through `public.run_migration`, using the service key from `.env`; `--dry-run` lists the statements.
+  - `public.run_migration` was created once, on 2026-10-10, by running `supabase/setup_run_migration.sql` in the SQL editor.
+  - Migration files must be idempotent.
+  - Applied 2026-10-10: `migration_2026_10_10_fundamentals.sql`, `migration_2026_10_10_negative_equity.sql` and `migration_2026_10_10_strategy_vs_spy.sql`.
+- `get_client()` raises `SupabaseConfigError` instead of exiting, so CI can run tests without secrets.
+
+## Strategy decisions (user-approved 2026-10-09)
+
+- **Exits:** stop, final target, or the strategy's holding period (`hold_days` in `STRATEGY_TARGET_CONFIG`, counted in trading bars from the fill), which gives `expired`. Failing to requalify in a later scan does not close an idea.
+- **Win rate / expectancy evidence:** per-strategy figures from the production-universe backtest, shrunk toward 50% / 0%. They live in `config/strategy_performance.json`, adopted from run 38059174571 by `scripts/adopt_strategy_evidence.py`, and are read by `src/strategy_evidence.py`. There are no hard-coded expectancy priors, and per-ticker legacy metrics are not used in scoring. The aggregates also carry beta-adjusted and vs-SPY sums and counts; these are display-only (cards), and scoring never reads them.
+- **Stops:** each strategy's own structural stop is used as issued. There is no minimum floor and no 7% cap.
+- **Momentum sub-score:** rewards strength for trend, breakout, momentum, sector and PEAD strategies. Pullback and Mean Reversion keep the near-average scoring.
+- **Rules:** Pullback needs RSI at least 5 points off its 10-bar low (dip below 50, recovery band 45–67). Mean Reversion needs RSI 3+ points off its 5-bar low on an up-close day. The unused `is_blocked` guardrails are removed.
+- **Trend-quality gates (2026-10-10, backtested):**
+  - Pullback requires price > 50-day > 200-day with a rising 200-day in every regime. The bull-regime shortcut "price > 50-day" admitted bounces inside downtrends.
+  - Cross-Sectional Momentum requires price above a rising 200-day.
+  - Trend Following requires a rising 200-day.
+  - Against the same harness and data, issued-trade excess vs SPY went from −0.55% to −0.52%/trade. Cross-Sectional issued trades went from +0.06% to +0.43% net, and Trend Following from −0.46% to −0.23% vs SPY. All differences are within the confidence intervals, so the gates are kept as definitional fixes, not as proven improvements.
+- **Reach probability:** setup-conditional (the strategy's backtest target-hit rate) once the strategy has at least 30 trades. Otherwise it falls back to the ticker base rate. `reach_prob_source` records which one was used.
+- **52-Week High switched off (user-approved test-and-fix, 2026-10-10).** It is removed from `REGIME_STRATEGY_MAP` (bull was its only regime). Open 52-Week High ideas keep being tracked to their stop, target or 25-day limit. Re-adding it requires a new backtest. See "52-Week High decision" below.

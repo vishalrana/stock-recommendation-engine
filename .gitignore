@@ -29,6 +29,7 @@ data/backtest_history_long/
 *.parquet
 *.json
 !config/*.json
+!frontend/src/lib/issued-evidence.json
 !.github/swing_research_trigger.json
 outputs/
 ledger/*.jsonl

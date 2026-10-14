@@ -1,7 +1,7 @@
 {
   "metadata": {
     "description": "Per-strategy evidence from the production-pipeline backtest (scripts/validate_backtest_pipeline.py), measured on all of each strategy's setups (one open per strategy+ticker), net of costs. Consumed by src/strategy_evidence.py.",
-    "generated_at": "2026-10-11T09:38:07.799776+00:00",
+    "generated_at": "2026-10-14T03:21:16.516847+00:00",
     "evaluation_window": [
       "2022-10-21",
       "2026-10-09"
@@ -13,7 +13,7 @@
     "edge_beta_adjusted_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
     "verdict_note": "edge_verdict_* tests absolute net return, which a rising market lifts on its own. Selection skill is judged by the vs-SPY and beta-adjusted verdicts.",
     "limitations": [
-      "Survivorship: the universe is today's (2026-10-11) security master applied to the whole window, so every period is chosen with hindsight (stocks that delisted are missing). Results are biased upward, most for small caps, which delist more often.",
+      "Survivorship: the universe is today's (2026-10-14) security master applied to the whole window, so every period is chosen with hindsight (stocks that delisted are missing). Results are biased upward, most for small caps, which delist more often.",
       "Survivorship gauge: 4.32% of S&P 500 member-days in the window have no bar in the price cache (44 historical members never seen; fja05680/sp500, MIT). Symbol changes overstate it slightly; delistings are true gaps.",
       "Earnings calendar from SEC 8-K item 2.02 filings: live fixed-days blackout applied and PEAD can fire; future announcement dates are assumed known at the signal; filers without 8-K 2.02 (foreign private issuers) have no calendar.",
       "No historical context data: context excluded from scores (weights renormalized).",
@@ -23,7 +23,7 @@
     ],
     "adopted_from": {
       "workflow": "backtest_production_universe.yml",
-      "run_id": "38122679781",
+      "run_id": "38500883442",
       "universe": "production (today's broad US security master; delisted stocks missing)",
       "rebuilt_from": "production_backtest_setup_trades_production_universe.csv"
     }
@@ -90,22 +90,22 @@
       "exit_expiry": 13720
     },
     "cross_sectional_momentum": {
-      "trades": 23108,
+      "trades": 23107,
       "wins": 12096,
-      "sum_return": -3166.574499999966,
+      "sum_return": -3160.034899999967,
       "t1_hits": 9830,
-      "t1_n": 23108,
+      "t1_n": 23107,
       "t2_hits": 7,
       "t2_n": 215,
       "t3_hits": 0,
       "t3_n": 5,
-      "beta_adjusted_n": 23108,
-      "sum_beta_adjusted": -24172.81849999985,
-      "excess_vs_spy_n": 23108,
-      "sum_excess_vs_spy": -20348.155199999772,
-      "r_n": 23108,
-      "sum_r": -262.60363141505803,
-      "exit_stop": 9147,
+      "beta_adjusted_n": 23107,
+      "sum_beta_adjusted": -24166.86179999985,
+      "excess_vs_spy_n": 23107,
+      "sum_excess_vs_spy": -20341.07329999977,
+      "r_n": 23107,
+      "sum_r": -262.11262583954385,
+      "exit_stop": 9146,
       "exit_target": 7,
       "exit_expiry": 13954
     },
@@ -148,6 +148,101 @@
       "exit_stop": 11879,
       "exit_target": 40,
       "exit_expiry": 15847
+    }
+  },
+  "issued_ideas_by_strategy": {
+    "run_id": "38500883442",
+    "strategies": {
+      "Cross-Sectional Momentum": {
+        "n": 62,
+        "win_rate_pct": 43.548,
+        "win_rate_ci95": [
+          30.769,
+          55.885
+        ],
+        "net_expectancy_pct": -0.399,
+        "net_expectancy_ci95": [
+          -2.303,
+          1.586
+        ],
+        "beta_adjusted_pct": -1.202,
+        "beta_adjusted_ci95": [
+          -3.173,
+          0.944
+        ]
+      },
+      "Mean Reversion": {
+        "n": 187,
+        "win_rate_pct": 70.053,
+        "win_rate_ci95": [
+          42.857,
+          74.561
+        ],
+        "net_expectancy_pct": 1.613,
+        "net_expectancy_ci95": [
+          -1.372,
+          2.496
+        ],
+        "beta_adjusted_pct": 0.575,
+        "beta_adjusted_ci95": [
+          0.429,
+          1.482
+        ]
+      },
+      "Post-Earnings Drift": {
+        "n": 106,
+        "win_rate_pct": 58.491,
+        "win_rate_ci95": [
+          48.957,
+          63.78
+        ],
+        "net_expectancy_pct": 0.961,
+        "net_expectancy_ci95": [
+          -0.508,
+          2.029
+        ],
+        "beta_adjusted_pct": 0.321,
+        "beta_adjusted_ci95": [
+          -0.443,
+          1.658
+        ]
+      },
+      "Sector Rotation": {
+        "n": 8,
+        "win_rate_pct": 50.0,
+        "win_rate_ci95": [
+          12.5,
+          85.714
+        ],
+        "net_expectancy_pct": 2.196,
+        "net_expectancy_ci95": [
+          -3.893,
+          6.931
+        ],
+        "beta_adjusted_pct": -1.247,
+        "beta_adjusted_ci95": [
+          -4.606,
+          4.678
+        ]
+      },
+      "Trend Following": {
+        "n": 1853,
+        "win_rate_pct": 50.027,
+        "win_rate_ci95": [
+          44.926,
+          55.061
+        ],
+        "net_expectancy_pct": 0.047,
+        "net_expectancy_ci95": [
+          -0.577,
+          0.675
+        ],
+        "beta_adjusted_pct": -0.538,
+        "beta_adjusted_ci95": [
+          -1.237,
+          0.153
+        ]
+      }
     }
   }
 }

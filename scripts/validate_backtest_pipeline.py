@@ -781,6 +781,17 @@ def paired_block_diff(a: List[Dict[str, Any]], b: List[Dict[str, Any]], key: str
             "p_gt0": round(r["p_gt0"], 4), "p_lt0": round(r["p_lt0"], 4)}
 
 
+def point_in_time_betas(frames: Dict[str, pd.DataFrame], spy: pd.DataFrame) -> Dict[str, pd.Series]:
+    """Beta vs SPY from the 252 sessions before each bar (shifted one bar, so no look-ahead)."""
+    spy_r = spy["CLOSE"].pct_change()
+    betas = {}
+    for tk, fr in frames.items():
+        r = fr["CLOSE"].pct_change()
+        s_r = spy_r.reindex(fr.index)
+        betas[tk] = (r.rolling(252, min_periods=120).cov(s_r) / s_r.rolling(252, min_periods=120).var()).shift(1)
+    return betas
+
+
 def block_bootstrap_ci(values: np.ndarray, clusters: np.ndarray, stat, n_boot: int = BOOTSTRAP_SAMPLES, seed: int = 7):
     """95% CI of stat(values) resampling whole clusters (signal months) with replacement."""
     uniq = np.unique(clusters)
@@ -1280,12 +1291,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     # Benchmark-relative return: SPY bought at the same fill-day open, sold at the exit-day close.
     # Beta-adjusted return: net - beta * SPY return, with beta from the 252 sessions before the
     # signal (point-in-time). Plain excess flatters high-beta selections in a rising market.
-    spy_r = spy["CLOSE"].pct_change()
-    betas = {}
-    for tk, fr in frames.items():
-        r = fr["CLOSE"].pct_change()
-        s_r = spy_r.reindex(fr.index)
-        betas[tk] = (r.rolling(252, min_periods=120).cov(s_r) / s_r.rolling(252, min_periods=120).var()).shift(1)
+    betas = point_in_time_betas(frames, spy)
     spy_open, spy_close = spy["OPEN"], spy["CLOSE"]
     for t in [t for b in books.values() for t in b["trades"]] + shadow_trades:
         fill_d, exit_d = pd.Timestamp(t["fill_date"]), pd.Timestamp(t["exit_date"])

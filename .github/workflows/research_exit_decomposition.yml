@@ -1,0 +1,55 @@
+name: Exit Decomposition (research)
+
+# Research only: re-scores a production-universe backtest's issued ideas with fixed-horizon exits
+# and runs the random-stock placebo under the same exits (scripts/research_exit_decomposition.py).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 'backtest_production_universe.yml run whose issued ideas are re-scored'
+        required: true
+      placebo:
+        description: 'Placebo draws per idea'
+        required: false
+        default: '200'
+
+permissions:
+  contents: read
+  actions: read            # download the source run's artifact
+
+jobs:
+  decompose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r jobs/requirements.txt
+      - name: Restore price history (same cache as the backtest)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/backtest_history/*.parquet
+          key: ${{ runner.os }}-backtest-history-${{ inputs.source_run_id }}
+          restore-keys: |
+            ${{ runner.os }}-backtest-history-
+      - uses: actions/download-artifact@v4
+        with:
+          name: backtest-production-universe
+          path: source_run
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: python scripts/research_exit_decomposition.py source_run --placebo ${{ inputs.placebo }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exit-decomposition
+          path: outputs/exit_decomposition.json

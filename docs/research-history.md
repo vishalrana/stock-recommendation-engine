@@ -253,3 +253,75 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - By strategy (ideas, beta-adj): Trend Following 1,853, −0.54; Mean Reversion 187, +0.58; Post-Earnings Drift 106, +0.32; Cross-Sectional Momentum 62, −1.20; Sector Rotation 8, −1.25. Exits: 1,264 expiry, 950 stop, 2 target.
 - Verdict: no edge (every `edge_*_verdict` is NO_EDGE_DETECTED_CI_INCLUDES_ZERO; the EDGE CLAIM criteria fail: FULL CI includes zero, LATE mean < 0, placebo below the 95th percentile).
 - Correction: with the R:R floor off, the live book issues about 45 ideas a month, not the 2–3 a month of the floor-on book (run 38122679781, 127 ideas).
+
+## Card evidence switched to run 38500883442 (2026-10-14, PR #7)
+
+- `config/strategy_performance.json` was adopted from run 38500883442 (all 108 setup-level fields reproduce). It replaces 38122679781, but the setup-level evidence is the same: it is measured on all setups (one open per strategy+ticker), which the R:R floor never touched. The two runs differ by one Cross-Sectional Momentum setup out of 23,108, so the score inputs are effectively unchanged.
+- New, display only: per-strategy stats of the run's issued ideas (`issued_ideas_by_strategy`, copied to `frontend/src/lib/issued-evidence.json`). The cards show them, and any per-strategy stat with n < 100 shows "insufficient sample (n=X)" (`MIN_STRATEGY_SAMPLE`, `frontend/src/lib/strategy-sample.ts`).
+
+  | Strategy | Issued ideas | Win rate % (95% CI) | Net %/idea (CI) | Beta-adj. %/idea (CI) |
+  |---|---|---|---|---|
+  | Trend Following | 1,853 | 50.0 (44.9 to 55.1) | +0.05 (−0.58 to +0.68) | −0.54 (−1.24 to +0.15) |
+  | Mean Reversion | 187 | 70.1 (42.9 to 74.6) | +1.61 (−1.37 to +2.50) | +0.58 (+0.43 to +1.48) |
+  | Post-Earnings Drift | 106 | 58.5 (49.0 to 63.8) | +0.96 (−0.51 to +2.03) | +0.32 (−0.44 to +1.66) |
+  | Cross-Sectional Momentum | 62 | insufficient sample | | |
+  | Sector Rotation | 8 | insufficient sample | | |
+
+  - Mean Reversion's beta-adjusted CI excludes zero. This is not evidence of an edge: it is one strategy among several looked at, and at setup level Mean Reversion is +0.01 (CI −0.60 to +0.71).
+- Survivorship: delisted stocks are missing from the universe, which flatters these results.
+
+## Exit decomposition (2026-10-14, GitHub run 38580020684; research only)
+
+- Question: does the loss come from the stop and exit mechanics or from what is picked?
+  - Method: the 2,216 closed ideas of run 38500883442 were re-scored with fixed-horizon exits (no stop, no target; exit at the close of holding day h, with the fill bar as day 1). Same fill (next open), same point-in-time beta, 10 bps/side.
+  - Placebo: the same `PlaceboEngine` draws (random liquid stocks, seed 20261011, 200 per idea) under the same exits.
+  - `scripts/research_exit_decomposition.py`, workflow `research_exit_decomposition.yml`.
+- Self-check: the engine's simulation of the live rules matches the harness's recorded returns (mean absolute difference 0.011 pp; 99.5% of ideas within 0.05 pp), and it reproduces the live book's placebo percentile (94.5).
+- Results, beta-adjusted %/idea (signal-month block-bootstrap 95% CI):
+
+  | Exit | Period | n | Book mean (CI) | Placebo mean | Placebo pct | Paired diff vs placebo median (CI) | Break-even bps/side |
+  |---|---|---|---|---|---|---|---|
+  | Live rules (stop, targets, hold) | FULL | 2,216 | −0.42 (−1.04 to +0.15) | −0.47 | 94.5 | +0.49 (+0.00 to +0.98) | −11.2 |
+  | Live rules | LATE | 951 | −0.36 (−1.46 to +0.66) | +0.66 | 72.5 | +0.10 (−0.73 to +0.96) | −8.1 |
+  | 5 days | FULL | 2,216 | −0.09 (−0.45 to +0.27) | −0.31 | 95.0 | +0.33 (+0.09 to +0.56) | +5.4 |
+  | 5 days | LATE | 951 | −0.17 (−0.82 to +0.44) | +0.06 | 71.5 | +0.16 (−0.20 to +0.47) | +1.3 |
+  | 10 days | FULL | 2,216 | −0.35 (−0.90 to +0.17) | −0.50 | 93.5 | +0.42 (+0.08 to +0.75) | −7.4 |
+  | 10 days | LATE | 951 | −0.37 (−1.41 to +0.60) | +0.25 | 59.0 | +0.20 (−0.40 to +0.81) | −8.6 |
+  | 20 days | FULL | 2,206 | −0.41 (−1.21 to +0.39) | −0.55 | 94.5 | +0.72 (+0.31 to +1.16) | −10.4 |
+  | 20 days | LATE | 941 | +0.02 (−1.42 to +1.34) | +0.97 | 75.5 | +0.76 (−0.08 to +1.58) | +10.8 |
+
+  - 10 ideas had fewer than 20 bars of data left; they are censored, not forced to close.
+  - Placebo means have a fat right tail in the LATE period (for example, live rules: mean +0.66 against a 95th percentile of +0.71), probably from bad prices among randomly drawn small caps. The percentile and the paired median diff are the robust figures.
+- Stop gap-through (run 38500883442, 710 initial-stop exits):
+  - 9 ideas opened below their stop at the fill and exited there for about 0% (+0.007% mean).
+  - 72 (10.1%) gapped through the stop during the hold. Overshoot past the stop: mean 1.33%, median 0.49%, 95th percentile 6.16%, max 10.12%. Planned vs realized loss from the fill on those 72: 6.10% vs 7.34%.
+  - Across all stop-outs during the hold: planned 6.14% vs realized 6.27%. 18 losses exceeded 10%; the worst were FOXA −17.1% (planned −7.8%), M −16.2%, LAUR −14.9% and NVS −13.0%.
+  - Some planned losses exceed the 10% cap because the cap is measured from the signal close and the fill opened higher.
+- Reading:
+  - The stop and exit mechanics are not the main source of the loss. With no stop and no target, a 20-day hold loses the same as the live rules (−0.41 vs −0.42). Gap-through adds about 0.13 pp per stop-out. The stop cap binds on average.
+  - The loss grows with the holding period: about −0.02%/idea/day at 5 and 20 days.
+  - Random stocks from the same universe also lose after beta in the FULL period at every horizon (−0.31 to −0.55). The negative baseline is the universe vs SPY over these windows (survivorship-flattered small caps, a size factor that beta leaves in), not the exits.
+  - Selection: in the FULL period the book beats the placebo median at every horizon, with CIs excluding zero (+0.33 to +0.72). In the cleaner LATE period every paired CI includes zero and the placebo percentiles are 59–76. The selection information is not confirmed out of sample.
+- Survivorship: delisted stocks are missing from both the book and the placebo universe, which flatters results.
+
+## R:R floor on vs off (2026-10-14, report only)
+
+- Why it was turned off:
+  - Commit 03e2169 (2026-10-11, "Phase 0: R:R floor off (user decision)") split `RR_FLOOR_STOP_CAP_ENABLED` into `STOP_CAP_ENABLED = True` and `RR_FLOOR_ENABLED = False`. The commit and CLAUDE.md record it only as "user decision, not a tested result".
+  - No reason is recorded in the commits, the docs or the session transcript.
+  - Documented context: the Phase 2 record (commit 8c4157a) notes the floor removed about 98% of ideas (T1 is a median 0.8 R away), leaving about 2–3 new ideas a month, and R1 flagged `rr_floor_stop_cap` "costs return; kept as a risk rule".
+- Side by side (both production-universe runs, same window, 10 bps/side, placebo 200):
+
+  | | Run 38122679781 (floor on) | Run 38500883442 (floor off) |
+  |---|---|---|
+  | Ideas | 127 | 2,227 |
+  | Ideas / month | 2.6 | 45.2 |
+  | Beta-adj. %/idea (CI) | −0.34 (−1.16 to +0.50) | −0.42 (−1.04 to +0.15) |
+  | LATE | −0.45 (44 ideas) | −0.36 (951 ideas) |
+  | Placebo percentile | 80.0 | 94.5 |
+  | Break-even bps/side | −7.2 | −11.2 |
+  | 5th-percentile idea | −7.07% | −8.73% |
+  | Worst idea | −9.66% | −18.07% |
+
+  - Neither passes the edge criteria. The floor shrinks the left tail mostly by issuing 17× fewer ideas.
+- Survivorship: delisted stocks are missing, which flatters both runs.

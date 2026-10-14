@@ -107,7 +107,10 @@ jobs:
               cat "$f" >> "ledger/$(basename "$f")"
               sort -u -o "ledger/$(basename "$f")" "ledger/$(basename "$f")"
             done
-            git add -f ledger/
+            # Vercel builds every branch from frontend/: tell it to skip this data-only branch
+            mkdir -p frontend
+            echo '{"git": {"deploymentEnabled": false}, "ignoreCommand": "exit 0"}' > frontend/vercel.json
+            git add -f ledger/ frontend/vercel.json
             if ! git diff --staged --quiet; then
               git commit -m "Swing signals ledger: $(date -u +'%Y-%m-%d')"
               git push origin signals-ledger

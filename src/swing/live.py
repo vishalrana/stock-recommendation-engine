@@ -50,6 +50,19 @@ def latest_completed_session(now: Optional[datetime] = None) -> date:
     return k
 
 
+MIN_FRESH_PCT = 95.0   # share of recently trading tickers that must have the session's bar
+
+
+def fresh_share(frames: Dict[str, pd.DataFrame], session: date) -> Tuple[float, int]:
+    """(% of tickers with a bar on `session`, tickers counted). Counted: a bar in the 14 days
+    before it, so delisted names do not count. Yahoo posts some chunks' bars hours late."""
+    lasts = [f.index[-1].date() for f in frames.values() if len(f)]
+    recent = [d for d in lasts if d >= session - timedelta(days=14)]
+    if not recent:
+        return 0.0, 0
+    return 100.0 * sum(d >= session for d in recent) / len(recent), len(recent)
+
+
 def update_live_prices(tickers: Sequence[str], price_dir: str = PRICE_DIR, chunk: int = 200) -> Dict[str, object]:
     from scripts.build_long_history import download_chunk
     os.makedirs(price_dir, exist_ok=True)
@@ -66,8 +79,11 @@ def update_live_prices(tickers: Sequence[str], price_dir: str = PRICE_DIR, chunk
     incr = [t for t in tickers if t in have]
     stats = {"full": 0, "incremental": 0, "refetched_after_action": 0, "failed": []}
 
+    cutoff = pd.Timestamp(latest_completed_session())
+
     def save(t, df):
-        df.to_parquet(os.path.join(price_dir, f"{t}.parquet"))
+        # A bar for a session that has not closed is still forming: never store or use it
+        df[df.index <= cutoff].to_parquet(os.path.join(price_dir, f"{t}.parquet"))
 
     groups: Dict[str, List[str]] = {}
     for t in incr:

@@ -224,3 +224,32 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - Only LIVE sleeves alert.
 - The decide stage writes `config/swing_sleeves.json` and `config/swing/{decisions,replication,patterns}.json` only from a non-smoke GitHub run, with all five sleeves and replication present, at least 98% U1 price coverage, and the price-history check run. Each file records the run id.
 - Run 38189718125 (2026-10-12) was not adopted. It reused cached files from a throttled run, and the split check had written NVDA from 2024 only. `scripts/build_long_history.py` now re-downloads every ticker, never replaces a cached file with a history that starts later, and stops retrying once a retry pass recovers nothing.
+
+## Live Ideas configuration backtest (2026-10-14, GitHub run 38500883442, sha c88ab5e)
+
+- Why: production applies the full-hold earnings blackout, event lock and stop cap with the R:R floor off (user decision 2026-10-11), a combination never backtested. The harness also gated the stop cap on the retired `RR_FLOOR_STOP_CAP_ENABLED`; backtest and live now share `trade_hygiene.rr_stop_enabled()` and `rr_stop_rejection()` (PR #6). Ad hoc measurement (`trial_phase` adhoc): no rule was changed or adopted.
+- Window: signals 2022-10-21..2026-10-09 (996 sessions), production universe (5,592 stocks + 15 sector ETFs; survivorship as in the earlier production-universe runs), 10 bps/side, placebo 200.
+- Ideas issued: 2,227 (2,216 closed, 11 censored). Per month: mean 45.2, median 36, range 0–145 (1 of 49 months with none).
+- Ideas per trading day: mean 2.23, median 1; 0 ideas on 36.9% of days, 1 on 21.0%, 2–5 on 32.3%, 6+ on 9.7% (max 37).
+- Candidates removed, in harness order (each count is among the survivors of the previous filter), from 387,741 scored setups:
+
+  | Filter | Removed |
+  |---|---|
+  | Score < 65 | 360,641 |
+  | Fixed-days earnings blackout (live earnings filter) | 2,979 |
+  | Earnings full-hold | 4,848 |
+  | Event lock | 821 |
+  | Stop cap | 10,698 |
+  | Entry-location gate | 3,339 |
+  | Already an active idea / issued that day / invalid plan | 2,188 |
+  | Issued | 2,227 |
+
+- Results, beta-adjusted %/idea (signal-month block-bootstrap 95% CI):
+  - FULL −0.42 (−1.04 to +0.15); excess vs SPY −0.48 (−1.16 to +0.15); mean β 0.88.
+  - LATE (signals from 2025-04-09, 951 ideas) −0.36 (−1.46 to +0.66).
+  - Placebo: 94.5th percentile; paired diff vs placebo median +0.49 (CI +0.00 to +0.98).
+  - Break-even cost −11.2 bps/side (it loses before costs). With the Corwin-Schultz half-spread, −1.09 (−1.70 to −0.53).
+  - Left tail: 5th-percentile idea −8.73%, worst idea −18.07%; 11.4% of stops gapped through; 0% of ideas with earnings inside the hold.
+  - By strategy (ideas, beta-adj): Trend Following 1,853, −0.54; Mean Reversion 187, +0.58; Post-Earnings Drift 106, +0.32; Cross-Sectional Momentum 62, −1.20; Sector Rotation 8, −1.25. Exits: 1,264 expiry, 950 stop, 2 target.
+- Verdict: no edge (every `edge_*_verdict` is NO_EDGE_DETECTED_CI_INCLUDES_ZERO; the EDGE CLAIM criteria fail: FULL CI includes zero, LATE mean < 0, placebo below the 95th percentile).
+- Correction: with the R:R floor off, the live book issues about 45 ideas a month, not the 2–3 a month of the floor-on book (run 38122679781, 127 ideas).

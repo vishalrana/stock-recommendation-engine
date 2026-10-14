@@ -6,6 +6,7 @@ import { Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { getStrategyExplanation } from '../lib/strategy-explanations';
 import { RARELY_REACHED_PCT } from '../lib/backtest-verdict';
 import { sizeIdea } from '../lib/sizing';
+import { MIN_STRATEGY_SAMPLE, ISSUED_RUN_ID, insufficientSample, issuedStatsLine } from '../lib/strategy-sample';
 
 interface StockCardProps {
   recommendation: Recommendation;
@@ -241,14 +242,17 @@ export default function StockCard({
     const expText = (exp !== null && exp !== undefined && !isNaN(Number(exp)))
       ? ` · ${Number(exp) >= 0 ? '+' : ''}${Number(exp).toFixed(2)}%/trade`
       : '';
-    winRateDisplay = `${Number(swr).toFixed(0)}% of ${strades} trades${expText}`;
+    winRateDisplay = Number(strades) < MIN_STRATEGY_SAMPLE
+      ? insufficientSample(Number(strades))
+      : `${Number(swr).toFixed(0)}% of ${strades} trades${expText}`;
   }
+  const issuedDisplay = issuedStatsLine(strategy);
   // Same backtest, measured against SPY held over the same days with the same market risk (beta).
   // A rising market lifts the absolute figure on its own; this one shows whether the strategy beat it.
   const fmtPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%/trade`;
   const sba = recommendation.strategy_beta_adjusted_pct;
   const sxs = recommendation.strategy_excess_vs_spy_pct;
-  const betaAdjValue = (sba !== null && sba !== undefined && !isNaN(Number(sba))) ? Number(sba) : null;
+  const betaAdjValue = (sba !== null && sba !== undefined && !isNaN(Number(sba)) && Number(strades) >= MIN_STRATEGY_SAMPLE) ? Number(sba) : null;
   const betaAdjDisplay = betaAdjValue !== null ? `${fmtPct(betaAdjValue)} vs SPY after beta` : null;
   const betaAdjTitle = (sxs !== null && sxs !== undefined && !isNaN(Number(sxs)))
     ? `Versus simply holding SPY over the same days: ${fmtPct(Number(sxs))} (before adjusting for market risk)`
@@ -476,6 +480,17 @@ export default function StockCard({
                   </span>
                   <span className="text-slate-300 font-mono font-medium">
                     {rrDisplay}
+                  </span>
+                </div>
+              )}
+              {issuedDisplay && (
+                <div className="col-span-2">
+                  <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
+                    Ideas issued by this strategy (backtest)
+                  </span>
+                  <span className="text-slate-300 font-mono font-medium block"
+                        title={`Live filters applied; backtest run ${ISSUED_RUN_ID}, Oct 2022 - Oct 2026; delisted stocks are missing, which flatters results`}>
+                    {issuedDisplay}
                   </span>
                 </div>
               )}

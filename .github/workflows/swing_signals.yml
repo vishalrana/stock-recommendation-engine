@@ -1,13 +1,12 @@
 name: Daily Swing Signals Scanner
 
-# Nightly swing signals (jobs/generate_swing_signals.py). The schedule stays disabled until the
-# pre-registered research run has completed and its decisions are committed; until then run it by
-# hand (workflow_dispatch). When enabled it runs at 01:20 UTC Tue-Sat, after the US close in both
-# summer (EDT) and winter (EST) time.
+# Nightly swing signals (jobs/generate_swing_signals.py), 01:20 UTC Tue-Sat, after the US close in
+# both summer (EDT) and winter (EST) time. Enabled 2026-10-14 after research run 38436737951 was
+# committed and dispatched run 38489334476 succeeded.
 
 on:
-  # schedule:
-  #   - cron: '20 1 * * 2-6'
+  schedule:
+    - cron: '20 1 * * 2-6'
   workflow_dispatch:
     inputs:
       dry_run:

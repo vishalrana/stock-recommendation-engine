@@ -221,6 +221,30 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
             "rights": {},
         }
 
+    def test_backtest_and_live_share_stop_cap_check(self):
+        """Every flag combination: the backtest and the live scan both call trade_hygiene.rr_stop_rejection
+        with the same plan, or neither does."""
+        import jobs.generate_signals as gs
+        import src.trade_hygiene as th
+        from scripts.validate_backtest_pipeline import hygiene_rejection, production_hygiene_rules
+        sig = {"ticker": "SNOW", "strategy": "Trend Following", "entry_price": 100.0, "stop_loss": 85.8,
+               "target_1": 109.7, "atr_14": 4.0}
+        for cap in (False, True):
+            for floor in (False, True):
+                with mock.patch.object(qc, "STOP_CAP_ENABLED", cap), mock.patch.object(qc, "RR_FLOOR_ENABLED", floor), \
+                        mock.patch.object(qc, "EARNINGS_BLACKOUT_MODE", "fixed_days"), \
+                        mock.patch.object(qc, "EVENT_LOCK_ENABLED", False), \
+                        mock.patch.object(th, "rr_stop_rejection", wraps=th.rr_stop_rejection) as spy:
+                    live = gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {})
+                    live_calls = list(spy.call_args_list)
+                    spy.reset_mock()
+                    rules = production_hygiene_rules()
+                    rule, _, _ = hygiene_rejection(rules, dict(sig), "SNOW", pd.Timestamp("2026-10-09"), False,
+                                                   self._events(), SessionCalendar(), 25, None)
+                    self.assertEqual(live_calls, list(spy.call_args_list), (cap, floor))
+                    self.assertEqual(bool(live_calls), cap or floor)
+                    self.assertEqual(live is not None, rule is not None, (cap, floor))
+
     def test_harness_rules(self):
         from scripts.validate_backtest_pipeline import hygiene_rejection, fixed_days_blackout
         cal = SessionCalendar()
@@ -261,7 +285,6 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         # All switches off: nothing is rejected
         with mock.patch.object(qc, "STOP_CAP_ENABLED", False), \
                 mock.patch.object(qc, "RR_FLOOR_ENABLED", False), \
-                mock.patch.object(qc, "RR_FLOOR_STOP_CAP_ENABLED", False), \
                 mock.patch.object(qc, "EARNINGS_BLACKOUT_MODE", "fixed_days"), \
                 mock.patch.object(qc, "EVENT_LOCK_ENABLED", False):
             self.assertIsNone(gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {}))

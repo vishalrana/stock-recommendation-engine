@@ -332,7 +332,8 @@ def production_hygiene_rules() -> Tuple[str, ...]:
         rules.append("earnings_full_hold")
     if qc.EVENT_LOCK_ENABLED:
         rules.append("event_lock")
-    if qc.RR_FLOOR_STOP_CAP_ENABLED:
+    from src.trade_hygiene import rr_stop_enabled
+    if rr_stop_enabled():  # same switch as the live scan
         rules.append("rr_floor_stop_cap")
     return tuple(rules)
 

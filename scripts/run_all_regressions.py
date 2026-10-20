@@ -65,6 +65,7 @@ TEST_SUITES = [
     "tests/test_exit_decomposition.py",
     "tests/test_live_prices.py",
     "tests/test_score_parity.py",
+    "tests/test_market_date_guard.py",
 ]
 
 

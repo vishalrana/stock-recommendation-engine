@@ -955,16 +955,22 @@ def run_scan(
     logger.info("Earnings provider budget: %d requests (network fetching %s)", max_provider_fetches, "ENABLED" if allow_earnings_net else "DISABLED")
     logger.info("=" * 60)
 
-    from src.utils.market_date import get_market_date, get_execution_timestamp_utc
+    from src.utils.market_date import get_execution_timestamp_utc
     scan_execution_timestamp = get_execution_timestamp_utc()
 
     regime_info = get_regime()
     sma_regime = regime_info["regime"]
     regime_str = sma_regime
 
-    market_data_date = regime_info.get("date")
-    if not market_data_date:
-        market_data_date = get_market_date().isoformat()
+    # The session to scan comes from the NYSE calendar and the run's clock, never from the latest
+    # cached bar: a run before the session's bars are posted must be stale, not a silent scan of the
+    # session before (the freshness guard below withholds new ideas; lifecycle still runs).
+    from src.utils.market_date import latest_completed_session
+    market_data_date = latest_completed_session().isoformat()
+    spy_bar_date = regime_info.get("date")
+    if spy_bar_date and str(spy_bar_date)[:10] < market_data_date:
+        logger.error("[STALE DATA] SPY's latest bar %s is older than the latest completed session %s.",
+                     spy_bar_date, market_data_date)
     recommendation_date = market_data_date
     scan_date_today = market_data_date
     signal_date = market_data_date

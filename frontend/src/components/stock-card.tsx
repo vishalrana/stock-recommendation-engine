@@ -43,6 +43,10 @@ const HOLDING_DAYS: Record<string, number> = {
   'mean reversion': 5,
 };
 
+// Earnings full-hold rule (ESTIMATED_EARNINGS_BAND_SESSIONS, FULL_HOLD_BUFFER_SESSIONS in src/quant_config.py)
+const EARNINGS_BAND_SESSIONS = 5;
+const FULL_HOLD_BUFFER_SESSIONS = 2;
+
 function getHoldingDays(strategy?: string | null): number | null {
   if (!strategy) return null;
   return HOLDING_DAYS[strategy.trim().toLowerCase()] ?? null;
@@ -192,26 +196,23 @@ export default function StockCard({
     });
   }
 
-  // 3. Next earnings date (hide if null / unknown)
+  // 3. Next earnings: the date the earnings gate tested (SEC 8-K item 2.02 history known at the scan),
+  // with days_to_earnings in NYSE sessions after the scan date. An issued idea only carries the estimate.
   let earningsInsideHold = false;
   if (recommendation.next_earnings_date && recommendation.next_earnings_date.trim() !== '') {
     const formattedDate = formatEarningsDate(recommendation.next_earnings_date);
     if (formattedDate) {
-      const days = (recommendation.days_to_earnings !== null && recommendation.days_to_earnings !== undefined && Number(recommendation.days_to_earnings) > 0)
-        ? ` (${recommendation.days_to_earnings}d)`
-        : '';
+      const sessions = recommendation.days_to_earnings;
+      const away = sessions !== null && sessions !== undefined && Number(sessions) > 0 ? `, in ${sessions} sessions` : '';
       evidenceItems.push({
         label: 'Next earnings',
-        detail: `${formattedDate}${days}`,
+        detail: `${formattedDate} (estimated ±${EARNINGS_BAND_SESSIONS} sessions${away})`,
       });
-      // Does the report fall before the strategy's holding period ends? (trading days -> ~calendar days)
+      // The gate's test: the estimate's band overlaps the hold window, fill (session 1) to hold + buffer
       const holdDays = getHoldingDays(recommendation.strategy_name || recommendation.strategy);
-      const start = recommendation.entry_date || recommendation.scan_date;
-      if (holdDays && start) {
-        const startMs = new Date(start.includes('T') ? start : `${start}T00:00:00`).getTime();
-        const earnMs = new Date(`${recommendation.next_earnings_date.slice(0, 10)}T00:00:00`).getTime();
-        const holdEndMs = startMs + Math.ceil(holdDays * 7 / 5) * 86400000;
-        earningsInsideHold = !isNaN(startMs) && !isNaN(earnMs) && earnMs >= startMs && earnMs <= holdEndMs;
+      if (holdDays && sessions !== null && sessions !== undefined && !isNaN(Number(sessions))) {
+        earningsInsideHold = Number(sessions) - EARNINGS_BAND_SESSIONS <= holdDays + FULL_HOLD_BUFFER_SESSIONS
+          && Number(sessions) + EARNINGS_BAND_SESSIONS >= 1;
       }
     }
   }

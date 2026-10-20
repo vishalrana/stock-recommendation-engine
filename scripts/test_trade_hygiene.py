@@ -293,6 +293,24 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         self.assertEqual(rule, "earnings_blackout")
         self.assertIn("reported 2026-10-12", reason)
 
+    def test_issued_ideas_only_carry_an_estimate(self):
+        """The card labels the gate's date "estimated": a report filed by the cutoff whose reaction is still
+        ahead rejects every strategy, so no issued idea carries a reported date."""
+        from src.pipeline_steps import holding_days_for
+        from src.trade_hygiene import earnings_gate, gate_earnings_date
+        d = date(2026, 10, 5)                                         # reported after Monday's close
+        ev = self._far()[:-1] + self._ev(date(2026, 10, 5), hour=17, minute=30)
+        self.assertEqual(gate_earnings_date(ev, d), date(2026, 10, 6))
+        for name in ("Trend Following", "Pullback Recovery", "52-Week High Breakout", "Post-Earnings Drift",
+                     "Cross-Sectional Momentum", "Mean Reversion"):
+            rule, _ = earnings_gate(name, False, d, ev, SessionCalendar(), holding_days_for(name))
+            self.assertIn(rule, ("earnings_blackout", "earnings_full_hold"), name)
+        teva = self._teva()                                           # estimate: the date the gate tests
+        nxt = gate_earnings_date(teva, date(2026, 10, 9))
+        self.assertIn(nxt.isoformat(), earnings_gate("Trend Following", False, date(2026, 10, 9), teva,
+                                                     SessionCalendar(), 20)[1])
+        self.assertIsNone(gate_earnings_date([], date(2026, 10, 9)))
+
     def test_live_and_backtest_make_the_same_decisions(self):
         import jobs.generate_signals as gs
         from scripts.validate_backtest_pipeline import hygiene_rejection, production_hygiene_rules

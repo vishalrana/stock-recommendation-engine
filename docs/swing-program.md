@@ -217,13 +217,13 @@ Shadow adoption rules:
 Wording rule:
   - For LIVE sleeves only, the UI may say "Validated on the 2008-2022 backtest" with the U2 and U1 numbers, always followed by "Backtests and short live records do not prove future profit."
   - Never write "edge" or "profitable".
-Trial list (record every run in outputs/research_trials.jsonl with phase "swing"; mark smoke runs):
+Trial list (record every run in config/research_trials.jsonl with phase "swing"; mark smoke runs):
   - S-T, S-E, S-N, S-P, S-I (the Holm family of 5);
   - O-G1/<sleeve>, O-V1/<sleeve>, O-X1/T;
   - the report-only items of section 3;
   - live K3, K12 and KDD checks, and L1 and D1 evaluations, as they occur.
 
-Registry location: `outputs/research_trials.jsonl`
+Registry location: `config/research_trials.jsonl` (committed; per-run file `outputs/research_trials.jsonl`)
 
 ## Status
 

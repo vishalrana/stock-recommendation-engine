@@ -25,6 +25,9 @@ concurrency:
   group: research-signal-ic
   cancel-in-progress: false
 
+permissions:
+  contents: write   # the trials registry is pushed to main
+
 jobs:
   ic:
     name: Signal IC study
@@ -70,6 +73,10 @@ jobs:
       - name: Signal IC study
         run: python scripts/research_signal_ic.py --universe production $LIMIT_ARG $PATTERNS_ARG $ML_ARG
 
+      - name: Persist trials (config/research_trials.jsonl on main)
+        if: always()
+        run: python scripts/persist_trials.py outputs/research_trials.jsonl --run-id "${{ github.run_id }}" --push
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,4 +86,4 @@ jobs:
             outputs/research/
             outputs/research_trials.jsonl
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90

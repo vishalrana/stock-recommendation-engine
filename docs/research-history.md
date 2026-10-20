@@ -84,7 +84,7 @@ Recorded before any of its backtests or IC studies were run. The definitions and
 | 7 ML (only if R3 adopts a signal) | R5 | `lightgbm_ranker` (purged walk-forward OOS) |
 | Final | EDGE CLAIM | the final production book |
 
-- Trials registry: `outputs/research_trials.jsonl` (gitignored), one JSON record per trial per run, written by `src/research/trials.py`. Smoke runs that produce statistics are recorded too, marked `smoke`.
+- Trials registry: `config/research_trials.jsonl` (committed), one JSON record per trial per run with its `run_id`. Each run writes `outputs/research_trials.jsonl` (`src/research/trials.py`, uploaded with the artifact, kept 90 days) and the workflow merges it into the committed file on main (`scripts/persist_trials.py`, deduplicated, retried when another run pushed first). Smoke runs that produce statistics are recorded too, marked `smoke`. Backfill 2026-10-20: 85 records from the 12 runs whose artifacts were still available, plus 116 local smoke records (`run_id` null); backtest run 38059174571 (2026-10-10, before the registry) has no artifact left.
 - Phase 4 is skipped, along with Phase 7, if neither C6 nor MOM12_1 is valid under R3.
 
 **Program progress:**

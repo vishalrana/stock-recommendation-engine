@@ -66,7 +66,8 @@ every variant:
     twice that, and the break-even cost per side.
   * Multiple testing: one-sided paired-bootstrap p-values, Holm across the variants of the run, and
     StepM (arch, stationary bootstrap) on per-signal-month series when arch is installed.
-  * Trials registry: one record per book per run in outputs/research_trials.jsonl (smoke runs marked).
+  * Trials registry: one record per book per run in outputs/research_trials.jsonl (smoke runs marked),
+    merged into the committed config/research_trials.jsonl by the workflow (scripts/persist_trials.py).
   * Survivorship gauge: share of S&P 500 member-days with no bar in the price cache.
 
 Outputs:

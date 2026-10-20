@@ -151,6 +151,9 @@ HYGIENE_VARIANTS: Dict[str, Tuple[str, ...]] = {
 RULE_OFF_VARIANTS: Dict[str, Tuple[str, ...]] = {
     "stop_cap_off": ("rr_floor_stop_cap",),
 }
+# Production with REJECT_UNKNOWN_EARNINGS off: an idea without a known or estimated report date is
+# issued (blackout and full-hold still apply to dated ideas). Extra trial, report only.
+UNKNOWN_EARNINGS_VARIANTS = ("allow_unknown_earnings",)
 # Pattern veto (Phase 5, rule R2): no idea within 20 sessions of a confirmed head-and-shoulders top.
 PATTERN_VARIANTS = ("hs_top_veto",)
 
@@ -829,7 +832,8 @@ def left_tail(trades: List[Dict[str, Any]], events: Optional[Dict[str, Any]]) ->
 
 
 def hygiene_rejection(rules: Tuple[str, ...], sig: Dict[str, Any], ticker: str, d: pd.Timestamp, is_etf: bool,
-                      events: Dict[str, Any], session_cal, hold_days: int, pinned: Optional[bool]) -> Tuple[Optional[str], Optional[str], Dict[str, bool]]:
+                      events: Dict[str, Any], session_cal, hold_days: int, pinned: Optional[bool],
+                      reject_unknown: bool = True) -> Tuple[Optional[str], Optional[str], Dict[str, bool]]:
     """
     (rule, reason) of the first hygiene rule that rejects the idea, else (None, None); plus
     unknown-data flags. Earnings use trade_hygiene.earnings_gate, the live scan's function, on the
@@ -850,7 +854,7 @@ def hygiene_rejection(rules: Tuple[str, ...], sig: Dict[str, Any], ticker: str, 
                 flags["earnings_unknown"] = True
             if gate_rule == "earnings_sec_unavailable":
                 flags["earnings_sec_unavailable"] = True
-            if reason:
+            if reason and (reject_unknown or gate_rule not in ("earnings_unknown", "earnings_sec_unavailable")):
                 return gate_rule, reason, flags
         elif rule == "event_lock" and not is_etf:
             filings = events["filings"].get(ticker)
@@ -1074,7 +1078,8 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     for v in variants or []:
         if v in VARIANT_PRESETS:
             settings_list.append(replace(production, name=v, **VARIANT_PRESETS[v]))
-        elif v in HYGIENE_VARIANTS or v in PATTERN_VARIANTS or v in PHASE4_VARIANTS or v in RULE_OFF_VARIANTS:
+        elif (v in HYGIENE_VARIANTS or v in PATTERN_VARIANTS or v in PHASE4_VARIANTS or v in RULE_OFF_VARIANTS
+              or v in UNKNOWN_EARNINGS_VARIANTS):
             settings_list.append(replace(production, name=v))
         else:
             settings_list.append(replace(production, name=v))
@@ -1223,7 +1228,8 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                         pins[ticker] = price_pin(frame["CLOSE"]).to_numpy()
                     rule, why, flags = hygiene_rejection(
                         rules, sig, ticker, d, ticker in SECTOR_ETFS, sec_events, session_cal,
-                        holding_days_for(sig["strategy"]) or 20, bool(pins[ticker][loc]) if ticker in pins else None)
+                        holding_days_for(sig["strategy"]) or 20, bool(pins[ticker][loc]) if ticker in pins else None,
+                        reject_unknown=settings.name not in UNKNOWN_EARNINGS_VARIANTS)
                     if rule:
                         funnel[f"{rule}_blocked"] += 1
                         _note(settings, sig, rule, why)
@@ -1544,6 +1550,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                         "candidate_filter": settings.name if settings.name in candidate_filters else None,
                         "hygiene_rules": [r for r in dict.fromkeys(production_hygiene_rules() + HYGIENE_VARIANTS.get(settings.name, ()))
                                           if r not in RULE_OFF_VARIANTS.get(settings.name, ())],
+                        "reject_unknown_earnings": settings.name not in UNKNOWN_EARNINGS_VARIANTS,
                         "universe": universe, "limit": limit, "late_from": LATE_FROM},
                 n_ideas=len(b_trades), mean_beta_adj=st.get("mean_beta_adjusted_pct"),
                 ci=st.get("beta_adjusted_ci95_block_bootstrap"), late_mean=lt.get("mean_beta_adjusted_pct"),
@@ -1617,7 +1624,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None, help="Smoke test on the first N stocks (outputs not written)")
     all_variants = (list(VARIANT_PRESETS) + list(STRATEGY_VARIANTS) + list(HYGIENE_VARIANTS) + list(PATTERN_VARIANTS)
-                    + list(PHASE4_VARIANTS) + list(RULE_OFF_VARIANTS))
+                    + list(PHASE4_VARIANTS) + list(RULE_OFF_VARIANTS) + list(UNKNOWN_EARNINGS_VARIANTS))
     parser.add_argument("--variants", default="", help=f"Comma-separated variants or 'all': {', '.join(all_variants)}")
     parser.add_argument("--placebo", type=int, default=None,
                         help=f"Random-stock placebo draws per idea (default {PLACEBO_DRAWS_FULL}; "

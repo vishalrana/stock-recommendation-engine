@@ -1,22 +1,22 @@
 {
-  "run_id": "39384088732",
+  "run_id": "39451924637",
   "strategies": {
     "Cross-Sectional Momentum": {
-      "n": 42,
-      "win_rate_pct": 45.238,
+      "n": 43,
+      "win_rate_pct": 46.512,
       "win_rate_ci95": [
-        34.041,
-        58.974
+        34.78,
+        60.0
       ],
-      "net_expectancy_pct": 0.169,
+      "net_expectancy_pct": 0.319,
       "net_expectancy_ci95": [
-        -1.601,
-        2.564
+        -1.455,
+        2.689
       ],
-      "beta_adjusted_pct": -0.603,
+      "beta_adjusted_pct": -0.402,
       "beta_adjusted_ci95": [
-        -2.08,
-        1.167
+        -1.921,
+        1.482
       ]
     },
     "Mean Reversion": {
@@ -38,21 +38,21 @@
       ]
     },
     "Post-Earnings Drift": {
-      "n": 100,
-      "win_rate_pct": 59.0,
+      "n": 101,
+      "win_rate_pct": 59.406,
       "win_rate_ci95": [
-        50.0,
-        65.354
+        50.818,
+        65.789
       ],
-      "net_expectancy_pct": 0.976,
+      "net_expectancy_pct": 1.005,
       "net_expectancy_ci95": [
-        -0.627,
-        2.328
+        -0.488,
+        2.332
       ],
-      "beta_adjusted_pct": 0.338,
+      "beta_adjusted_pct": 0.37,
       "beta_adjusted_ci95": [
-        -0.38,
-        1.57
+        -0.308,
+        1.708
       ]
     },
     "Sector Rotation": {
@@ -74,21 +74,21 @@
       ]
     },
     "Trend Following": {
-      "n": 1347,
-      "win_rate_pct": 47.661,
+      "n": 1342,
+      "win_rate_pct": 47.765,
       "win_rate_ci95": [
-        42.594,
-        53.026
+        42.612,
+        53.144
       ],
-      "net_expectancy_pct": -0.4,
+      "net_expectancy_pct": -0.391,
       "net_expectancy_ci95": [
-        -1.046,
-        0.311
+        -1.036,
+        0.31
       ],
-      "beta_adjusted_pct": -1.031,
+      "beta_adjusted_pct": -1.022,
       "beta_adjusted_ci95": [
-        -1.652,
-        -0.367
+        -1.647,
+        -0.354
       ]
     }
   }

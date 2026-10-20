@@ -257,6 +257,14 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         self.assertIn("no SEC 8-K item 2.02 report", reason)
         self.assertTrue(flags["earnings_unknown"])
         self.assertFalse(flags["earnings_sec_unavailable"])
+        # allow_unknown_earnings variant: undated ideas pass on to the next rule, dated ones still gate
+        for t in ("NOREP", "NOSEC"):
+            rule, _, flags = hygiene_rejection(("earnings", "event_lock"), sig, t, d, False, ev, cal, 25, False,
+                                               reject_unknown=False)
+            self.assertIsNone(rule, t)
+            self.assertTrue(flags["earnings_unknown"])
+        self.assertEqual(hygiene_rejection(("earnings",), sig, "TEVA", d, False, ev, cal, 25, None,
+                                           reject_unknown=False)[0], "earnings_full_hold")
         rule, reason, _ = hygiene_rejection(("event_lock",), sig, "ACQ", d, False, ev, cal, 25, False)
         self.assertEqual(rule, "event_lock")
         self.assertIn("DEFM14A", reason)

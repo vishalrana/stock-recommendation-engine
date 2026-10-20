@@ -51,3 +51,16 @@ test('card: fundamentals wrap as whole ratios', () => {
   }
   assert.ok(html.includes('flex flex-wrap justify-end'));
 });
+
+test('card: next earnings is the gate date, labelled estimated, warning by the gate band and window', () => {
+  const card = (days: number) => renderToStaticMarkup(
+    <StockCard recommendation={{ ...obe, strategy: 'Trend Following', earnings_unknown: false,
+      next_earnings_date: '2026-11-20', days_to_earnings: days } as unknown as Recommendation}
+      isExpanded={true} onToggleExpand={() => {}} onRemove={() => {}} />,
+  );
+  const warn = 'Earnings report falls inside the holding period';
+  const near = card(27);                    // band 22..32 touches the window 1..22 (20 sessions + 2 buffer)
+  assert.ok(near.includes('Nov 20, 2026 (estimated ±5 sessions, in 27 sessions)'));
+  assert.ok(near.includes(warn));
+  assert.ok(!card(28).includes(warn));      // band 23..33: clear of the window, as the gate passed it
+});

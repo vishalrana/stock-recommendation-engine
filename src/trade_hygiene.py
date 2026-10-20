@@ -78,6 +78,14 @@ SEC_UNAVAILABLE_CAUSES = {
 }
 
 
+def gate_earnings_date(events, scan_date: date) -> Optional[date]:
+    """The next report the earnings gate tests: the reaction session of a report filed by the cutoff whose
+    reaction is still ahead, else the point-in-time estimate (None when unknown)."""
+    from src.earnings_pit import next_report_estimate, upcoming_known_reactions
+    upcoming = upcoming_known_reactions(events, scan_date)
+    return upcoming[0] if upcoming else next_report_estimate(events, scan_date)
+
+
 def earnings_gate(strategy: str, is_etf: bool, scan_date: date, events, cal: "SessionCalendar",
                   hold_days: int, unavailable_cause: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -101,7 +109,7 @@ def earnings_gate(strategy: str, is_etf: bool, scan_date: date, events, cal: "Se
         return None, None
     upcoming = upcoming_known_reactions(events, scan_date)      # reported after the close, reaction ahead
     est = next_report_estimate(events, scan_date)
-    nxt = upcoming[0] if upcoming else est
+    nxt = gate_earnings_date(events, scan_date)
     if nxt is None:
         if qc.REJECT_UNKNOWN_EARNINGS:
             return "earnings_unknown", "Earnings date unknown (no SEC 8-K item 2.02 report in the last 200 days)"

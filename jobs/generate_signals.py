@@ -1651,8 +1651,15 @@ def run_scan(
                 catalyst_type=sig.get("catalyst_override") if ctx_in_score else None,
                 allow_unknown_date=True,
             )
-            sig["next_earnings_date"] = er_res.get("next_earnings_date")
-            sig["days_to_earnings"] = er_res.get("days_to_earnings")
+            # Card date = the date the earnings gate tests (SEC filings known at the decision), and
+            # days_to_earnings = NYSE sessions after the scan date. An issued idea only carries the
+            # estimate: a filed report's reaction is the next session, inside every hold window.
+            from src.trade_hygiene import gate_earnings_date
+            from src.utils.market_date import trading_sessions_between
+            is_etf_sig = bool(sig.get("is_etf")) or normalize_strategy_key(strategy_name) == "sector_rotation"
+            nxt = None if is_etf_sig else gate_earnings_date(_ticker_earnings_events(ticker), scan_dt)
+            sig["next_earnings_date"] = nxt.isoformat() if nxt else None
+            sig["days_to_earnings"] = trading_sessions_between(scan_dt, nxt) if nxt else None
             sig["earnings_reason_code"] = er_res.get("reason_code")
 
             # Display only since 2026-10-20: the earnings rules that gate are the backtest's

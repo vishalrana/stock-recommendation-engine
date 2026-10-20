@@ -1,0 +1,50 @@
+name: Parity Replay
+
+# Replays one live Ideas session through the backtest harness (validate_backtest_pipeline.py
+# --replay-session) and compares it with what the nightly scan decided (scripts/parity_replay.py):
+# issued sets, and every candidate whose outcome differs, with its cause.
+
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        description: 'Live scan date to replay (YYYY-MM-DD)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r jobs/requirements.txt
+      # Prices are re-downloaded (--refresh-data) so the session's bars exist; SEC filings are
+      # fetched fresh and cut at the session's 20:00 ET cutoff by the shared point-in-time code.
+      - name: Harness decisions for the session
+        run: |
+          OPEN=$(python scripts/parity_replay.py --date "${{ inputs.session }}" --print-open | tail -1)
+          echo "Ideas open before the session: $OPEN"
+          python scripts/validate_backtest_pipeline.py --universe production --workers 4 \
+            --replay-session "${{ inputs.session }}" --replay-active "$OPEN" --refresh-data
+      - name: Compare with the live scan
+        run: python scripts/parity_replay.py --date "${{ inputs.session }}" --harness-csv "outputs/parity_replay_${{ inputs.session }}_harness.csv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-replay
+          path: outputs/parity_replay_*

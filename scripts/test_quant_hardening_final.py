@@ -53,6 +53,18 @@ from src.filters.earnings_filter import (
 from src.utils.metrics_pipeline import calculate_shrunk_win_rate, calculate_shrunk_expectancy
 
 
+def _sec_report(ticker, day, test):
+    """PEAD reads SEC 8-K item 2.02 events (src/earnings_pit.py): one pre-market report on `day`."""
+    import pandas as _pd
+    from datetime import datetime as _dt
+    from src.earnings_pit import set_events_lookup
+    from src.providers.context.sec_filings import EarningsEvent
+    d = _pd.Timestamp(day).date()
+    ev = [EarningsEvent(d, d, _dt(d.year, d.month, d.day, 7, 0))]
+    set_events_lookup(lambda t, recent_only=False: ev if t == ticker else None)
+    test.addCleanup(set_events_lookup, None)
+
+
 class TestQuantHardeningFinal(unittest.TestCase):
 
     def setUp(self):
@@ -148,8 +160,7 @@ class TestQuantHardeningFinal(unittest.TestCase):
         df.iloc[-1, df.columns.get_loc("VOLUME")] = 2500000.0
 
         last_e_date = dates[-2]
-        cal = {"PEAD_CTX": {"last_earnings_date": last_e_date.isoformat(), "next_earnings_date": (last_e_date + datetime.timedelta(days=90)).isoformat()}}
-        strat.set_earnings_calendar(cal)
+        _sec_report("PEAD_CTX", last_e_date, self)
 
         # 1. PEAD scan with valid context
         metrics_valid = {"shrunk_win_rate": 60.0, "shrunk_expectancy": 2.5, "context_score": 80.0}
@@ -192,8 +203,7 @@ class TestQuantHardeningFinal(unittest.TestCase):
         df.iloc[-1, df.columns.get_loc("VOLUME")] = 2500000.0
 
         last_e_date = dates[-2]
-        cal = {"PEAD_TEST": {"last_earnings_date": last_e_date.isoformat(), "next_earnings_date": (last_e_date + datetime.timedelta(days=90)).isoformat()}}
-        strat.set_earnings_calendar(cal)
+        _sec_report("PEAD_TEST", last_e_date, self)
 
         sig = strat.scan("PEAD_TEST", df, "bull", {"shrunk_win_rate": 60.0, "shrunk_expectancy": 2.5})
         self.assertIsNotNone(sig, "PEAD setup should qualify")

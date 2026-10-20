@@ -58,6 +58,7 @@ class TestTrialsRegistry(unittest.TestCase):
                 self.assertIn(k, rows[0])
 
 
+    @mock.patch.dict(os.environ, {"GITHUB_RUN_ID": ""})   # records made on Actions carry its run id
     def test_merge_dedupes_and_tags_run_id(self):
         from src.research.trials import merge_trials
         with tempfile.TemporaryDirectory() as d:
@@ -70,6 +71,7 @@ class TestTrialsRegistry(unittest.TestCase):
             self.assertEqual([r["name"] for r in rows], ["production", "stop_cap_off"])
             self.assertEqual({r["run_id"] for r in rows}, {"42"})
 
+    @mock.patch.dict(os.environ, {"GITHUB_RUN_ID": ""})   # records made on Actions carry its run id
     def test_persist_pushes_to_main_once(self):
         import subprocess
         from scripts.persist_trials import REL_PATH, push

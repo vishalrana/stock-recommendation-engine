@@ -64,6 +64,7 @@ TEST_SUITES = [
     "tests/test_swing_native.py",
     "tests/test_exit_decomposition.py",
     "tests/test_live_prices.py",
+    "tests/test_score_parity.py",
 ]
 
 

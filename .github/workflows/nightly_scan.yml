@@ -5,13 +5,22 @@ on:
     # Run 1-2 hours after EOD data settles (8:00 PM ET / 20:00 ET, Mon-Fri)
     # 20:00 EST/EDT corresponds to 00:00 / 01:00 UTC on the next day (Tue-Sat)
     - cron: '0 1 * * 2-6'
-  workflow_dispatch: # Manual trigger from GitHub UI
+    # Second attempt: GitHub often starts the 01:00 run hours late or drops it. A scheduled run
+    # exits at once when scan_log already holds a successful scan of the session.
+    - cron: '0 4 * * 2-6'
+  workflow_dispatch: # Manual trigger from GitHub UI (always scans)
+
+concurrency:
+  group: nightly-scan
+  cancel-in-progress: false
 
 jobs:
   nightly-scan:
     name: Generate Signals
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      skipped: ${{ steps.scan.outputs.skipped }}
 
     steps:
       - name: Log Start Time
@@ -75,14 +84,20 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           GITHUB_ACTIONS: 'true'
-          CACHE_MODE: incremental
           PYTHONPATH: .
           MAX_PROVIDER_EARNINGS_FETCHES: '0'
+          SKIP_IF_SESSION_DONE: ${{ github.event_name == 'schedule' }}
         run: |
           echo "Starting signal generation..."
           START_EPOCH=$(date +%s)
 
-          python -m jobs.generate_signals
+          # Weekly (Saturday UTC, the Friday session): re-download the whole adjusted history so
+          # dividends and splits since the last download match the backtest's adjusted bars.
+          CACHE_MODE=incremental
+          if [ "$(date -u +%u)" = "6" ]; then CACHE_MODE=force; fi
+          echo "Cache mode: $CACHE_MODE"
+
+          python -m jobs.generate_signals --cache-mode "$CACHE_MODE"
           EXIT_CODE=$?
 
           END_EPOCH=$(date +%s)
@@ -114,6 +129,7 @@ jobs:
     name: Validate 20-day-old signals
     runs-on: ubuntu-latest
     needs: nightly-scan   # runs only after main scan succeeds
+    if: needs.nightly-scan.outputs.skipped != 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

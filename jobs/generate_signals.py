@@ -670,6 +670,37 @@ def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFra
     return None
 
 
+def _replace_history_audit(client, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Make signals_history idempotent per scan date + ticker + strategy before a write. A rerun of a
+    scan date replaces the earlier run's rejected rows for the same keys (the latest run wins); a key
+    that already holds a published idea's row (lifecycle outcome) is never duplicated or replaced.
+    Returns the rows to insert.
+    """
+    keep: List[Dict[str, Any]] = []
+    by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        by_date.setdefault(str(r.get("scan_date")), []).append(r)
+    for scan_date, batch in by_date.items():
+        existing = (client.table("signals_history").select("ticker,strategy,outcome")
+                    .eq("scan_date", scan_date).limit(20000).execute().data or [])
+        published = {(e["ticker"], e["strategy"]) for e in existing if e.get("outcome") != "rejected"}
+        audit = {(e["ticker"], e["strategy"]) for e in existing if e.get("outcome") == "rejected"}
+        batch = [r for r in batch if (r["ticker"], r["strategy"]) not in published]
+        replace: Dict[str, List[str]] = {}
+        for r in batch:
+            if (r["ticker"], r["strategy"]) in audit:
+                replace.setdefault(r["strategy"], []).append(r["ticker"])
+        for strategy, tickers in replace.items():
+            for i in range(0, len(tickers), 100):
+                (client.table("signals_history").delete().eq("scan_date", scan_date).eq("strategy", strategy)
+                 .eq("outcome", "rejected").in_("ticker", tickers[i:i + 100]).execute())
+        if replace:
+            logger.info("[HISTORY] Rerun of %s: replaced %d earlier audit rows", scan_date, sum(map(len, replace.values())))
+        keep.extend(batch)
+    return keep
+
+
 def _fundamentals_fields(f) -> Dict[str, Any]:
     """Display fields from a FundamentalContext (never used in scoring)."""
     if f is None or f.quality != DataQuality.VALID:
@@ -1562,7 +1593,6 @@ def run_scan(
         # Pre-calculate trade setups, risk analytics, and tier qualification
         earnings_rejected_count = 0
         reach_rejected_count = 0
-        rejected_signals_to_insert = []
         qualified_recommendations = []
         active_qualified_recommendations: Dict[str, dict] = {}
         qualified_tickers = set()
@@ -2070,7 +2100,7 @@ def run_scan(
                         else:
                             raise
 
-                write_with_missing_column_retry(_write_history, history_rows, droppable)
+                write_with_missing_column_retry(_write_history, _replace_history_audit(supabase, history_rows), droppable)
                 logger.info("Signals inserted and archived successfully.")
             else:
                 logger.info("No signals to insert.")

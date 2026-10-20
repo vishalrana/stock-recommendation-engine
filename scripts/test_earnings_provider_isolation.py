@@ -178,6 +178,13 @@ class TestEarningsProviderIsolation(unittest.TestCase):
             }
         }
         strategy.set_earnings_calendar(earnings_cal, allow_network=False)
+        # Since 2026-10-20 PEAD reads SEC 8-K item 2.02 events (src/earnings_pit.py), not the calendar
+        from datetime import datetime as _dt
+        from src.earnings_pit import set_events_lookup
+        from src.providers.context.sec_filings import EarningsEvent
+        ev = [EarningsEvent(ref_earnings_date, ref_earnings_date, _dt.combine(ref_earnings_date, _dt.min.time()).replace(hour=7))]
+        set_events_lookup(lambda t, recent_only=False: ev if t == "XYZ" else None)
+        self.addCleanup(set_events_lookup, None)
 
         # Create 60 bars of synthetic data with gap 2 days ago
         dates = [today - timedelta(days=60 - i) for i in range(60)]

@@ -394,12 +394,11 @@ class PullbackRecoveryStrategy(StrategyInterface):
         risk_reward = weighted_rr
 
         earnings_buffer_days = 7
-        earnings_date = get_earnings_date(
-            ticker,
-            earnings_calendar=self.earnings_calendar,
-            supabase=self.supabase,
-            allow_network=False,
-        )
+        # Point-in-time estimate of the next report from SEC filings known at the signal bar (the
+        # backtest's source too; src/earnings_pit.py), never the provider calendar or a later filing
+        from src.earnings_pit import events_for, next_report_estimate
+        bar_day = pd.Timestamp(dates[t]).date()
+        earnings_date = next_report_estimate(events_for(ticker), bar_day)
         if earnings_date:
             ts_earnings = pd.Timestamp(earnings_date).normalize()
             # Measured from the signal bar's date (point-in-time), not the wall clock

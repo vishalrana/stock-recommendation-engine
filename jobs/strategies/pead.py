@@ -10,40 +10,16 @@ from src.utils.candidate_builder import build_candidate_from_row
 logger = logging.getLogger(__name__)
 
 
-def get_last_earnings_date(
-    ticker: str,
-    as_of_date: Optional[datetime.date] = None,
-    earnings_calendar: Optional[dict] = None,
-    supabase=None,
-    allow_network: bool = False,
-) -> Optional[datetime.date]:
+def get_last_earnings_date(ticker: str, as_of_date) -> Optional[datetime.date]:
     """
-    Fetch last earnings date from shared calendar map, local cache, or Supabase. Returns datetime.date or None.
-    A ticker present in the preloaded calendar map is answered from that record alone: the map is
-    built from the same local cache / Supabase rows, so falling through only repeated one Supabase
-    query per ticker (about 110 s per nightly scan for no new information).
+    Announcement date of the latest SEC 8-K item 2.02 report known at the close of `as_of_date`
+    (accepted by 20:00 ET), every SEC filer. The live scan and the backtest read the same events
+    (src/earnings_pit.py), so PEAD fires on the same reports in both (parity, 2026-10-20).
     """
-    ticker_upper = ticker.strip().upper()
-    if earnings_calendar and ticker_upper in earnings_calendar:
-        rec = earnings_calendar[ticker_upper]
-        last_e_str = rec.get("last_earnings_date") or rec.get("last_earnings")
-        if last_e_str:
-            try:
-                parsed = datetime.strptime(str(last_e_str)[:10], "%Y-%m-%d").date()
-                if as_of_date is None or parsed <= as_of_date:
-                    return parsed
-            except Exception:
-                pass
+    from src.earnings_pit import events_for, last_report
+    if as_of_date is None:
         return None
-
-    from src.utils.earnings_cache import get_ticker_earnings
-    last_e_str, _ = get_ticker_earnings(ticker_upper, as_of_date=as_of_date, supabase=supabase, allow_network=allow_network)
-    if last_e_str:
-        try:
-            return datetime.strptime(str(last_e_str)[:10], "%Y-%m-%d").date()
-        except Exception:
-            pass
-    return None
+    return last_report(events_for(ticker, recent_only=True), as_of_date)
 
 
 class PEADStrategy(StrategyInterface):
@@ -103,17 +79,11 @@ class PEADStrategy(StrategyInterface):
             except Exception:
                 bar_date = datetime.now().date()
 
-        now_date = datetime.now().date()
-        ref_date = now_date if abs((now_date - bar_date).days) <= 4 else bar_date
+        # Days are counted from the signal bar, never from the run's clock (point-in-time)
+        ref_date = bar_date
 
         # === EARNINGS GATE ===
-        earnings_date = get_last_earnings_date(
-            ticker,
-            as_of_date=ref_date,
-            earnings_calendar=self.earnings_calendar,
-            supabase=self.supabase,
-            allow_network=self.allow_network,
-        )
+        earnings_date = get_last_earnings_date(ticker, as_of_date=ref_date)
         if earnings_date is None:
             return None
 

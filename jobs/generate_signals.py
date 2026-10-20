@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import glob
+import json
 import time
 import logging
 import argparse
@@ -564,20 +565,80 @@ def _sec_filings():
     return _SEC_FILINGS
 
 
+_RECENT_8K_CIKS: Optional[set] = None   # CIKs with an 8-K in the last days (None: index unavailable)
+_EVENTS_CACHE: Dict[str, Any] = {}
+
+
+def _prepare_sec_earnings(as_of, lookback_days: int = 10) -> None:
+    """
+    Make SEC 8-K item 2.02 events the scan's earnings source (src/earnings_pit.py), as in the backtest.
+    Companies with an 8-K in EDGAR's daily index over the last `lookback_days` get their cached
+    filings refetched, so a report filed since the last run is seen tonight.
+    """
+    global _RECENT_8K_CIKS
+    from src.earnings_pit import set_events_lookup
+    _EVENTS_CACHE.clear()
+    _RECENT_8K_CIKS = None
+    prov = _sec_filings()
+    if prov.available:
+        try:
+            from src.swing.live import daily_index
+            ciks = set()
+            for k in range(lookback_days + 1):
+                idx = daily_index(as_of - timedelta(days=k), prov.sec)
+                if idx is not None and len(idx):
+                    ciks |= set(idx.loc[idx["form"].isin(["8-K", "8-K/A"]), "cik"].astype(int))
+            _RECENT_8K_CIKS = ciks
+            for cik in ciks:
+                path = prov._path(cik)
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as f:
+                        doc = json.load(f)
+                    if doc.get("fetched_at"):
+                        doc["fetched_at"] = 0   # refetch the recent block when this company is needed
+                        with open(path, "w", encoding="utf-8") as f:
+                            json.dump(doc, f)
+            logger.info("[SEC EARNINGS] %d companies filed an 8-K in the last %d days", len(ciks), lookback_days)
+        except Exception as idx_err:
+            logger.warning("[SEC EARNINGS] EDGAR daily index unavailable (%s); every needed company is read in full.", idx_err)
+            _RECENT_8K_CIKS = None
+    else:
+        logger.warning("[SEC EARNINGS] SEC_USER_AGENT not set: no earnings dates; PEAD finds no reports and "
+                       "new ideas fail the earnings gate (date unknown).")
+    set_events_lookup(_ticker_earnings_events)
+
+
+def _ticker_earnings_events(ticker: str, recent_only: bool = False):
+    """A ticker's SEC 8-K item 2.02 events (None without SEC data). recent_only: [] when the company
+    filed no 8-K recently, so PEAD (a report within 5 days) skips it without a request."""
+    from src.providers.context.sec_filings import earnings_events
+    prov = _sec_filings()
+    if not prov.available:
+        return None
+    if recent_only and _RECENT_8K_CIKS is not None and ticker not in _EVENTS_CACHE:
+        cik = prov.sec.cik_for(ticker)
+        if cik is None or int(cik) not in _RECENT_8K_CIKS:
+            return []
+    if ticker not in _EVENTS_CACHE:
+        filings = prov.filings(ticker)
+        _EVENTS_CACHE[ticker] = earnings_events(filings) if filings is not None else None
+    return _EVENTS_CACHE[ticker]
+
+
 def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFrame], scan_date,
                              earnings_calendar: Optional[Dict[str, Any]]) -> Optional[str]:
     """
     Issuance filters of the profitability program (src/trade_hygiene.py), each behind its switch in
-    src/quant_config.py. Returns the rejection reason, or None. Unknown data never rejects: the idea
-    is issued and flagged (earnings_unknown / event_lock_unknown).
+    src/quant_config.py, in the order the backtest applies them: stop cap, earnings, event lock.
+    Returns the rejection reason, or None. Earnings come from SEC 8-K item 2.02 filings known at the
+    decision (trade_hygiene.earnings_gate, the same function as the backtest); the provider calendar
+    is shown on the card but no longer gates. An unknown report date rejects (REJECT_UNKNOWN_EARNINGS).
     """
     from src import quant_config as qc
     from src.quant_config import normalize_strategy_key
     from src.pipeline_steps import holding_days_for
-    from src.trade_hygiene import (SessionCalendar, full_hold_window, earnings_hold_rejection,
-                                   rr_stop_enabled, rr_stop_rejection, estimate_next_earnings)
-    from src.filters.earnings_filter import PROVIDER_CONFIRMED_DATES, normalize_date_str
-    from datetime import date as _date, timedelta as _td
+    from src.trade_hygiene import SessionCalendar, earnings_gate, rr_stop_enabled, rr_stop_rejection
+    from datetime import timedelta as _td
 
     ticker = sig["ticker"].upper()
     is_etf = bool(sig.get("is_etf")) or normalize_strategy_key(sig["strategy"]) == "sector_rotation"
@@ -585,29 +646,13 @@ def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFra
         reason = rr_stop_rejection(sig.get("entry_price"), sig.get("stop_loss"), sig.get("target_1"), sig.get("atr_14"))
         if reason:
             return f"Stop cap / R:R floor: {reason}"
-    if qc.EARNINGS_BLACKOUT_MODE == "full_hold" and not is_etf:
-        cal = SessionCalendar()
-        window = full_hold_window(cal.shift(scan_date, 1), holding_days_for(sig["strategy"]) or 20, cal)
-        entry = (earnings_calendar or {}).get(ticker) or {}
-        nxt_s = normalize_date_str(entry.get("next_earnings_date") or entry.get("next_earnings"))
-        nxt = _date.fromisoformat(nxt_s) if nxt_s else None
-        confirmed, estimated = [], []
-        if nxt is not None and nxt >= scan_date:
-            if PROVIDER_CONFIRMED_DATES.get(ticker) == nxt_s:
-                confirmed = [nxt, cal.shift(nxt, 1)]  # report timing unknown: that session or the next
-            else:
-                estimated = [nxt]
-        else:
-            filings = _sec_filings().filings(ticker)
-            if filings:
-                from src.providers.context.sec_filings import earnings_events
-                est = estimate_next_earnings([e.reaction for e in earnings_events(filings)], scan_date)
-                estimated = [est] if est else []
-        if not confirmed and not estimated:
-            sig["earnings_unknown"] = True
-        reason = earnings_hold_rejection(window, confirmed, estimated, cal)
-        if reason:
-            return f"Earnings inside the hold: {reason}"
+    rule, reason = earnings_gate(sig["strategy"], is_etf, scan_date, _ticker_earnings_events(ticker),
+                                 SessionCalendar(), holding_days_for(sig["strategy"]) or 20)
+    if rule == "earnings_unknown":
+        sig["earnings_unknown"] = True
+    if reason:
+        sig["earnings_rejected"] = True
+        return reason
     if qc.EVENT_LOCK_ENABLED and not is_etf:
         from src.providers.context.sec_filings import event_lock, price_pin, rights_days_for
         prov = _sec_filings()
@@ -1174,6 +1219,7 @@ def run_scan(
     # open idea that slipped under the liquidity floor must not block updates for every idea.
     data_ready_tickers: Set[str] = set()
 
+    _prepare_sec_earnings(scan_date_dt)   # PEAD, Pullback and the earnings gate read SEC filings
     for strategy in STRATEGIES:
         if hasattr(strategy, "set_earnings_calendar"):
             strategy.set_earnings_calendar(earnings_calendar_cache, supabase=supabase)
@@ -1555,17 +1601,9 @@ def run_scan(
             sig["days_to_earnings"] = er_res.get("days_to_earnings")
             sig["earnings_reason_code"] = er_res.get("reason_code")
 
-            if not er_res.get("pass", True):
-                sig["status"] = "rejected"
-                sig["earnings_rejected"] = True
-                sig["rejection_reason"] = er_res.get("reason", "Earnings blackout")
-                earnings_rejected_count += 1
-                gate_rejections["failed_earnings_gate"] += 1
-                logger.info(f"[EARNINGS RISK GATE] Dropping {ticker} ({strategy_name}): {sig['rejection_reason']} [{sig['earnings_reason_code']}]")
-                rejected_signals_to_insert.append(sig)
-                continue
-            else:
-                sig["earnings_rejected"] = False
+            # Display only since 2026-10-20: the earnings rules that gate are the backtest's
+            # (SEC filings known at the decision, in _trade_hygiene_rejection), not this calendar.
+            sig["earnings_rejected"] = False
 
             # 2. Trade plan from the strategy's own stop (used as issued: no floor, no cap),
             #    canonical targets, setup-conditional reach probabilities and scale-out plan.
@@ -1605,6 +1643,9 @@ def run_scan(
                     sig["status"] = "rejected"
                     sig["rejection_reason"] = hygiene_reason
                     gate_rejections["failed_trade_hygiene"] += 1
+                    if sig.get("earnings_rejected"):
+                        earnings_rejected_count += 1
+                        gate_rejections["failed_earnings_gate"] += 1
                     rejected_signals_to_insert.append(sig)
                     continue
 

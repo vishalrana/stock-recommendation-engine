@@ -121,9 +121,16 @@ class TestPEADReactionBar(unittest.TestCase):
         df["RSI_14"] = 60.0
         df["MACD_HIST"] = 0.3
 
+        from datetime import datetime as _dt
+        from src.earnings_pit import set_events_lookup
+        from src.providers.context.sec_filings import EarningsEvent
         strat = PEADStrategy()
-        strat.set_earnings_calendar({"PEADX": {"last_earnings_date": "2026-03-05"}})
-        sig = strat.scan("PEADX", df, "bull", {"wins": 10, "losses": 5, "win_rate": 66.7})
+        set_events_lookup(lambda t, recent_only=False: [EarningsEvent(date(2026, 3, 5), date(2026, 3, 6), _dt(2026, 3, 5, 16, 30))]
+                          if t == "PEADX" else None)
+        try:
+            sig = strat.scan("PEADX", df, "bull", {"wins": 10, "losses": 5, "win_rate": 66.7})
+        finally:
+            set_events_lookup(None)
         self.assertIsNotNone(sig, "Friday reaction bar must be found despite the weekend")
         self.assertIn("+8.0%", sig["narrative"])
 
@@ -722,15 +729,22 @@ class TestTradingDayBlackout(unittest.TestCase):
 
 
 class TestScanRuntimeFixes(unittest.TestCase):
-    def test_pead_uses_preloaded_calendar_only(self):
-        from unittest.mock import patch
+    def test_pead_reads_point_in_time_sec_events(self):
+        from datetime import datetime as _dt
         from jobs.strategies.pead import get_last_earnings_date
-        cal = {"AAA": {"next_earnings_date": "2026-11-01", "last_earnings_date": None},
-               "BBB": {"last_earnings_date": "2026-10-06"}}
-        with patch("src.utils.earnings_cache.get_ticker_earnings", side_effect=AssertionError("per-ticker lookup")) as fallback:
-            self.assertIsNone(get_last_earnings_date("AAA", as_of_date=date(2026, 10, 9), earnings_calendar=cal))
-            self.assertEqual(get_last_earnings_date("BBB", as_of_date=date(2026, 10, 9), earnings_calendar=cal), date(2026, 10, 6))
-            fallback.assert_not_called()
+        from src.earnings_pit import set_events_lookup
+        from src.providers.context.sec_filings import EarningsEvent
+        ev = {"BBB": [EarningsEvent(date(2026, 7, 7), date(2026, 7, 7), _dt(2026, 7, 7, 7, 0)),
+                      EarningsEvent(date(2026, 10, 6), date(2026, 10, 7), _dt(2026, 10, 6, 16, 30)),
+                      EarningsEvent(date(2026, 10, 9), date(2026, 10, 12), _dt(2026, 10, 9, 21, 0))]}
+        set_events_lookup(lambda t, recent_only=False: ev.get(t))
+        try:
+            self.assertIsNone(get_last_earnings_date("AAA", as_of_date=date(2026, 10, 9)))           # no SEC data
+            self.assertEqual(get_last_earnings_date("BBB", as_of_date=date(2026, 10, 9)), date(2026, 10, 6))   # 21:00 filing not yet known
+            self.assertEqual(get_last_earnings_date("BBB", as_of_date=date(2026, 10, 12)), date(2026, 10, 9))
+            self.assertEqual(get_last_earnings_date("BBB", as_of_date=date(2026, 10, 5)), date(2026, 7, 7))    # no look-ahead
+        finally:
+            set_events_lookup(None)
 
     def test_refresh_cache_chunking_and_pause(self):
         from unittest.mock import patch

@@ -11,7 +11,8 @@ Trade Hygiene (Profitability Program, Phase 2) — Regression Suite
 6. Earnings inside the hold (TEVA-like): confirmed and estimated dates, the +/-5-session band.
 7. Stop cap and R:R floor (SNOW-like); assign_tier stays score-based.
 8. Strategy evidence: expected R and exit mix are display-only.
-9. The backtest harness and the live scan apply the same rules; unknown data never rejects.
+9. The backtest harness and the live scan apply the same rules (parity): same SEC events known at
+   the decision, no look-ahead, unknown earnings dates rejected.
 """
 
 import os
@@ -211,15 +212,98 @@ class TestExpectedR(unittest.TestCase):
 
 
 class TestHarnessAndLiveHooks(unittest.TestCase):
-    def _events(self):
+    """The backtest harness and the live scan apply the same stop-cap, earnings and event-lock rules
+    (parity, 2026-10-20): same functions, same order, the same SEC events known at the decision."""
+
+    @staticmethod
+    def _ev(*days, hour=7, minute=0):
         from src.providers.context.sec_filings import EarningsEvent
-        teva = [EarningsEvent(d, d, datetime(d.year, d.month, d.day, 7, 0))
-                for d in (date(2025, 10, 29), date(2026, 1, 28), date(2026, 4, 29), date(2026, 7, 29))]
+        return [EarningsEvent(d, d if hour < 16 else reaction_session(datetime(d.year, d.month, d.day, hour, minute)),
+                              datetime(d.year, d.month, d.day, hour, minute)) for d in days]
+
+    def _teva(self):   # reports late Jan / Apr / Jul / Oct: the next one (about 2026-10-28) is inside the hold
+        return self._ev(date(2025, 10, 29), date(2026, 1, 28), date(2026, 4, 29), date(2026, 7, 29))
+
+    def _far(self):    # reported 2026-10-05: the next report (about 2027-01-05) is far outside the hold
+        return self._ev(date(2025, 10, 6), date(2026, 1, 6), date(2026, 4, 6), date(2026, 7, 6), date(2026, 10, 5))
+
+    def _events(self):
         return {
-            "events": {"TEVA": teva, "ACQ": []},
-            "filings": {"TEVA": [], "ACQ": [F("DEFM14A", "2026-09-01T17:00:00")], "NOSEC": None},
+            "events": {"TEVA": self._teva(), "FAR": self._far(), "SNOW": self._far(), "ACQ": self._far()},
+            "filings": {"TEVA": [], "FAR": [], "SNOW": [], "ACQ": [F("DEFM14A", "2026-09-01T17:00:00")], "NOSEC": None},
             "rights": {},
         }
+
+    def test_harness_rules(self):
+        from scripts.validate_backtest_pipeline import hygiene_rejection, production_hygiene_rules
+        cal = SessionCalendar()
+        d = pd.Timestamp("2026-10-09")
+        sig = {"strategy": "Trend Following", "entry_price": 100.0, "stop_loss": 95.0, "target_1": 108.0, "atr_14": 2.5}
+        ev = self._events()
+        self.assertEqual(production_hygiene_rules(), ("rr_floor_stop_cap", "earnings", "event_lock"))  # the live order
+        rule, reason, _ = hygiene_rejection(("earnings",), sig, "TEVA", d, False, ev, cal, 25, None)
+        self.assertEqual(rule, "earnings_full_hold")
+        self.assertIn("Estimated earnings 2026-10-28", reason)
+        self.assertIsNone(hygiene_rejection(("earnings",), sig, "TEVA", d, True, ev, cal, 25, None)[0])   # ETFs exempt
+        self.assertIsNone(hygiene_rejection(("earnings",), sig, "FAR", d, False, ev, cal, 25, None)[0])
+        rule, _, flags = hygiene_rejection(("earnings",), sig, "NOSEC", d, False, ev, cal, 25, None)
+        self.assertEqual(rule, "earnings_unknown")                                # unknown date: not issued
+        self.assertTrue(flags["earnings_unknown"])
+        rule, reason, _ = hygiene_rejection(("event_lock",), sig, "ACQ", d, False, ev, cal, 25, False)
+        self.assertEqual(rule, "event_lock")
+        self.assertIn("DEFM14A", reason)
+        rule, _, flags = hygiene_rejection(("event_lock",), sig, "NOSEC", d, False, ev, cal, 25, False)
+        self.assertIsNone(rule)
+        self.assertTrue(flags["event_lock_unknown"])
+        self.assertEqual(hygiene_rejection(("event_lock",), sig, "TEVA", d, False, ev, cal, 25, True)[0], "event_lock")
+        snow = dict(sig, entry_price=100.0, stop_loss=85.8, target_1=109.7, atr_14=4.0)
+        self.assertEqual(hygiene_rejection(("rr_floor_stop_cap",), snow, "SNOW", d, False, ev, cal, 25, None)[0],
+                         "rr_floor_stop_cap")
+        self.assertIsNone(hygiene_rejection(("rr_floor_stop_cap",), sig, "SNOW", d, False, ev, cal, 25, None)[0])
+
+    def test_no_lookahead_and_cutoff(self):
+        """A filing after the decision cannot change it; one filed after the close but by 20:00 ET can."""
+        from scripts.validate_backtest_pipeline import hygiene_rejection
+        cal = SessionCalendar()
+        d = pd.Timestamp("2026-10-09")
+        sig = {"strategy": "Trend Following", "entry_price": 100.0, "stop_loss": 95.0, "target_1": 108.0, "atr_14": 2.5}
+        base = self._events()
+        decision = hygiene_rejection(("earnings",), sig, "FAR", d, False, base, cal, 25, None)
+        self.assertIsNone(decision[0])
+        # The actual next report (filed 2026-10-12, inside the hold) is unknown at the 2026-10-09 close
+        later = self._events()
+        later["events"]["FAR"] = self._far() + self._ev(date(2026, 10, 12))
+        self.assertEqual(hygiene_rejection(("earnings",), sig, "FAR", d, False, later, cal, 25, None), decision)
+        # Accepted 2026-10-09 21:00 (after the 20:00 cutoff): belongs to the next session, ignored
+        late = self._events()
+        late["events"]["FAR"] = self._far() + self._ev(date(2026, 10, 9), hour=21)
+        self.assertEqual(hygiene_rejection(("earnings",), sig, "FAR", d, False, late, cal, 25, None), decision)
+        # Accepted 2026-10-09 18:00 (after the close, by the cutoff): known; it reacts on the fill session
+        known = self._events()
+        known["events"]["FAR"] = self._far() + self._ev(date(2026, 10, 9), hour=18)
+        rule, reason, _ = hygiene_rejection(("earnings",), sig, "FAR", d, False, known, cal, 25, None)
+        self.assertEqual(rule, "earnings_blackout")
+        self.assertIn("reported 2026-10-12", reason)
+
+    def test_live_and_backtest_make_the_same_decisions(self):
+        import jobs.generate_signals as gs
+        from scripts.validate_backtest_pipeline import hygiene_rejection, production_hygiene_rules
+        ev = self._events()
+        cases = [("TEVA", "Trend Following", 20.0, 19.0), ("FAR", "Trend Following", 20.0, 19.0),
+                 ("NOSEC", "Trend Following", 20.0, 19.0), ("FAR", "Cross-Sectional Momentum", 20.0, 19.0),
+                 ("SNOW", "Trend Following", 100.0, 85.8), ("TEVA", "Sector Rotation", 20.0, 19.0)]
+        lookup = lambda t, recent_only=False: ev["events"].get(t)
+        for d in (date(2026, 10, 9), date(2026, 10, 21), date(2026, 12, 1)):
+            for ticker, strategy, entry, stop in cases:
+                sig = {"ticker": ticker, "strategy": strategy, "entry_price": entry, "stop_loss": stop,
+                       "target_1": entry * 1.08, "atr_14": entry * 0.02}
+                with mock.patch.object(qc, "EVENT_LOCK_ENABLED", False),                         mock.patch.object(gs, "_ticker_earnings_events", side_effect=lookup):
+                    live = gs._trade_hygiene_rejection(dict(sig), None, d, {})
+                    rule, reason, _ = hygiene_rejection(production_hygiene_rules(), dict(sig), ticker, pd.Timestamp(d),
+                                                        strategy == "Sector Rotation", ev, SessionCalendar(),
+                                                        gs_hold(strategy), None)
+                bt = None if rule is None else (f"Stop cap / R:R floor: {reason}" if rule == "rr_floor_stop_cap" else reason)
+                self.assertEqual(live, bt, (d, ticker, strategy))
 
     def test_backtest_and_live_share_stop_cap_check(self):
         """Every flag combination: the backtest and the live scan both call trade_hygiene.rr_stop_rejection
@@ -229,87 +313,67 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         from scripts.validate_backtest_pipeline import hygiene_rejection, production_hygiene_rules
         sig = {"ticker": "SNOW", "strategy": "Trend Following", "entry_price": 100.0, "stop_loss": 85.8,
                "target_1": 109.7, "atr_14": 4.0}
+        ev = self._events()
         for cap in (False, True):
             for floor in (False, True):
                 with mock.patch.object(qc, "STOP_CAP_ENABLED", cap), mock.patch.object(qc, "RR_FLOOR_ENABLED", floor), \
-                        mock.patch.object(qc, "EARNINGS_BLACKOUT_MODE", "fixed_days"), \
                         mock.patch.object(qc, "EVENT_LOCK_ENABLED", False), \
+                        mock.patch.object(gs, "_ticker_earnings_events", side_effect=lambda t, recent_only=False: ev["events"].get(t)), \
                         mock.patch.object(th, "rr_stop_rejection", wraps=th.rr_stop_rejection) as spy:
                     live = gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {})
                     live_calls = list(spy.call_args_list)
                     spy.reset_mock()
-                    rules = production_hygiene_rules()
-                    rule, _, _ = hygiene_rejection(rules, dict(sig), "SNOW", pd.Timestamp("2026-10-09"), False,
-                                                   self._events(), SessionCalendar(), 25, None)
+                    rule, _, _ = hygiene_rejection(production_hygiene_rules(), dict(sig), "SNOW", pd.Timestamp("2026-10-09"),
+                                                   False, ev, SessionCalendar(), 25, None)
                     self.assertEqual(live_calls, list(spy.call_args_list), (cap, floor))
                     self.assertEqual(bool(live_calls), cap or floor)
                     self.assertEqual(live is not None, rule is not None, (cap, floor))
 
-    def test_harness_rules(self):
-        from scripts.validate_backtest_pipeline import hygiene_rejection, fixed_days_blackout
-        cal = SessionCalendar()
-        d = pd.Timestamp("2026-10-09")
-        sig = {"entry_price": 100.0, "stop_loss": 95.0, "target_1": 108.0, "atr_14": 2.5}
-        ev = self._events()
-        rule, _, _ = hygiene_rejection(("earnings_full_hold",), sig, "TEVA", d, False, ev, cal, 25, None)
-        self.assertEqual(rule, "earnings_full_hold")
-        rule, _, _ = hygiene_rejection(("earnings_full_hold",), sig, "TEVA", d, True, ev, cal, 25, None)
-        self.assertIsNone(rule)                                                   # sector ETFs exempt
-        rule, _, flags = hygiene_rejection(("earnings_full_hold",), sig, "NOSEC", d, False, ev, cal, 25, None)
-        self.assertIsNone(rule)
-        self.assertTrue(flags["earnings_unknown"])                                # unknown: issued, flagged
-        rule, reason, _ = hygiene_rejection(("event_lock",), sig, "ACQ", d, False, ev, cal, 25, False)
-        self.assertEqual(rule, "event_lock")
-        self.assertIn("DEFM14A", reason)
-        rule, _, flags = hygiene_rejection(("event_lock",), sig, "NOSEC", d, False, ev, cal, 25, False)
-        self.assertIsNone(rule)
-        self.assertTrue(flags["event_lock_unknown"])
-        rule, _, _ = hygiene_rejection(("event_lock",), sig, "TEVA", d, False, ev, cal, 25, True)
-        self.assertEqual(rule, "event_lock")                                      # price-pin backstop
-        snow = {"entry_price": 100.0, "stop_loss": 85.8, "target_1": 109.7, "atr_14": 4.0}
-        rule, _, _ = hygiene_rejection(("rr_floor_stop_cap",), snow, "SNOW", d, False, ev, cal, 25, None)
-        self.assertEqual(rule, "rr_floor_stop_cap")
-        self.assertEqual(hygiene_rejection(("rr_floor_stop_cap",), sig, "SNOW", d, False, ev, cal, 25, None)[0], None)
-        # Live fixed-days blackout on SEC dates: TEVA's next report 2026-10-28 is 13 sessions away
-        spy_idx = pd.DatetimeIndex(pd.bdate_range("2026-09-01", "2026-12-31"))
-        ev["events"]["TEVA"].append(ev["events"]["TEVA"][0].__class__(date(2026, 10, 14), date(2026, 10, 14),
-                                                                     datetime(2026, 10, 14, 7, 0)))
-        self.assertIsNotNone(fixed_days_blackout("TEVA", "Trend Following", d, ev, spy_idx))   # 3 sessions <= 5
-        self.assertIsNone(fixed_days_blackout("TEVA", "Sector Rotation", d, ev, spy_idx))
-
-    def test_live_hook_switches(self):
+    def test_live_hook(self):
         import jobs.generate_signals as gs
-        from src import quant_config as qc
-        sig = {"ticker": "SNOW", "strategy": "Trend Following", "entry_price": 100.0, "stop_loss": 85.8,
-               "target_1": 109.7, "atr_14": 4.0}
-        # All switches off: nothing is rejected
-        with mock.patch.object(qc, "STOP_CAP_ENABLED", False), \
-                mock.patch.object(qc, "RR_FLOOR_ENABLED", False), \
-                mock.patch.object(qc, "EARNINGS_BLACKOUT_MODE", "fixed_days"), \
-                mock.patch.object(qc, "EVENT_LOCK_ENABLED", False):
-            self.assertIsNone(gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {}))
-        with mock.patch.object(qc, "STOP_CAP_ENABLED", True):
-            self.assertIn("Stop cap", gs._trade_hygiene_rejection(dict(sig), None, date(2026, 10, 9), {}))
-        # Full hold with an estimated provider date inside the hold (TEVA-like)
+        ev = self._events()
+        lookup = lambda t, recent_only=False: ev["events"].get(t)
         teva = {"ticker": "TEVA", "strategy": "Trend Following", "entry_price": 20.0, "stop_loss": 19.0,
                 "target_1": 22.0, "atr_14": 0.5}
-        calendar = {"TEVA": {"next_earnings_date": "2026-10-28", "last_earnings_date": "2026-07-29"}}
-        with mock.patch.object(qc, "EARNINGS_BLACKOUT_MODE", "full_hold"):
+        with mock.patch.object(gs, "_ticker_earnings_events", side_effect=lookup), \
+                mock.patch.object(qc, "EVENT_LOCK_ENABLED", False):
+            # SEC events decide; a provider calendar date (far away here) no longer gates
+            calendar = {"TEVA": {"next_earnings_date": "2027-02-01"}}
             self.assertIn("Earnings inside the hold", gs._trade_hygiene_rejection(dict(teva), None, date(2026, 10, 9), calendar))
-            # Unknown date and no SEC history: issued and flagged
-            fake = mock.Mock()
-            fake.filings.return_value = None
-            with mock.patch.object(gs, "_sec_filings", return_value=fake):
-                s = dict(teva, ticker="NODATA")
-                self.assertIsNone(gs._trade_hygiene_rejection(s, None, date(2026, 10, 9), {}))
-                self.assertTrue(s["earnings_unknown"])
-        # Event lock from a DEFM14A filing
+            # Unknown date (no SEC filings): rejected and flagged
+            s = dict(teva, ticker="NODATA")
+            self.assertIn("Earnings date unknown", gs._trade_hygiene_rejection(s, None, date(2026, 10, 9), {}))
+            self.assertTrue(s["earnings_unknown"])
+            self.assertIsNone(gs._trade_hygiene_rejection(dict(teva, ticker="FAR"), None, date(2026, 10, 9), {}))
+        # Event lock from a DEFM14A filing (earnings clear)
         fake = mock.Mock()
         fake.filings.return_value = [F("DEFM14A", "2026-09-01T17:00:00")]
         fake.rights_offering_days.return_value = {}
         fake.sec.cik_for.return_value = 123
-        with mock.patch.object(qc, "EVENT_LOCK_ENABLED", True), mock.patch.object(gs, "_sec_filings", return_value=fake):
-            self.assertIn("Event lock", gs._trade_hygiene_rejection(dict(teva), None, date(2026, 10, 9), {}))
+        with mock.patch.object(qc, "EVENT_LOCK_ENABLED", True), mock.patch.object(gs, "_sec_filings", return_value=fake), \
+                mock.patch.object(gs, "_ticker_earnings_events", side_effect=lookup):
+            self.assertIn("Event lock", gs._trade_hygiene_rejection(dict(teva, ticker="FAR"), None, date(2026, 10, 9), {}))
+
+
+class TestLiveSecEvents(unittest.TestCase):
+    def test_recent_only_skips_companies_without_a_recent_8k(self):
+        import jobs.generate_signals as gs
+        fake = mock.Mock()
+        fake.available = True
+        fake.sec.cik_for.side_effect = lambda t: {"NEW": 1, "OLD": 2}.get(t)
+        fake.filings.return_value = [F("8-K", "2026-10-08T07:00:00", "2.02")]
+        with mock.patch.object(gs, "_sec_filings", return_value=fake), mock.patch.object(gs, "_RECENT_8K_CIKS", {1}):
+            gs._EVENTS_CACHE.clear()
+            self.assertEqual(gs._ticker_earnings_events("OLD", recent_only=True), [])     # no request
+            fake.filings.assert_not_called()
+            self.assertEqual([e.announced for e in gs._ticker_earnings_events("NEW", recent_only=True)], [date(2026, 10, 8)])
+            self.assertEqual(len(gs._ticker_earnings_events("OLD")), 1)                   # full read when asked
+        gs._EVENTS_CACHE.clear()
+
+
+def gs_hold(strategy):
+    from src.pipeline_steps import holding_days_for
+    return holding_days_for(strategy) or 20
 
 
 if __name__ == "__main__":

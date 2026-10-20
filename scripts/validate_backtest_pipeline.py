@@ -456,11 +456,16 @@ def load_sec_events(tickers: List[str], end: date) -> Optional[Dict[str, Any]]:
     if rights is None:
         logger.warning("SEC full-text search unavailable: rights offerings are not part of the event lock.")
     events = {t: earnings_events(f) for t, f in filings.items() if f is not None}
+    # Why a ticker's filings are missing (trade_hygiene.SEC_UNAVAILABLE_CAUSES), as the live scan records it
+    unavailable = {t: "no_cik" if prov.sec.cik_for(t) is None else "fetch_failed" for t, f in filings.items() if f is None}
     rights_by_ticker = {t: rights_days_for(rights, prov.sec.cik_for(t)) for t in tickers}
     stats = dict(prov.stats)
     stats.update({
         "tickers": len(tickers),
         "with_filings": sum(1 for f in filings.values() if f is not None),
+        "unavailable_no_cik": sum(1 for v in unavailable.values() if v == "no_cik"),
+        "unavailable_fetch_failed": sum(1 for v in unavailable.values() if v == "fetch_failed"),
+        "sec_degraded": not any(f is not None for f in filings.values()),   # SEC returned nothing usable
         "with_earnings_events": sum(1 for e in events.values() if e),
         "earnings_events": sum(len(e) for e in events.values()),
         "rights_offering_search": rights is not None,
@@ -468,7 +473,7 @@ def load_sec_events(tickers: List[str], end: date) -> Optional[Dict[str, Any]]:
         "seconds": round(time.time() - t0, 1),
     })
     logger.info("SEC calendar: %s", stats)
-    return {"filings": filings, "events": events, "rights": rights_by_ticker, "stats": stats}
+    return {"filings": filings, "events": events, "rights": rights_by_ticker, "stats": stats, "unavailable": unavailable}
 
 
 def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.DataFrame]:
@@ -829,18 +834,22 @@ def hygiene_rejection(rules: Tuple[str, ...], sig: Dict[str, Any], ticker: str, 
     (rule, reason) of the first hygiene rule that rejects the idea, else (None, None); plus
     unknown-data flags. Earnings use trade_hygiene.earnings_gate, the live scan's function, on the
     SEC events known at the decision: the next report is a point-in-time estimate, never the actual
-    later filing (no look-ahead). Returned earnings rules: earnings_unknown, earnings_blackout,
-    earnings_full_hold.
+    later filing (no look-ahead). Returned earnings rules: earnings_sec_unavailable, earnings_unknown,
+    earnings_blackout, earnings_full_hold.
     """
     from src.trade_hygiene import earnings_gate, rr_stop_rejection
     from src.providers.context.sec_filings import event_lock
-    flags = {"earnings_unknown": False, "event_lock_unknown": False}
+    flags = {"earnings_unknown": False, "earnings_sec_unavailable": False, "event_lock_unknown": False}
     for rule in rules:
         if rule in ("earnings", "earnings_full_hold"):
             ev = events["events"].get(ticker) if events is not None else None
-            gate_rule, reason = earnings_gate(sig["strategy"], is_etf, d.date(), ev, session_cal, hold_days)
-            if gate_rule == "earnings_unknown":
+            cause = (events or {}).get("unavailable", {}).get(ticker)
+            gate_rule, reason = earnings_gate(sig["strategy"], is_etf, d.date(), ev, session_cal, hold_days,
+                                              unavailable_cause=cause)
+            if gate_rule in ("earnings_unknown", "earnings_sec_unavailable"):
                 flags["earnings_unknown"] = True
+            if gate_rule == "earnings_sec_unavailable":
+                flags["earnings_sec_unavailable"] = True
             if reason:
                 return gate_rule, reason, flags
         elif rule == "event_lock" and not is_etf:
@@ -1206,7 +1215,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 if not rank_mode and assign_tier(score) not in ("Strong Buy", "Buy"):
                     _note(settings, sig, "tier")
                     continue
-                flags = {"earnings_unknown": None, "event_lock_unknown": None}
+                flags = {"earnings_unknown": None, "earnings_sec_unavailable": None, "event_lock_unknown": None}
                 rules = tuple(r for r in dict.fromkeys(prod_rules + HYGIENE_VARIANTS.get(settings.name, ()))
                               if r not in RULE_OFF_VARIANTS.get(settings.name, ()))
                 if rules:
@@ -1429,6 +1438,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
 
     summary["survivorship_gauge"] = gauge
     summary["sec_calendar"] = sec_events["stats"] if sec_events is not None else None
+    summary["sec_degraded"] = sec_events is None or bool(sec_events["stats"]["sec_degraded"])  # SEC returned nothing usable
     summary["left_tail"] = left_tail(trades, sec_events)
 
     # Random-stock placebo, cost scenarios and monthly series for every book

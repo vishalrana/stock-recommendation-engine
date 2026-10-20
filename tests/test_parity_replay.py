@@ -20,6 +20,7 @@ class TestParityReplay(unittest.TestCase):
             "Earnings inside the hold: Estimated earnings 2026-10-28 (+/-5 sessions) overlaps": "earnings_full_hold",
             "Earnings in 2 trading days (estimated 2026-10-21; blackout 5)": "earnings_blackout",
             "Earnings date unknown (no SEC 8-K item 2.02 report in the last 200 days)": "earnings_unknown",
+            "Earnings date unavailable: SEC filings could not be read (SEC fetch failed)": "earnings_sec_unavailable",
             "Event lock: DEFM14A filed (since 2026-09-01)": "event_lock",
             "WAIT: Approaching resistance": "entry_location",
             "Strategy deduplication: preferred 'Trend Following' (Score 70.0 vs 66.0)": "dedupe",

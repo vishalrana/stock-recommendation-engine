@@ -36,7 +36,8 @@ def live_stage(reason: Optional[str]) -> str:
         return "issued"
     rules = [("Composite score", "score_below_65"), ("Validation failed", "scoring"), ("Scoring error", "scoring"),
              ("Target calculation invalid", "invalid_plan"), ("Tier ", "tier"), ("Stop cap", "rr_floor_stop_cap"),
-             ("Earnings date unknown", "earnings_unknown"), ("Earnings in ", "earnings_blackout"),
+             ("Earnings date unknown", "earnings_unknown"),
+             ("Earnings date unavailable", "earnings_sec_unavailable"), ("Earnings in ", "earnings_blackout"),
              ("Earnings inside the hold", "earnings_full_hold"), ("Event lock", "event_lock"),
              ("WAIT:", "entry_location"), ("Rejected location", "entry_location"),
              ("Strategy deduplication", "dedupe"), ("Price data stale", "stale")]

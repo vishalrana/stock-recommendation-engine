@@ -229,9 +229,11 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
 
     def _events(self):
         return {
-            "events": {"TEVA": self._teva(), "FAR": self._far(), "SNOW": self._far(), "ACQ": self._far()},
-            "filings": {"TEVA": [], "FAR": [], "SNOW": [], "ACQ": [F("DEFM14A", "2026-09-01T17:00:00")], "NOSEC": None},
+            "events": {"TEVA": self._teva(), "FAR": self._far(), "SNOW": self._far(), "ACQ": self._far(), "NOREP": []},
+            "filings": {"TEVA": [], "FAR": [], "SNOW": [], "ACQ": [F("DEFM14A", "2026-09-01T17:00:00")], "NOSEC": None,
+                        "NOREP": []},
             "rights": {},
+            "unavailable": {"NOSEC": "fetch_failed"},
         }
 
     def test_harness_rules(self):
@@ -246,9 +248,15 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         self.assertIn("Estimated earnings 2026-10-28", reason)
         self.assertIsNone(hygiene_rejection(("earnings",), sig, "TEVA", d, True, ev, cal, 25, None)[0])   # ETFs exempt
         self.assertIsNone(hygiene_rejection(("earnings",), sig, "FAR", d, False, ev, cal, 25, None)[0])
-        rule, _, flags = hygiene_rejection(("earnings",), sig, "NOSEC", d, False, ev, cal, 25, None)
-        self.assertEqual(rule, "earnings_unknown")                                # unknown date: not issued
+        rule, reason, flags = hygiene_rejection(("earnings",), sig, "NOSEC", d, False, ev, cal, 25, None)
+        self.assertEqual(rule, "earnings_sec_unavailable")                        # filings not read: not issued
+        self.assertIn("SEC fetch failed", reason)
+        self.assertTrue(flags["earnings_unknown"] and flags["earnings_sec_unavailable"])
+        rule, reason, flags = hygiene_rejection(("earnings",), sig, "NOREP", d, False, ev, cal, 25, None)
+        self.assertEqual(rule, "earnings_unknown")                                # read, no report: not issued
+        self.assertIn("no SEC 8-K item 2.02 report", reason)
         self.assertTrue(flags["earnings_unknown"])
+        self.assertFalse(flags["earnings_sec_unavailable"])
         rule, reason, _ = hygiene_rejection(("event_lock",), sig, "ACQ", d, False, ev, cal, 25, False)
         self.assertEqual(rule, "event_lock")
         self.assertIn("DEFM14A", reason)
@@ -290,14 +298,17 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
         from scripts.validate_backtest_pipeline import hygiene_rejection, production_hygiene_rules
         ev = self._events()
         cases = [("TEVA", "Trend Following", 20.0, 19.0), ("FAR", "Trend Following", 20.0, 19.0),
-                 ("NOSEC", "Trend Following", 20.0, 19.0), ("FAR", "Cross-Sectional Momentum", 20.0, 19.0),
+                 ("NOSEC", "Trend Following", 20.0, 19.0), ("NOREP", "Trend Following", 20.0, 19.0),
+                 ("FAR", "Cross-Sectional Momentum", 20.0, 19.0),
                  ("SNOW", "Trend Following", 100.0, 85.8), ("TEVA", "Sector Rotation", 20.0, 19.0)]
         lookup = lambda t, recent_only=False: ev["events"].get(t)
         for d in (date(2026, 10, 9), date(2026, 10, 21), date(2026, 12, 1)):
             for ticker, strategy, entry, stop in cases:
                 sig = {"ticker": ticker, "strategy": strategy, "entry_price": entry, "stop_loss": stop,
                        "target_1": entry * 1.08, "atr_14": entry * 0.02}
-                with mock.patch.object(qc, "EVENT_LOCK_ENABLED", False),                         mock.patch.object(gs, "_ticker_earnings_events", side_effect=lookup):
+                with mock.patch.object(qc, "EVENT_LOCK_ENABLED", False), \
+                        mock.patch.object(gs, "_ticker_earnings_events", side_effect=lookup), \
+                        mock.patch.dict(gs._SEC_UNAVAILABLE, ev["unavailable"], clear=True):
                     live = gs._trade_hygiene_rejection(dict(sig), None, d, {})
                     rule, reason, _ = hygiene_rejection(production_hygiene_rules(), dict(sig), ticker, pd.Timestamp(d),
                                                         strategy == "Sector Rotation", ev, SessionCalendar(),
@@ -340,8 +351,18 @@ class TestHarnessAndLiveHooks(unittest.TestCase):
             # SEC events decide; a provider calendar date (far away here) no longer gates
             calendar = {"TEVA": {"next_earnings_date": "2027-02-01"}}
             self.assertIn("Earnings inside the hold", gs._trade_hygiene_rejection(dict(teva), None, date(2026, 10, 9), calendar))
-            # Unknown date (no SEC filings): rejected and flagged
+            # SEC filings not read: rejected for SEC, flagged unknown, counted by cause
+            gs._SEC_REJECTIONS.clear()
             s = dict(teva, ticker="NODATA")
+            with mock.patch.dict(gs._SEC_UNAVAILABLE, {"NODATA": "no_cik"}, clear=True):
+                reason = gs._trade_hygiene_rejection(s, None, date(2026, 10, 9), {})
+            self.assertEqual(reason, "Earnings date unavailable: SEC filings could not be read "
+                                     "(no SEC CIK mapping for the ticker)")
+            self.assertTrue(s["earnings_unknown"])
+            self.assertEqual(gs._SEC_REJECTIONS, {"no_cik": 1})
+            gs._SEC_REJECTIONS.clear()
+            # Filings read, no report in 200 days: the unknown-date rule
+            s = dict(teva, ticker="NOREP")
             self.assertIn("Earnings date unknown", gs._trade_hygiene_rejection(s, None, date(2026, 10, 9), {}))
             self.assertTrue(s["earnings_unknown"])
             self.assertIsNone(gs._trade_hygiene_rejection(dict(teva, ticker="FAR"), None, date(2026, 10, 9), {}))
@@ -369,6 +390,36 @@ class TestLiveSecEvents(unittest.TestCase):
             self.assertEqual([e.announced for e in gs._ticker_earnings_events("NEW", recent_only=True)], [date(2026, 10, 8)])
             self.assertEqual(len(gs._ticker_earnings_events("OLD")), 1)                   # full read when asked
         gs._EVENTS_CACHE.clear()
+
+    def test_unavailable_causes_and_run_status(self):
+        import jobs.generate_signals as gs
+        fake = mock.Mock()
+        fake.available = True
+        fake.sec.cik_for.side_effect = lambda t: {"OK": 1, "DOWN": 2}.get(t)
+        fake.filings.side_effect = lambda t: [F("8-K", "2026-10-08T07:00:00", "2.02")] if t == "OK" else None
+        try:
+            with mock.patch.object(gs, "_sec_filings", return_value=fake):
+                gs._EVENTS_CACHE.clear(); gs._SEC_UNAVAILABLE.clear(); gs._SEC_REJECTIONS.clear()
+                self.assertEqual(gs._sec_run_status(), (None, False))               # nothing read yet
+                self.assertIsNone(gs._ticker_earnings_events("NOCIK"))
+                self.assertIsNone(gs._ticker_earnings_events("DOWN"))
+                self.assertEqual(gs._SEC_UNAVAILABLE, {"NOCIK": "no_cik", "DOWN": "fetch_failed"})
+                note, degraded = gs._sec_run_status()
+                self.assertTrue(degraded)                                           # no read was usable
+                self.assertIn("0 of 2 SEC reads usable", note)
+                self.assertEqual(len(gs._ticker_earnings_events("OK")), 1)
+                gs._SEC_REJECTIONS.update({"fetch_failed": 1})
+                note, degraded = gs._sec_run_status()
+                self.assertFalse(degraded)
+                self.assertEqual(note, "SEC earnings unavailable: 1 new ideas rejected (fetch_failed 1); "
+                                       "1 of 3 SEC reads usable")
+                fake.available = False                                              # no SEC_USER_AGENT
+                gs._EVENTS_CACHE.clear(); gs._SEC_UNAVAILABLE.clear(); gs._SEC_REJECTIONS.clear()
+                self.assertIsNone(gs._ticker_earnings_events("OK"))
+                self.assertEqual(gs._SEC_UNAVAILABLE, {"OK": "no_user_agent"})
+                self.assertTrue(gs._sec_run_status()[1])
+        finally:
+            gs._EVENTS_CACHE.clear(); gs._SEC_UNAVAILABLE.clear(); gs._SEC_REJECTIONS.clear()
 
 
 def gs_hold(strategy):

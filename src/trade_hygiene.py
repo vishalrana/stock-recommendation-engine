@@ -71,19 +71,33 @@ def earnings_hold_rejection(window: Tuple[date, date], confirmed: Iterable[date]
     return None
 
 
+SEC_UNAVAILABLE_CAUSES = {
+    "no_user_agent": "SEC_USER_AGENT not set",
+    "no_cik": "no SEC CIK mapping for the ticker",
+    "fetch_failed": "SEC fetch failed",
+}
+
+
 def earnings_gate(strategy: str, is_etf: bool, scan_date: date, events, cal: "SessionCalendar",
-                  hold_days: int) -> Tuple[Optional[str], Optional[str]]:
+                  hold_days: int, unavailable_cause: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
     """
     (rule, reason) when the earnings rules reject a new idea, else (None, None). The live scan and
-    the backtest call this same function with the ticker's SEC 8-K item 2.02 events (None when no
-    SEC data exists for it); only reports accepted by the 20:00 ET cutoff on scan_date are used.
-    Rules: "earnings_unknown", "earnings_blackout" (fixed days), "earnings_full_hold".
+    the backtest call this same function with the ticker's SEC 8-K item 2.02 events (None when its
+    SEC filings could not be read, for `unavailable_cause`, a SEC_UNAVAILABLE_CAUSES key); only
+    reports accepted by the 20:00 ET cutoff on scan_date are used.
+    Rules: "earnings_sec_unavailable" (filings not read), "earnings_unknown" (filings read, no
+    report), "earnings_blackout" (fixed days), "earnings_full_hold".
     """
     from src.earnings_pit import next_report_estimate, upcoming_known_reactions
     from src.quant_config import normalize_strategy_key
     from src.utils.market_date import trading_sessions_between
     key = normalize_strategy_key(strategy)
     if is_etf or key == "sector_rotation":
+        return None, None
+    if events is None:
+        if qc.REJECT_UNKNOWN_EARNINGS:
+            why = SEC_UNAVAILABLE_CAUSES.get(unavailable_cause, "SEC filings unavailable")
+            return "earnings_sec_unavailable", f"Earnings date unavailable: SEC filings could not be read ({why})"
         return None, None
     upcoming = upcoming_known_reactions(events, scan_date)      # reported after the close, reaction ahead
     est = next_report_estimate(events, scan_date)

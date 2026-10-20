@@ -560,6 +560,8 @@ def _sec_filings():
 
 _RECENT_8K_CIKS: Optional[set] = None   # CIKs with an 8-K in the last days (None: index unavailable)
 _EVENTS_CACHE: Dict[str, Any] = {}
+_SEC_UNAVAILABLE: Dict[str, str] = {}    # ticker -> trade_hygiene.SEC_UNAVAILABLE_CAUSES key, this run
+_SEC_REJECTIONS: Dict[str, int] = {}     # cause -> new ideas rejected for it, this run
 
 
 def _prepare_sec_earnings(as_of, lookback_days: int = 10) -> None:
@@ -571,6 +573,8 @@ def _prepare_sec_earnings(as_of, lookback_days: int = 10) -> None:
     global _RECENT_8K_CIKS
     from src.earnings_pit import set_events_lookup
     _EVENTS_CACHE.clear()
+    _SEC_UNAVAILABLE.clear()
+    _SEC_REJECTIONS.clear()
     _RECENT_8K_CIKS = None
     prov = _sec_filings()
     if prov.available:
@@ -596,8 +600,8 @@ def _prepare_sec_earnings(as_of, lookback_days: int = 10) -> None:
             logger.warning("[SEC EARNINGS] EDGAR daily index unavailable (%s); every needed company is read in full.", idx_err)
             _RECENT_8K_CIKS = None
     else:
-        logger.warning("[SEC EARNINGS] SEC_USER_AGENT not set: no earnings dates; PEAD finds no reports and "
-                       "new ideas fail the earnings gate (date unknown).")
+        logger.warning("[SEC EARNINGS] SEC_USER_AGENT not set: no earnings dates; PEAD finds no reports, "
+                       "new ideas fail the earnings gate (SEC unavailable) and the run is degraded_sec.")
     set_events_lookup(_ticker_earnings_events)
 
 
@@ -607,6 +611,7 @@ def _ticker_earnings_events(ticker: str, recent_only: bool = False):
     from src.providers.context.sec_filings import earnings_events
     prov = _sec_filings()
     if not prov.available:
+        _SEC_UNAVAILABLE[ticker] = "no_user_agent"
         return None
     if recent_only and _RECENT_8K_CIKS is not None and ticker not in _EVENTS_CACHE:
         cik = prov.sec.cik_for(ticker)
@@ -615,7 +620,23 @@ def _ticker_earnings_events(ticker: str, recent_only: bool = False):
     if ticker not in _EVENTS_CACHE:
         filings = prov.filings(ticker)
         _EVENTS_CACHE[ticker] = earnings_events(filings) if filings is not None else None
+        if filings is None:
+            _SEC_UNAVAILABLE[ticker] = "no_cik" if prov.sec.cik_for(ticker) is None else "fetch_failed"
     return _EVENTS_CACHE[ticker]
+
+
+def _sec_run_status() -> Tuple[Optional[str], bool]:
+    """(note for scan_log.error_message, degraded) for this run's SEC earnings reads. Degraded when
+    SEC returned nothing usable: no SEC_USER_AGENT, or every ticker read failed."""
+    usable = sum(1 for t, v in _EVENTS_CACHE.items() if v is not None)
+    failed = len(_SEC_UNAVAILABLE)
+    rejected = sum(_SEC_REJECTIONS.values())
+    degraded = (not _sec_filings().available) or (failed > 0 and usable == 0)
+    if not (rejected or degraded):
+        return None, False
+    causes = ", ".join(f"{k} {v}" for k, v in sorted(_SEC_REJECTIONS.items())) or "none"
+    return (f"SEC earnings unavailable: {rejected} new ideas rejected ({causes}); "
+            f"{usable} of {usable + failed} SEC reads usable"), degraded
 
 
 def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFrame], scan_date,
@@ -640,9 +661,13 @@ def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFra
         if reason:
             return f"Stop cap / R:R floor: {reason}"
     rule, reason = earnings_gate(sig["strategy"], is_etf, scan_date, _ticker_earnings_events(ticker),
-                                 SessionCalendar(), holding_days_for(sig["strategy"]) or 20)
-    if rule == "earnings_unknown":
+                                 SessionCalendar(), holding_days_for(sig["strategy"]) or 20,
+                                 unavailable_cause=_SEC_UNAVAILABLE.get(ticker))
+    if rule in ("earnings_unknown", "earnings_sec_unavailable"):
         sig["earnings_unknown"] = True
+    if rule == "earnings_sec_unavailable":
+        cause = _SEC_UNAVAILABLE.get(ticker, "unknown")
+        _SEC_REJECTIONS[cause] = _SEC_REJECTIONS.get(cause, 0) + 1
     if reason:
         sig["earnings_rejected"] = True
         return reason
@@ -2115,6 +2140,12 @@ def run_scan(
     if status == "success" and data_is_stale:
         status = "stale_data"
         error_msg = error_msg or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
+    sec_note, sec_degraded = _sec_run_status()
+    if sec_note:
+        logger.warning("[SEC EARNINGS] %s", sec_note)
+        error_msg = f"{error_msg}; {sec_note}" if error_msg else sec_note
+    if status == "success" and sec_degraded:
+        status = "degraded_sec"
 
     scan_log_row = {
         "scan_date": signal_date,

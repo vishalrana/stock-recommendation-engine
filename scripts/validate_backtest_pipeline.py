@@ -95,7 +95,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -146,6 +146,10 @@ HYGIENE_VARIANTS: Dict[str, Tuple[str, ...]] = {
     "event_lock": ("event_lock",),
     "rr_floor_stop_cap": ("rr_floor_stop_cap",),
     "hygiene_all": ("earnings_full_hold", "event_lock", "rr_floor_stop_cap"),
+}
+# Production with one production hygiene rule switched off (extra trials, report only).
+RULE_OFF_VARIANTS: Dict[str, Tuple[str, ...]] = {
+    "stop_cap_off": ("rr_floor_stop_cap",),
 }
 # Pattern veto (Phase 5, rule R2): no idea within 20 sessions of a confirmed head-and-shoulders top.
 PATTERN_VARIANTS = ("hs_top_veto",)
@@ -531,7 +535,7 @@ def _register_sec_events(ticker: str, events) -> None:
 
 
 def scan_ticker(args) -> List[Dict[str, Any]]:
-    ticker, frame, date_regimes, cs_eligible_dates, is_etf, events = args
+    ticker, frame, date_regimes, cs_eligible_dates, is_etf, events, only_date = args
     _register_sec_events(ticker, events)
     from jobs.strategies import STRATEGIES
     from jobs.generate_signals import REGIME_STRATEGY_MAP
@@ -547,6 +551,8 @@ def scan_ticker(args) -> List[Dict[str, Any]]:
     atr = frame["ATR_14"].to_numpy()
     for loc in range(WARMUP_BARS, len(frame)):
         date = index[loc]
+        if only_date is not None and date != only_date:
+            continue  # replay of one session (--replay-session)
         regime = date_regimes.get(date)
         if regime is None:
             continue
@@ -925,7 +931,13 @@ def edge_verdict(stats: Dict[str, Any], ci_key: str = "net_expectancy_ci95_block
 # ----------------------------------------------------------------------------
 def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = None, write_outputs: bool = True,
         variants: Optional[List[str]] = None, universe: str = "cache_start", phase1_only: bool = False,
-        placebo: Optional[int] = None, trial_phase: str = "adhoc", record_trials: bool = True) -> Dict[str, Any]:
+        placebo: Optional[int] = None, trial_phase: str = "adhoc", record_trials: bool = True,
+        replay_session: Optional[str] = None, replay_active: Sequence[str] = ()) -> Dict[str, Any]:
+    """
+    replay_session (parity test, scripts/parity_replay.py): evaluate only that session with the
+    production settings, the adopted evidence file (as the live scan) and the live scan's open ideas
+    (replay_active) as the book, and write every candidate's stage to outputs/parity_replay_<date>_harness.csv.
+    """
     t0 = time.time()
     from jobs.strategies.sector_rotation import SECTOR_ETFS
     from src.ranker import SignalRanker, assign_tier
@@ -1009,6 +1021,14 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 len(missing_stocks), len(frames) - len(stock_frames))
 
     # Phase 1: parallel point-in-time scans (cached; invalidated when strategy code or data change)
+    replay_day = None
+    if replay_session:
+        replay_day = pd.Timestamp(replay_session)
+        if replay_day not in set(eval_dates):
+            raise RuntimeError(f"No bars for the replay session {replay_session} (latest {eval_dates[-1].date()}); use --refresh-data")
+        eval_dates = [replay_day]
+        variants = []
+        phase1_extra += f"|replay:{replay_session}"
     phase1_key = _phase1_cache_key(frames, limit, events_by_ticker, phase1_extra)
     phase1_path = os.path.join(BACKTEST_DATA_DIR, f"_phase1_{phase1_key}.pkl")
     if os.path.exists(phase1_path) and not refresh_data:
@@ -1016,7 +1036,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         logger.info("Phase 1 loaded from cache: %d raw strategy candidates", len(candidates))
     else:
         jobs_args = [
-            (t, f, date_regimes, cs_eligible.get(t, set()), t in SECTOR_ETFS, events_by_ticker.get(t))
+            (t, f, date_regimes, cs_eligible.get(t, set()), t in SECTOR_ETFS, events_by_ticker.get(t), replay_day)
             for t, f in frames.items()
         ]
         candidates = []
@@ -1048,7 +1068,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     for v in variants or []:
         if v in VARIANT_PRESETS:
             settings_list.append(replace(production, name=v, **VARIANT_PRESETS[v]))
-        elif v in HYGIENE_VARIANTS or v in PATTERN_VARIANTS or v in PHASE4_VARIANTS:
+        elif v in HYGIENE_VARIANTS or v in PATTERN_VARIANTS or v in PHASE4_VARIANTS or v in RULE_OFF_VARIANTS:
             settings_list.append(replace(production, name=v))
         else:
             settings_list.append(replace(production, name=v))
@@ -1081,6 +1101,17 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     session_cal = SessionCalendar([x.date() for x in spy.index])
     pins: Dict[str, np.ndarray] = {}
     prod_rules = production_hygiene_rules()
+    decisions: Optional[List[Dict[str, Any]]] = None
+    live_evidence = None
+    if replay_day is not None:
+        from src.strategy_evidence import load_strategy_evidence
+        decisions, live_evidence = [], load_strategy_evidence()
+        books[production.name]["active_until"].update({t.upper(): pd.Timestamp.max for t in replay_active})
+
+    def _note(settings, sig, stage, reason=""):
+        if decisions is not None and settings.name == production.name:
+            decisions.append({"ticker": sig["ticker"].upper(), "strategy": sig["strategy"],
+                              "composite_score": sig.get("composite_score"), "stage": stage, "reason": reason})
     hs_tops: Dict[str, np.ndarray] = {}     # per ticker: bars at which an H&S top became known
     sim_args = (build_trade_plan, evaluate_signal_outcome, holding_days_for, SAME_DAY_AMBIGUITY_POLICY)
     adv_rank = None
@@ -1095,7 +1126,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         if not day:
             continue
         d_str = d.date().isoformat()
-        evidence = evidence_book.evidence_as_of(d_str)
+        evidence = live_evidence if live_evidence is not None else evidence_book.evidence_as_of(d_str)
         prod_before = dict(books[production.name]["funnel"])
 
         # Shadow trades: every setup that passed its strategy's rules (one open per strategy+ticker)
@@ -1138,8 +1169,11 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 regime = sig["regime"]
                 prepare_candidate_scores(sig, regime, evidence, settings=settings)
                 apply_backtest_context(sig, settings, sec_table, context_scorer, d_str, _mark_context_unavailable)
-                if composite_score(sig, regime, ranker) is None:
+                score_err = composite_score(sig, regime, ranker)
+                if score_err is None:
                     scored.append(sig)
+                else:
+                    _note(settings, sig, "scoring", score_err)
             if settings.name == "rank_select":
                 for sg in scored:
                     v = c6pct.at[d, sg["ticker"].upper()] if sg["ticker"].upper() in c6pct.columns else np.nan
@@ -1155,11 +1189,14 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 score = float(sig["composite_score"])
                 rank_mode = settings.name == "rank_select"
                 if (sig["_c6pct"] < 0.80) if rank_mode else (score < BUY_THRESHOLD):
+                    _note(settings, sig, "score_below_65")
                     continue
                 funnel["score_qualified"] += 1
                 if ticker in active_until and active_until[ticker] >= d:
+                    _note(settings, sig, "already_active")
                     continue  # already an active idea (production keeps one per ticker)
                 if ticker in issued_today:
+                    _note(settings, sig, "dedupe")
                     continue
                 frame = frames[ticker]
                 loc = sig["_loc"]
@@ -1167,19 +1204,23 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 key = (sig["strategy"], ticker)
                 status, res = shadow_results.get(key) or simulate(sig, frame, loc, evidence, d_str, *sim_args)
                 if status == "invalid_plan":
+                    _note(settings, sig, "invalid_plan")
                     continue
                 if not rank_mode and assign_tier(score) not in ("Strong Buy", "Buy"):
+                    _note(settings, sig, "tier")
                     continue
                 flags = {"earnings_unknown": None, "event_lock_unknown": None}
-                rules = tuple(dict.fromkeys(prod_rules + HYGIENE_VARIANTS.get(settings.name, ())))
+                rules = tuple(r for r in dict.fromkeys(prod_rules + HYGIENE_VARIANTS.get(settings.name, ()))
+                              if r not in RULE_OFF_VARIANTS.get(settings.name, ()))
                 if rules:
                     if "event_lock" in rules and ticker not in pins:
                         pins[ticker] = price_pin(frame["CLOSE"]).to_numpy()
-                    rule, _, flags = hygiene_rejection(
+                    rule, why, flags = hygiene_rejection(
                         rules, sig, ticker, d, ticker in SECTOR_ETFS, sec_events, session_cal,
                         holding_days_for(sig["strategy"]) or 20, bool(pins[ticker][loc]) if ticker in pins else None)
                     if rule:
                         funnel[f"{rule}_blocked"] += 1
+                        _note(settings, sig, rule, why)
                         continue
                 if settings.name == "hs_top_veto":
                     if ticker not in hs_tops:
@@ -1196,6 +1237,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                         sig, frame.iloc[max(0, loc - SCAN_WINDOW_BARS + 1): loc + 1], sig["strategy"]).state
                 if settings.blocks_entry(entry_states[key]):
                     funnel["entry_location_blocked"] += 1
+                    _note(settings, sig, "entry_location", entry_states[key])
                     continue
                 if settings.name == "trail_after_t1" and status in ("closed", "censored"):
                     fwd_fill = float(frame["OPEN"].iat[loc + 1]) if loc + 1 < len(frame) else float("nan")
@@ -1218,6 +1260,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                             status = "closed"
                 issued_today.add(ticker)
                 funnel["issued"] += 1
+                _note(settings, sig, "issued")
                 if status == "censored":
                     book["censored"] += 1
                     active_until[ticker] = pd.Timestamp.max
@@ -1236,6 +1279,13 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
             if base["strategy"] != "Cross-Sectional Momentum" or base.get("_cs63", True):
                 row[f"raw_{base['strategy']}"] = row.get(f"raw_{base['strategy']}", 0) + 1
         funnel_by_date.append(row)
+
+    if decisions is not None:
+        os.makedirs(OUTPUTS_DIR, exist_ok=True)
+        out = os.path.join(OUTPUTS_DIR, f"parity_replay_{replay_session}_harness.csv")
+        pd.DataFrame(decisions, columns=["ticker", "strategy", "composite_score", "stage", "reason"]).to_csv(out, index=False)
+        logger.info("Replay of %s: %d candidate decisions written to %s", replay_session, len(decisions), out)
+        return {"replay_session": replay_session, "decisions": len(decisions), "path": out}
 
     if "momentum_rank_book" in books:
         def _mrb_reject(t, d, sig, loc):
@@ -1485,7 +1535,8 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 params={"momentum_model": settings.momentum_model, "entry_location_mode": settings.entry_location_mode,
                         "context_components": list(settings.context_components),
                         "candidate_filter": settings.name if settings.name in candidate_filters else None,
-                        "hygiene_rules": list(HYGIENE_VARIANTS.get(settings.name, ())),
+                        "hygiene_rules": [r for r in dict.fromkeys(production_hygiene_rules() + HYGIENE_VARIANTS.get(settings.name, ()))
+                                          if r not in RULE_OFF_VARIANTS.get(settings.name, ())],
                         "universe": universe, "limit": limit, "late_from": LATE_FROM},
                 n_ideas=len(b_trades), mean_beta_adj=st.get("mean_beta_adjusted_pct"),
                 ci=st.get("beta_adjusted_ci95_block_bootstrap"), late_mean=lt.get("mean_beta_adjusted_pct"),
@@ -1559,11 +1610,15 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None, help="Smoke test on the first N stocks (outputs not written)")
     all_variants = (list(VARIANT_PRESETS) + list(STRATEGY_VARIANTS) + list(HYGIENE_VARIANTS) + list(PATTERN_VARIANTS)
-                    + list(PHASE4_VARIANTS))
+                    + list(PHASE4_VARIANTS) + list(RULE_OFF_VARIANTS))
     parser.add_argument("--variants", default="", help=f"Comma-separated variants or 'all': {', '.join(all_variants)}")
     parser.add_argument("--placebo", type=int, default=None,
                         help=f"Random-stock placebo draws per idea (default {PLACEBO_DRAWS_FULL}; "
                              f"{PLACEBO_DRAWS_SMOKE} with --limit; 0 = off)")
+    parser.add_argument("--replay-session", default=None,
+                        help="Parity test: evaluate only this session (YYYY-MM-DD) and write each candidate's stage")
+    parser.add_argument("--replay-active", default="",
+                        help="Comma-separated tickers the live scan had open at the replay session")
     parser.add_argument("--trial-phase", default="adhoc",
                         help="Phase label for the trials registry (e.g. phase2); pre-registered trials only")
     args = parser.parse_args()
@@ -1573,8 +1628,9 @@ if __name__ == "__main__":
         parser.error(f"Unknown variants {unknown}; choose from {all_variants}")
     s = run(refresh_data=args.refresh_data, workers=args.workers, limit=args.limit, write_outputs=args.limit is None,
             variants=chosen, universe=args.universe, phase1_only=args.phase1_only,
-            placebo=args.placebo, trial_phase=args.trial_phase)
-    if args.phase1_only:
+            placebo=args.placebo, trial_phase=args.trial_phase, replay_session=args.replay_session,
+            replay_active=[t.strip() for t in args.replay_active.split(",") if t.strip()])
+    if args.phase1_only or args.replay_session:
         print(json.dumps(s, indent=2))
         sys.exit(0)
     print(json.dumps({k: s[k] for k in ("edge_verdict_all", "edge_verdict_late_period",

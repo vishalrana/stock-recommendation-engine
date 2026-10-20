@@ -1125,12 +1125,14 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                            for t, f in stock_frames.items()}).reindex(spy.index)
         adv_rank = dv.rank(axis=1, ascending=False)
 
+    funnel_by_date: List[Dict[str, Any]] = []   # production book, per session (diagnostics)
     for d in eval_dates:
         day = by_date.get(d)
         if not day:
             continue
         d_str = d.date().isoformat()
         evidence = evidence_book.evidence_as_of(d_str)
+        prod_before = dict(books[production.name]["funnel"])
 
         # Shadow trades: every setup that passed its strategy's rules (one open per strategy+ticker)
         shadow_results: Dict[Tuple[str, str], Tuple[str, Optional[Dict[str, Any]]]] = {}
@@ -1265,6 +1267,14 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
                 trade.update({k: v for k, v in flags.items() if v is not None})
                 book["trades"].append(trade)
                 active_until[ticker] = pd.Timestamp(res["exit_date"])
+
+        prod_after = books[production.name]["funnel"]
+        row: Dict[str, Any] = {"date": d_str}
+        row.update({k: prod_after[k] - prod_before.get(k, 0) for k in prod_after})
+        for base in day:
+            if base["strategy"] != "Cross-Sectional Momentum" or base.get("_cs63", True):
+                row[f"raw_{base['strategy']}"] = row.get(f"raw_{base['strategy']}", 0) + 1
+        funnel_by_date.append(row)
 
     if "momentum_rank_book" in books:
         def _mrb_reject(t, d, sig, loc):
@@ -1541,6 +1551,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
         pd.DataFrame(trades).to_csv(os.path.join(OUTPUTS_DIR, f"production_backtest_trades{suffix}.csv"), index=False)
     if shadow_trades:
         pd.DataFrame(shadow_trades).to_csv(os.path.join(OUTPUTS_DIR, f"production_backtest_setup_trades{suffix}.csv"), index=False)
+        pd.DataFrame(funnel_by_date).fillna(0).to_csv(os.path.join(OUTPUTS_DIR, f"production_backtest_funnel_by_date{suffix}.csv"), index=False)
     if "selection_variants" in summary:
         with open(os.path.join(OUTPUTS_DIR, "production_backtest_variants.json"), "w", encoding="utf-8") as f:
             json.dump({"metadata": {"generated_at": metadata["generated_at"],

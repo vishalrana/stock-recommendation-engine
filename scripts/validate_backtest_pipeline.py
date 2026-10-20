@@ -107,6 +107,7 @@ os.environ.setdefault("SKIP_NLP", "true")
 
 from src.indicators import calculate_indicators
 from src.regime import classify_regime
+from src.pipeline_steps import CROSS_SECTIONAL_TOP_FRACTION, cross_sectional_screen  # shared with the live scan
 from src.quant_config import (
     normalize_strategy_key,
     US_UNIVERSE_MIN_PRICE,
@@ -129,7 +130,6 @@ TRANSACTION_COST_PCT_PER_SIDE = 0.10
 TRAIN_FRACTION = 0.60
 EMBARGO_DAYS = 20
 BOOTSTRAP_SAMPLES = 2000
-CROSS_SECTIONAL_TOP_FRACTION = 0.15
 SEC_FACTS_DIR = os.path.join(BACKTEST_DATA_DIR, "sec")
 LATE_FROM = "2025-04-09"        # pre-registered LATE period: signals from this date (after the universe date)
 PLACEBO_DRAWS_FULL = 200
@@ -593,7 +593,7 @@ def _phase1_cache_key(frames: Dict[str, pd.DataFrame], limit: Optional[int],
         with open(p, "rb") as f:
             h.update(f.read())
     # Phase-1 code in this script (later phases do not affect the cached scans)
-    for fn in (scan_ticker, _register_sec_events, prepare_frame):
+    for fn in (scan_ticker, _register_sec_events, prepare_frame, cross_sectional_screen):
         h.update(inspect.getsource(fn).encode())
     h.update(f"{SCAN_WINDOW_BARS}:{WARMUP_BARS}:{CROSS_SECTIONAL_TOP_FRACTION}".encode())
     # Which strategies run in which regime (scan_ticker reads it), e.g. a strategy switched off
@@ -975,20 +975,17 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     }
 
     bar_dates = {t: df.dropna(subset=["CLOSE"]).index for t, df in raw.items() if t != "SPY"}
+    # Cross-Sectional Momentum screen: the live scan's definition and ranking universe (every stock
+    # with closes, including those too short to scan; live ranks them too)
+    cs_screen = cross_sectional_screen(pd.DataFrame(
+        {t: df["CLOSE"] for t, df in raw.items() if t != "SPY" and t not in SECTOR_ETFS}).sort_index())
     frames = {t: prepare_frame(df) for t, df in raw.items() if t != "SPY" and len(df) > WARMUP_BARS + 5}
     del raw  # the frames hold everything needed from here on (keeps the 5,600-ticker run in memory)
     stock_frames = {t: f for t, f in frames.items() if t not in SECTOR_ETFS}
 
-    # Cross-sectional screen: top 15% of 63-day returns across the stock universe each date
-    closes = pd.DataFrame({t: f["CLOSE"] for t, f in stock_frames.items()})
-    ret63 = closes / closes.shift(63) - 1.0
     cs_eligible: Dict[str, set] = defaultdict(set)
-    for d, row in ret63.iterrows():
-        valid = row.dropna()
-        if valid.empty:
-            continue
-        ordered = sorted(valid.items(), key=lambda kv: (-kv[1], kv[0]))
-        for t, _ in ordered[: max(1, int(len(ordered) * CROSS_SECTIONAL_TOP_FRACTION))]:
+    for d, top in cs_screen.items():
+        for t, _ in top:
             cs_eligible[t].add(d)
 
     c6pct = None

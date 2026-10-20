@@ -35,3 +35,10 @@ Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules a
 ## Database reset (2026-10-14)
 
 - See `docs/research-history.md`, Status log, entry 2026-10-14, for the reason, the backup and the row counts.
+
+## Parity tooling and the nightly schedule (2026-10-20)
+
+- `parity_replay.yml` (manual, input `session`): replays one live Ideas session through the harness and compares the decisions (`scripts/parity_replay.py`); about 25 minutes (prices and SEC filings re-downloaded; run 39384095078 took 23).
+- `scripts/dedupe_signals_history.py <dates>`: dry run by default; `--yes` backs up `signals_history` and removes earlier runs' rejected rows for those scan dates.
+- The nightly cron is 01:00 UTC Tuesday–Saturday, but GitHub has been starting it around 05:30 UTC. A run whose bars stop before the latest completed session is now `stale_data` and publishes nothing.
+- Proposed, not added: a second scheduled attempt (for example `0 4 * * 2-6`) that exits at once when `scan_log` already has a `success` row for the expected session, so a stale first run does not lose the session.

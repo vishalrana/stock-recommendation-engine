@@ -335,6 +335,7 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - Counts below come from `signals_history`, latest run per scan date.
 - Backtest: per-session funnel from GitHub run 39355364038 (same configuration; harness now writes `production_backtest_funnel_by_date*.csv`). It reproduces run 38500883442: 2,213 ideas, −0.43%/idea beta-adjusted.
 - Per session (mean). Live order: earnings filter, stop cap, full-hold, event lock, entry gate. Backtest order: fixed-days, full-hold, event lock, stop cap, entry gate.
+- Caveat (added 2026-10-20): the two sides applied the stages in different orders, so only the totals compare, not the per-stage counts. "Score ≥ 65" also compares two formulas: live scores then included analyst and news context, the backtest never did. Both are fixed (see "Parity correction"); from run 39384088732 the harness uses the live order.
 
   | Stage | Live 10-12..10-16 (5 sessions) | Backtest, all sessions | Backtest, Octobers | Backtest, Oct 10–20 of 2023–25 | Backtest, last 20 sessions |
   |---|---|---|---|---|---|
@@ -362,3 +363,74 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - Market date: the scan takes its market date from SPY's latest cached bar. A run before Yahoo posts the session (runs 38482415942 and 38495006619, after the 2026-10-13 close) silently scans the previous session instead of logging `stale_data`.
   - Audit: `rejected_signals_to_insert` is reset after the scoring loop (`jobs/generate_signals.py` around line 1491), so candidates that fail scoring validation are never logged. Reruns of a scan date duplicate `signals_history` (10-12: 356 rows for 178 candidates; 10-13: 520 for 260).
 - Survivorship: the backtest universe is today's security master, so delisted stocks are missing, which flatters results.
+
+## Parity correction (2026-10-20; PRs #14–#18)
+
+- Goal: the live Ideas scan implements exactly the configuration the backtest measures, so the forward test is an out-of-sample check of it. No rule was loosened to raise the idea count.
+- Root causes (each a live-vs-backtest difference):
+  - Context in the score: live composites included analyst and news context (weight 0.10–0.20 by strategy); the backtest never has it. A setup at 65 in the backtest scored about 68.5 live with context 100 and about 62 with context 37.5.
+  - Earnings-date look-ahead in the backtest: the fixed-days rule, the full-hold rule (`confirmed = [e.reaction ... if e.reaction > d]`) and Pullback's earnings buffer read the actual later 8-K date. Live only has estimates.
+  - Unknown earnings dates: issued and flagged in both; now rejected in both (user decision).
+  - PEAD: live read the last report from the weekly `earnings_calendar` (1,710 tickers) and counted days from the run's clock; the backtest used SEC 8-K item 2.02 dates and the bar date. Live PEAD found 0 candidates in the week of 2026-10-12; the first parity scan found 3.
+  - Live earnings filter: news sentiment > 0.20 could override the fixed-days blackout and ≤ −0.30 could veto it; the backtest had neither.
+  - Market date from SPY's latest bar (a run before the bars were posted scanned the session before); audit rows of scoring failures dropped; reruns duplicated `signals_history`.
+- Changes:
+  - PR #14: `CONTEXT_SCORE_COMPONENTS = ()`; context is display-only (`CONTEXT_DISPLAY_COMPONENTS`); news no longer reaches the earnings filter. Test `tests/test_score_parity.py`.
+  - PR #15: `src/earnings_pit.py` (SEC 8-K item 2.02 reports accepted by 20:00 ET) feeds PEAD, Pullback and `trade_hygiene.earnings_gate` in live and backtest; next report = point-in-time estimate with the ±5-session band; unknown → rejected (`REJECT_UNKNOWN_EARNINGS`); harness hygiene order = live order (stop cap, earnings, event lock).
+  - PR #16: market date = latest completed NYSE session from the run's clock; lagging bars → `stale_data`. Test `tests/test_market_date_guard.py`.
+  - PR #17: scoring failures logged; `signals_history` idempotent per scan date + ticker + strategy; `scripts/dedupe_signals_history.py`.
+  - PR #18: `--replay-session` parity replay (`parity_replay.yml`, `scripts/parity_replay.py`) and the `stop_cap_off` variant.
+- Unknown earnings dates before the change (run 39355364038 issued ideas, beta-adjusted %/idea, signal-month block-bootstrap 95% CI):
+
+  | Period | Unknown date | Known date | Unknown − known |
+  |---|---|---|---|
+  | FULL | +0.34 (−0.80 to +1.43), n 341 | −0.57 (−1.22 to +0.05), n 1,861 | +0.91 (−0.28 to +2.01) |
+  | LATE | +0.68 (−1.10 to +2.16), n 187 | −0.62 (−1.82 to +0.52), n 763 | +1.29 (−0.74 to +2.77) |
+
+  Rejecting them removed ideas that did better in this sample; every CI includes zero.
+- Supabase (approved): after PR #17, `scripts/dedupe_signals_history.py --yes` backed up `signals_history` (2,033 rows) to `backups/supabase_20261020T064853Z/` and removed the earlier run's rejected rows: 2026-10-12 356 → 178, 2026-10-13 520 → 260; 2,033 → 1,595 rows.
+
+### Parity run (GitHub run 39384088732, sha 4d2f2b7; extra trial "parity-correction-extra")
+
+- Logged in `outputs/research_trials.jsonl` as an extra trial (a parity correction, not a rule search), with the stop-cap trial in the same pass.
+
+  | | Run 38500883442 (before) | Run 39384088732 (parity) |
+  |---|---|---|
+  | Ideas issued | 2,227 | 1,663 |
+  | Ideas a month (mean / median) | 45.2 / 36 | 33.8 / 26 |
+  | Ideas a session | 2.22 | 1.66 |
+  | Beta-adj. %/idea FULL (CI) | −0.42 (−1.04 to +0.15) | −0.79 (−1.39 to −0.24) |
+  | LATE (CI) | −0.36 (−1.46 to +0.66), n 951 | −0.95 (−2.06 to +0.06), n 672 |
+  | Excess vs SPY | −0.48 | −0.82 |
+  | Placebo percentile; paired diff vs placebo median (CI) | 94.5; +0.49 (+0.00 to +0.98) | 85.5; +0.30 (−0.20 to +0.77) |
+  | Break-even cost | −11.2 bps/side | −29.5 bps/side |
+  | 5th-percentile / worst idea | −8.73% / −18.07% | −8.93% / −18.58% |
+  | Ideas with a report inside the hold (actual, ex post) | 0.0% (look-ahead) | 6.7% (of 1,646 with SEC dates) |
+
+- Ideas a session by calendar month (parity run): Jan 0.99, Feb 2.87, Mar 0.77, Apr 0.69, May 1.64, Jun 1.04, Jul 1.65, Aug 2.07, Sep 1.96, Oct 0.76, Nov 3.32, Dec 2.29 (before: Jan 1.83, Feb 3.44, Mar 1.16, Apr 1.06, May 2.06, Jun 2.12, Jul 2.01, Aug 2.47, Sep 2.85, Oct 1.13, Nov 3.77, Dec 2.93).
+- Funnel (live order): 387,275 scored; 27,000 at ≥ 65; stop cap 15,964; earnings unknown 1,256, fixed days 1,355, full hold 2,512; event lock 233; entry gate 2,424; issued 1,663.
+- By strategy (issued ideas, beta-adj.): Trend Following 1,347, −1.03 (CI −1.65 to −0.37); Mean Reversion 157, +0.54; PEAD 100, +0.34; Cross-Sectional 42, −0.60; Sector Rotation 8, −1.25.
+- Verdict: the FULL beta-adjusted CI is below zero (`edge_beta_adjusted_verdict_all` NEGATIVE_EDGE); LATE includes zero. The earlier figures were flattered by the earnings look-ahead and by the unknown-date ideas (+0.34). No EDGE CLAIM criterion passes.
+- Evidence adopted from this run: `config/strategy_performance.json` (108 setup-level fields reproduce) and `frontend/src/lib/issued-evidence.json` (the cards' issued-idea lines; their label "Issued ideas (backtest, live filters)" is now accurate).
+
+### Stop-cap trial (report only; same pass, extra trial)
+
+| | Stop cap on (production) | Stop cap off |
+|---|---|---|
+| Ideas | 1,654 closed | 4,025 closed |
+| Ideas a month (mean / median) | 33.8 / 26 | 82.1 / 68 |
+| Beta-adj. %/idea FULL (CI) | −0.79 (−1.39 to −0.24) | −0.82 (−1.38 to −0.28) |
+| LATE | −0.95 | −0.88 (CI −2.05 to +0.15) |
+| Paired diff off − on, FULL (CI) | | −0.04 (−0.37 to +0.31) |
+| Paired diff off − on, LATE (CI) | | +0.06 (−0.53 to +0.65) |
+| Placebo percentile | 85.5 | 86.5 |
+
+- The stop cap removes 59% of the ideas without a measurable effect on the return per idea in either period. Nothing was changed.
+
+### Parity replay (GitHub run 39384095078, session 2026-10-19)
+
+- The live nightly scan of 2026-10-19 (run 39377064887) and the harness's replay of the same session (prices re-downloaded, the live evidence file, OBE open as the book):
+  - Issued sets equal: none on either side.
+  - Candidates: live 238, harness 235; 232 in common, all at the same stage; largest composite gap 0.60 (DRI, at 49.5), four above 0.05, all below 65.
+  - Differences: ABBV (Trend Following) and DEO (Cross-Sectional) were candidates in the harness only, both rejected by the stop cap. Cause: the strategy scan saw different price bars (the harness re-downloaded adjusted history on 2026-10-20; the live cache adds bars to history adjusted earlier). Six live-only candidates all scored below 65.
+- Survivorship: the universe is today's security master, so delisted stocks are missing, which flatters every result above.

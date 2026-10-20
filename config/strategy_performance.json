@@ -1,7 +1,7 @@
 {
   "metadata": {
     "description": "Per-strategy evidence from the production-pipeline backtest (scripts/validate_backtest_pipeline.py), measured on all of each strategy's setups (one open per strategy+ticker), net of costs. Consumed by src/strategy_evidence.py.",
-    "generated_at": "2026-10-14T03:21:16.516847+00:00",
+    "generated_at": "2026-10-20T08:00:36.910669+00:00",
     "evaluation_window": [
       "2022-10-21",
       "2026-10-09"
@@ -9,13 +9,13 @@
     "evidence_as_of": "2026-10-09",
     "net_of_costs_pct_per_side": 0.1,
     "edge_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
-    "edge_vs_spy_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
-    "edge_beta_adjusted_verdict_all": "NO_EDGE_DETECTED_CI_INCLUDES_ZERO",
+    "edge_vs_spy_verdict_all": "NEGATIVE_EDGE",
+    "edge_beta_adjusted_verdict_all": "NEGATIVE_EDGE",
     "verdict_note": "edge_verdict_* tests absolute net return, which a rising market lifts on its own. Selection skill is judged by the vs-SPY and beta-adjusted verdicts.",
     "limitations": [
-      "Survivorship: the universe is today's (2026-10-14) security master applied to the whole window, so every period is chosen with hindsight (stocks that delisted are missing). Results are biased upward, most for small caps, which delist more often.",
+      "Survivorship: the universe is today's (2026-10-20) security master applied to the whole window, so every period is chosen with hindsight (stocks that delisted are missing). Results are biased upward, most for small caps, which delist more often.",
       "Survivorship gauge: 4.32% of S&P 500 member-days in the window have no bar in the price cache (44 historical members never seen; fja05680/sp500, MIT). Symbol changes overstate it slightly; delistings are true gaps.",
-      "Earnings calendar from SEC 8-K item 2.02 filings: live fixed-days blackout applied and PEAD can fire; future announcement dates are assumed known at the signal; filers without 8-K 2.02 (foreign private issuers) have no calendar.",
+      "Earnings dates from SEC 8-K item 2.02 filings known at each decision (accepted by 20:00 ET), as in the live scan: the next report is a point-in-time estimate (+/-5-session band in the full-hold rule), never the actual later filing; filers without 8-K 2.02 (foreign private issuers) have no date and are not issued.",
       "No historical context data: context excluded from scores (weights renormalized).",
       "No VIX history: VIX>40 override not applied.",
       "Strategy thresholds were hand-tuned beforehand; the late period is not a clean out-of-sample test of them.",
@@ -23,91 +23,91 @@
     ],
     "adopted_from": {
       "workflow": "backtest_production_universe.yml",
-      "run_id": "38500883442",
+      "run_id": "39384088732",
       "universe": "production (today's broad US security master; delisted stocks missing)",
       "rebuilt_from": "production_backtest_setup_trades_production_universe.csv"
     }
   },
   "strategy_evidence": {
     "mean_reversion": {
-      "trades": 5286,
-      "wins": 3137,
-      "sum_return": 2507.190500000003,
-      "t1_hits": 2510,
-      "t1_n": 5286,
+      "trades": 5284,
+      "wins": 3135,
+      "sum_return": 2496.971400000004,
+      "t1_hits": 2508,
+      "t1_n": 5284,
       "t2_hits": 4,
       "t2_n": 51,
       "t3_hits": 0,
       "t3_n": 0,
-      "beta_adjusted_n": 5286,
-      "sum_beta_adjusted": 40.662900000002864,
-      "excess_vs_spy_n": 5286,
-      "sum_excess_vs_spy": 207.75420000000412,
-      "r_n": 5286,
-      "sum_r": 448.03468199250904,
+      "beta_adjusted_n": 5284,
+      "sum_beta_adjusted": 34.4079000000024,
+      "excess_vs_spy_n": 5284,
+      "sum_excess_vs_spy": 200.48350000000383,
+      "r_n": 5284,
+      "sum_r": 446.3128093334359,
       "exit_stop": 2174,
       "exit_target": 4,
-      "exit_expiry": 3108
+      "exit_expiry": 3106
     },
     "pead": {
-      "trades": 8417,
-      "wins": 4206,
-      "sum_return": -626.0875999999997,
-      "t1_hits": 1562,
-      "t1_n": 8417,
+      "trades": 8404,
+      "wins": 4199,
+      "sum_return": -621.6607000000005,
+      "t1_hits": 1561,
+      "t1_n": 8404,
       "t2_hits": 0,
       "t2_n": 0,
       "t3_hits": 0,
       "t3_n": 0,
-      "beta_adjusted_n": 8417,
-      "sum_beta_adjusted": -4463.042800000011,
-      "excess_vs_spy_n": 8417,
-      "sum_excess_vs_spy": -4233.897000000006,
-      "r_n": 8417,
-      "sum_r": 38.10329458643624,
+      "beta_adjusted_n": 8404,
+      "sum_beta_adjusted": -4442.267100000011,
+      "excess_vs_spy_n": 8404,
+      "sum_excess_vs_spy": -4219.141400000007,
+      "r_n": 8404,
+      "sum_r": 37.47807793189896,
       "exit_stop": 1041,
       "exit_target": 0,
-      "exit_expiry": 7376
+      "exit_expiry": 7363
     },
     "pullback_recovery": {
-      "trades": 24907,
-      "wins": 13277,
-      "sum_return": -756.6315999999939,
-      "t1_hits": 10580,
-      "t1_n": 24907,
+      "trades": 24790,
+      "wins": 13236,
+      "sum_return": -864.1277999999865,
+      "t1_hits": 10485,
+      "t1_n": 24790,
       "t2_hits": 0,
-      "t2_n": 33,
+      "t2_n": 34,
       "t3_hits": 0,
       "t3_n": 1,
-      "beta_adjusted_n": 24907,
-      "sum_beta_adjusted": -12133.609700000006,
-      "excess_vs_spy_n": 24907,
-      "sum_excess_vs_spy": -12310.216700000032,
-      "r_n": 24907,
-      "sum_r": -271.8434080870766,
-      "exit_stop": 11187,
+      "beta_adjusted_n": 24790,
+      "sum_beta_adjusted": -12244.62010000002,
+      "excess_vs_spy_n": 24790,
+      "sum_excess_vs_spy": -12441.889000000028,
+      "r_n": 24790,
+      "sum_r": -288.9793315545526,
+      "exit_stop": 11097,
       "exit_target": 0,
-      "exit_expiry": 13720
+      "exit_expiry": 13693
     },
     "cross_sectional_momentum": {
-      "trades": 23107,
-      "wins": 12096,
-      "sum_return": -3160.034899999967,
-      "t1_hits": 9830,
-      "t1_n": 23107,
+      "trades": 23072,
+      "wins": 12071,
+      "sum_return": -3235.783499999968,
+      "t1_hits": 9813,
+      "t1_n": 23072,
       "t2_hits": 7,
-      "t2_n": 215,
+      "t2_n": 214,
       "t3_hits": 0,
       "t3_n": 5,
-      "beta_adjusted_n": 23107,
-      "sum_beta_adjusted": -24166.86179999985,
-      "excess_vs_spy_n": 23107,
-      "sum_excess_vs_spy": -20341.07329999977,
-      "r_n": 23107,
-      "sum_r": -262.11262583954385,
-      "exit_stop": 9146,
+      "beta_adjusted_n": 23072,
+      "sum_beta_adjusted": -24220.941599999853,
+      "excess_vs_spy_n": 23072,
+      "sum_excess_vs_spy": -20401.110299999782,
+      "r_n": 23072,
+      "sum_r": -264.5619609702011,
+      "exit_stop": 9132,
       "exit_target": 7,
-      "exit_expiry": 13954
+      "exit_expiry": 13933
     },
     "sector_rotation": {
       "trades": 486,
@@ -130,81 +130,81 @@
       "exit_expiry": 343
     },
     "trend_following": {
-      "trades": 27766,
-      "wins": 14583,
-      "sum_return": 3413.150099999972,
-      "t1_hits": 11263,
-      "t1_n": 27766,
-      "t2_hits": 40,
-      "t2_n": 583,
+      "trades": 27743,
+      "wins": 14571,
+      "sum_return": 3406.7711999999733,
+      "t1_hits": 11255,
+      "t1_n": 27743,
+      "t2_hits": 39,
+      "t2_n": 581,
       "t3_hits": 0,
       "t3_n": 17,
-      "beta_adjusted_n": 27766,
-      "sum_beta_adjusted": -21431.182399999794,
-      "excess_vs_spy_n": 27766,
-      "sum_excess_vs_spy": -19475.345999999976,
-      "r_n": 27766,
-      "sum_r": 452.66411543790065,
-      "exit_stop": 11879,
-      "exit_target": 40,
-      "exit_expiry": 15847
+      "beta_adjusted_n": 27743,
+      "sum_beta_adjusted": -21402.6061999998,
+      "excess_vs_spy_n": 27743,
+      "sum_excess_vs_spy": -19463.40299999998,
+      "r_n": 27743,
+      "sum_r": 454.58011603190397,
+      "exit_stop": 11871,
+      "exit_target": 39,
+      "exit_expiry": 15833
     }
   },
   "issued_ideas_by_strategy": {
-    "run_id": "38500883442",
+    "run_id": "39384088732",
     "strategies": {
       "Cross-Sectional Momentum": {
-        "n": 62,
-        "win_rate_pct": 43.548,
+        "n": 42,
+        "win_rate_pct": 45.238,
         "win_rate_ci95": [
-          30.769,
-          55.885
+          34.041,
+          58.974
         ],
-        "net_expectancy_pct": -0.399,
+        "net_expectancy_pct": 0.169,
         "net_expectancy_ci95": [
-          -2.303,
-          1.586
+          -1.601,
+          2.564
         ],
-        "beta_adjusted_pct": -1.202,
+        "beta_adjusted_pct": -0.603,
         "beta_adjusted_ci95": [
-          -3.173,
-          0.944
+          -2.08,
+          1.167
         ]
       },
       "Mean Reversion": {
-        "n": 187,
-        "win_rate_pct": 70.053,
+        "n": 157,
+        "win_rate_pct": 72.611,
         "win_rate_ci95": [
-          42.857,
-          74.561
+          40.0,
+          77.0
         ],
-        "net_expectancy_pct": 1.613,
+        "net_expectancy_pct": 1.902,
         "net_expectancy_ci95": [
-          -1.372,
-          2.496
+          -1.727,
+          2.862
         ],
-        "beta_adjusted_pct": 0.575,
+        "beta_adjusted_pct": 0.54,
         "beta_adjusted_ci95": [
-          0.429,
-          1.482
+          0.398,
+          1.361
         ]
       },
       "Post-Earnings Drift": {
-        "n": 106,
-        "win_rate_pct": 58.491,
+        "n": 100,
+        "win_rate_pct": 59.0,
         "win_rate_ci95": [
-          48.957,
-          63.78
+          50.0,
+          65.354
         ],
-        "net_expectancy_pct": 0.961,
+        "net_expectancy_pct": 0.976,
         "net_expectancy_ci95": [
-          -0.508,
-          2.029
+          -0.627,
+          2.328
         ],
-        "beta_adjusted_pct": 0.321,
+        "beta_adjusted_pct": 0.338,
         "beta_adjusted_ci95": [
-          -0.443,
-          1.658
+          -0.38,
+          1.57
         ]
       },
       "Sector Rotation": {
@@ -226,21 +226,21 @@
         ]
       },
       "Trend Following": {
-        "n": 1853,
-        "win_rate_pct": 50.027,
+        "n": 1347,
+        "win_rate_pct": 47.661,
         "win_rate_ci95": [
-          44.926,
-          55.061
+          42.594,
+          53.026
         ],
-        "net_expectancy_pct": 0.047,
+        "net_expectancy_pct": -0.4,
         "net_expectancy_ci95": [
-          -0.577,
-          0.675
+          -1.046,
+          0.311
         ],
-        "beta_adjusted_pct": -0.538,
+        "beta_adjusted_pct": -1.031,
         "beta_adjusted_ci95": [
-          -1.237,
-          0.153
+          -1.652,
+          -0.367
         ]
       }
     }

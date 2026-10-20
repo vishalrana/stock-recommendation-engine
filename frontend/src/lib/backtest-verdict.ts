@@ -5,7 +5,7 @@
 export const BACKTEST_VERDICT = {
   edgeClaimPassed: false,
   runId: '39384088732',
-  line: 'Backtest: no edge vs SPY after beta; holding SPY did as well or better.',
+  line: 'Backtest (run 39384088732): the book loses to SPY after beta, -0.79% an idea (95% CI -1.39 to -0.24, below zero).',
 } as const;
 
 // A target counts as "rarely reached" below this backtest hit rate (percent).

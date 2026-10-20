@@ -64,3 +64,7 @@ test('card: next earnings is the gate date, labelled estimated, warning by the g
   assert.ok(near.includes(warn));
   assert.ok(!card(28).includes(warn));      // band 23..33: clear of the window, as the gate passed it
 });
+
+test('card: Ideas are SHADOW, labelled not validated', () => {
+  assert.ok(render().includes('Shadow · Not validated - do not trade'));
+});

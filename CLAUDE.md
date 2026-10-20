@@ -61,7 +61,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 
 ## Current state (2026-10-14)
 
-- **Ideas** (nightly scan, `nightly_scan.yml`): live, with the full-hold earnings blackout, event lock and stop cap (R:R floor off). Backtest of exactly this configuration (run 38500883442): about 45 ideas a month, −0.42%/idea beta-adjusted (CI −1.04 to +0.15), no edge; the cards say so.
+- **Ideas** (nightly scan, `nightly_scan.yml`): live, with the full-hold earnings blackout, event lock and stop cap (R:R floor off). Backtest of exactly this configuration (run 38500883442): about 45 ideas a month on average but strongly seasonal (October 1.1 a session; Oct 10–20 of 2023–2025 0.4 a session, because the full-hold earnings rule blocks most ideas in reporting season), −0.42%/idea beta-adjusted (CI −1.04 to +0.15), no edge; the cards say so.
 - **Swing signals** (`swing_signals.yml`, 01:20 UTC Tue–Sat): all five sleeves T, E, N, P and I are **SHADOW**. The pre-registered 2008–2022 holdout (run 38436737951) failed P1 for every sleeve, so they are shown under "Not validated - do not trade" and never alerted.
 - **Data**: Supabase was reset on 2026-10-14 (backup `backups/supabase_20261013T230522Z/`, local only). Details: `docs/research-history.md`, Status log.
 - **Open items**: no `APPRISE_URLS` secret; sleeve I has no live signals until SEC publishes the 2026 Q2–Q4 insider data sets.

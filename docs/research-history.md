@@ -11,7 +11,7 @@ Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules a
   - Kept, unchanged: `earnings_calendar` (1,710), `ticker_metrics` (515), `delisted_tickers` (0). No other tables exist; the `recommendations` view rebuilds from the tables.
   - Afterwards, `swing_sleeve_status` was reseeded from `config/swing_sleeves.json` (T, E, N, P, I all SHADOW). There was no `signals-ledger` branch to delete.
 
-- **2026-10-11: profitability program completed** (see that section). Production now applies the full-hold earnings blackout, the event lock and the stop cap / R:R floor (about 2–3 new ideas a month). Evidence comes from run 38122679781. The final verdict is no edge.
+- **2026-10-11: profitability program completed** (see that section). Production then applied the full-hold earnings blackout, the event lock and the stop cap / R:R floor (about 2–3 new ideas a month: run 38122679781, 127 ideas in 49 months, R:R floor on). Later the same day the R:R floor was turned off (commit 03e2169); the configuration without it averages about 45 ideas a month (run 38500883442, 2,227 ideas), with far fewer in earnings season (see "Live Ideas configuration backtest" and "Live vs backtest funnel"). Evidence comes from run 38122679781. The final verdict is no edge.
 
 - Import errors in the universe provider and Supabase client were fixed. A project report claims 39 regression suites passed and a benchmark dry run succeeded.
 - The hosted nightly workflow completed on 2026-10-09 but, because of the one-session cache lag and an unmigrated `reference_entry_price` column, it published ideas from stale bars and dropped every optional field. Both are fixed in code, and `supabase/migration_2026_10_10_fundamentals.sql` (applied 2026-10-10) adds those columns and the fundamentals provenance columns.
@@ -126,7 +126,7 @@ Recorded before any of its backtests or IC studies were run. The definitions and
     - Stops gapped through: 14.5% → 14.0%.
     - Ideas with earnings inside the hold: 16.4% → 0%.
   - **All three rules are now production defaults** (`EARNINGS_BLACKOUT_MODE = "full_hold"`, `EVENT_LOCK_ENABLED`, `RR_FLOOR_STOP_CAP_ENABLED`).
-    - The R:R floor removes about 98% of ideas, because T1 is a median 0.8 R away. Expect about 2–3 new ideas a month instead of about 7 a day.
+    - The R:R floor removes about 98% of ideas, because T1 is a median 0.8 R away. Expect about 2–3 new ideas a month instead of about 7 a day (R:R floor on; superseded the same day when the floor was turned off: about 45 a month, run 38500883442).
     - They apply to new ideas only. The open TEVA, SNOW and PBT ideas keep being tracked to their exits.
   - Royalty trusts (PBT among them) are excluded from the universe; they produced 0 issued ideas in the evidence run.
   - Live checks (tests): a TEVA-like idea is blocked by the full-hold rule (next report est. 2026-10-28, inside the hold). PBT is locked by its Form 425s since 2026-05-18. A SNOW-like stop of −14.2% exceeds the cap.
@@ -325,3 +325,40 @@ Recorded before any of its backtests or IC studies were run. The definitions and
 
   - Neither passes the edge criteria. The floor shrinks the left tail mostly by issuing 17× fewer ideas.
 - Survivorship: delisted stocks are missing, which flatters both runs.
+
+## Live vs backtest funnel (2026-10-20; diagnosis, no rule change)
+
+- Question: since the 2026-10-14 reset the nightly scan published one idea (OBE, 2026-10-16) in five sessions (2026-10-12 to 10-16), against "about 45 a month" (2.2 a session) in run 38500883442.
+- Live: nightly runs 38482415942 and 38495006619 (both 10-12), 38519581800 and 38588371160 (both 10-13), 38688490634 (10-14), 38857173638 (10-15) and 39006338293 (10-16).
+  - All status success. No `[STALE DATA]`, `stale_tickers_skipped` 0, earnings provider budget 0.
+  - About 2,540 liquid tickers per run, 271 candidates a session.
+  - Counts below come from `signals_history`, latest run per scan date.
+- Backtest: per-session funnel from GitHub run 39355364038 (same configuration; harness now writes `production_backtest_funnel_by_date*.csv`). It reproduces run 38500883442: 2,213 ideas, −0.43%/idea beta-adjusted.
+- Per session (mean). Live order: earnings filter, stop cap, full-hold, event lock, entry gate. Backtest order: fixed-days, full-hold, event lock, stop cap, entry gate.
+
+  | Stage | Live 10-12..10-16 (5 sessions) | Backtest, all sessions | Backtest, Octobers | Backtest, Oct 10–20 of 2023–25 | Backtest, last 20 sessions |
+  |---|---|---|---|---|---|
+  | Scored candidates | 271.4 | 389.3 | 326.8 | 352.8 | 336.5 |
+  | Score < 65 | 245.2 | 362.2 | 306.7 | 336.6 | 317.7 |
+  | Score ≥ 65 | 26.2 | 27.1 | 20.1 | 16.2 | 18.8 |
+  | Already active / same ticker that day | 0 | 2.2 | 1.1 | 1.0 | 1.7 |
+  | Fixed-days earnings filter | 0.2 | 3.1 | 3.3 | 1.7 | 0.5 |
+  | Earnings full-hold | 8.4 | 4.8 | 5.8 | 7.0 | 6.3 |
+  | Event lock | 0 | 0.8 | 0.5 | 0.4 | 1.0 |
+  | Stop cap | 17.0 | 10.7 | 6.4 | 4.9 | 6.3 |
+  | Entry-location gate | 0.4 | 3.3 | 1.8 | 0.9 | 2.1 |
+  | Issued | 0.2 | 2.22 | 1.16 | 0.39 | 1.05 |
+
+- Reading:
+  - The score stage is not the gap: live passes 26 candidates a session at ≥ 65, as many as the backtest average and more than the backtest's mid-October sessions.
+  - The hygiene stage removes almost everything in mid-October, live and in the backtest alike. Backtest October is the lowest month after April (1.16 a session). Oct 10–20 of 2023–2025 issued 9 ideas in 23 sessions, 0.39 a session; 2023 had none in 9 sessions.
+  - At the backtest's mid-October pass-through (2.4% of score-qualified candidates), the live week's 131 candidates imply about 3 ideas. One was issued (Poisson probability of one or fewer ≈ 0.17).
+  - "About 45 a month" is an annual average: by month the backtest issues 1.05 (April) to 3.75 (November) a session.
+  - If the stop cap were off, the full-hold rule alone would block 109 of the 131 (83%). All 47 actual full-hold rejections used estimated dates; only 2 were blocked by the ±5-session band alone.
+  - Of the 22 candidates full-hold would let through, 9 have no known earnings date (E, BTE, EDU, VET, OBE, TTE: foreign 6-K filers). In reporting season the unknown-date policy (issue and flag) mostly lets through names whose report probably falls inside the hold. OBE's 6-K history (2025-10-30, 2026-05-07, 2026-07-30) points to about 2026-10-29, inside its hold.
+- Live-vs-backtest mismatches found (each reported for a decision; none changed):
+  - Context cache: `context_cache` keeps the analyst target but not the analyst rating, so a cache hit loses the 10-point buy-rating bonus. Context falls 25 points (100 → 75, 62.5 → 37.5) and composites 2.5–3.75. The two scans of 2026-10-12 on identical prices had 19 and 9 candidates at ≥ 65. The backtest never has context (weights renormalized).
+  - PEAD: live finds the last report only in the weekly-refreshed `earnings_calendar` (1,710 tickers) and counts days from the run date. The backtest uses SEC 8-K item 2.02 dates for every filer and the bar date. Live PEAD produced 0 candidates in five sessions; the backtest averages 19 a session, 4.7 in Oct 10–20.
+  - Market date: the scan takes its market date from SPY's latest cached bar. A run before Yahoo posts the session (runs 38482415942 and 38495006619, after the 2026-10-13 close) silently scans the previous session instead of logging `stale_data`.
+  - Audit: `rejected_signals_to_insert` is reset after the scoring loop (`jobs/generate_signals.py` around line 1491), so candidates that fail scoring validation are never logged. Reruns of a scan date duplicate `signals_history` (10-12: 356 rows for 178 candidates; 10-13: 520 for 260).
+- Survivorship: the backtest universe is today's security master, so delisted stocks are missing, which flatters results.

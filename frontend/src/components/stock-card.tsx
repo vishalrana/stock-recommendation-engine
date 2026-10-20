@@ -330,6 +330,9 @@ export default function StockCard({
               {company}
             </p>
           )}
+          <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400 mt-0.5">
+            Shadow · Not validated - do not trade
+          </p>
         </div>
 
         <div className="text-right flex-shrink-0 flex flex-col items-end">

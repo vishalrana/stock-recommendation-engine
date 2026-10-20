@@ -488,7 +488,7 @@ export default function StockIdeasApp({
             <div className="flex items-center justify-between mb-4 px-1">
               <div>
                 <h2 className="text-sm font-extrabold text-white uppercase tracking-wider">
-                  Swing ideas - backtest shows no edge vs SPY
+                  Shadow ideas — <span className="text-amber-400">Not validated - do not trade</span>
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Tap an idea to inspect the live technical chart and trade setup.

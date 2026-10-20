@@ -322,6 +322,20 @@ def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries
 
 
 
+def _attach_context(c: dict, data: tuple, in_score: bool) -> None:
+    """
+    Store fetched context on a candidate. With in_score=False (production since 2026-10-20) the
+    fields are kept for display, and the composite score excludes context exactly as the backtest
+    does (context_available=False, remaining weights renormalized).
+    """
+    (c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"],
+     c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"],
+     c["pe_ratio"], c["context_max_points"]) = data
+    c["context_available"] = bool(in_score)
+    if not in_score:
+        c["context_max_points"] = None
+
+
 def _mark_context_unavailable(c: dict) -> None:
     """
     Context data could not be obtained (provider failure, timeout, or NLP skipped).
@@ -1363,9 +1377,15 @@ def run_scan(
         for sig in candidates:
             prepare_candidate_scores(sig, regime_str, settings=settings)
 
-        # Context Scoring with breakdown (P0-2)
-        if not skip_nlp and candidates and settings.context_components:
-            logger.info(f"Computing context scoring for {len(candidates)} candidates in parallel...")
+        # Context (analyst, news). It counts toward the composite score only for the components in
+        # settings.context_components: none since 2026-10-20, because the backtest has no history of
+        # this data and scores every setup without it (weights renormalized). It is still fetched,
+        # stored and shown (quant_config.CONTEXT_DISPLAY_COMPONENTS) for the ideas that qualify.
+        from src import quant_config as _qc
+        ctx_in_score = bool(settings.context_components)
+        ctx_components = tuple(settings.context_components) or tuple(getattr(_qc, "CONTEXT_DISPLAY_COMPONENTS", ()))
+        if not skip_nlp and candidates and ctx_components:
+            logger.info(f"Computing context for {len(candidates)} candidates ({'in the score' if ctx_in_score else 'display only'})...")
             def _score_ctx(cand):
                 t = cand["ticker"]
                 try:
@@ -1375,7 +1395,7 @@ def run_scan(
                         if ctx.quality != DataQuality.VALID:
                             return (t, None)  # Provider failed: context unavailable, not "weak"
                         c_score, c_analyst, c_fundamental, c_news, c_max_points = context_scorer.calculate_with_components(
-                            ctx, float(cand.get("entry_price") or cand.get("price", 1.0)), settings.context_components
+                            ctx, float(cand.get("entry_price") or cand.get("price", 1.0)), ctx_components
                         )
                         if c_score is None:
                             return (t, None)  # No context component had data: unavailable, not zero
@@ -1384,7 +1404,7 @@ def run_scan(
                             save_context_to_cache(t, c_score, ctx)
                         # Veto inputs only for components that count in the score (the ranker's
                         # distress / news / analyst-downside gates read these fields).
-                        scored = set(settings.context_components)
+                        scored = set(ctx_components)
                         de_val = ctx.fundamental.debt_to_equity if ("fundamental" in scored and ctx.fundamental) else None
                         cr_val = ctx.fundamental.current_ratio if ("fundamental" in scored and ctx.fundamental) else None
                         finbert = ctx.news.headline_sentiment if ("news" in scored and ctx.news) else None
@@ -1403,8 +1423,11 @@ def run_scan(
             # calls (and Yahoo throttling) from hundreds of tickers to the plausible few.
             def _best_case_score(cand):
                 probe = dict(cand)
-                probe.update(context_available=True, context_score=100.0, context_analyst=0.0,
-                             context_fundamental=0.0, context_news=0.0)
+                if ctx_in_score:
+                    probe.update(context_available=True, context_score=100.0, context_analyst=0.0,
+                                 context_fundamental=0.0, context_news=0.0)
+                else:
+                    probe.update(context_available=False)  # display only: the score is final without it
                 try:
                     return ranker.compute_composite_score(probe, regime_str)["total"]
                 except Exception:
@@ -1416,7 +1439,8 @@ def run_scan(
                 if t not in unique_cands_by_ticker or _best_case_score(c) > _best_case_score(unique_cands_by_ticker[t]):
                     unique_cands_by_ticker[t] = c
             ctx_targets = [c for c in unique_cands_by_ticker.values() if _best_case_score(c) >= BUY_THRESHOLD]
-            logger.info(f"[CONTEXT] {len(ctx_targets)}/{len(unique_cands_by_ticker)} tickers can reach the Buy threshold; fetching context for those only.")
+            logger.info(f"[CONTEXT] {len(ctx_targets)}/{len(unique_cands_by_ticker)} tickers "
+                        f"{'can reach' if ctx_in_score else 'reach'} the Buy threshold; fetching context for those only.")
 
             executor = ThreadPoolExecutor(max_workers=4)
             ctx_map = {}
@@ -1440,16 +1464,14 @@ def run_scan(
             PROVIDER_HEALTH["metadata"] = dict(context_aggregator.metadata.stats)
             logger.info(
                 f"[CONTEXT] Real context data for {len(ctx_map)}/{len(ctx_targets)} tickers; "
-                f"{len(ctx_targets) - len(ctx_map)} unavailable (provider failure/timeout) and excluded from scoring."
+                f"{len(ctx_targets) - len(ctx_map)} unavailable (provider failure/timeout)"
+                f"{' and excluded from scoring' if ctx_in_score else ''}."
             )
 
             for c in candidates:
                 t = c["ticker"]
                 if t in ctx_map:
-                    (c["context_score"], c["context_analyst"], c["context_earnings"], c["context_fundamental"], c["context_news"],
-                     c["de_ratio"], c["current_ratio"], c["earnings_surprise_pct"], c["finbert_sentiment"], c["target_consensus"],
-                     c["pe_ratio"], c["context_max_points"]) = ctx_map[t]
-                    c["context_available"] = True
+                    _attach_context(c, ctx_map[t], in_score=ctx_in_score)
                 else:
                     _mark_context_unavailable(c)
         else:
@@ -1524,9 +1546,9 @@ def run_scan(
                 earnings_calendar=earnings_calendar_cache,
                 instrument_type=sig.get("instrument_type"),
                 is_etf=sig.get("is_etf"),
-                earnings_surprise_pct=sig.get("earnings_surprise_pct"),
-                news_sentiment=sig.get("finbert_sentiment"),
-                catalyst_type=sig.get("catalyst_override"),
+                earnings_surprise_pct=sig.get("earnings_surprise_pct") if ctx_in_score else None,
+                news_sentiment=sig.get("finbert_sentiment") if ctx_in_score else None,
+                catalyst_type=sig.get("catalyst_override") if ctx_in_score else None,
                 allow_unknown_date=True,
             )
             sig["next_earnings_date"] = er_res.get("next_earnings_date")

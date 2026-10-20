@@ -119,7 +119,13 @@ ENTRY_LOCATION_MODE: str = "gate"
 # left out is still fetched and displayed but cannot move the composite score. Fundamentals (D/E,
 # current ratio) are display-only: in the point-in-time SEC test their points and the distress
 # veto carried no information about forward returns. () = no context in the score.
-CONTEXT_SCORE_COMPONENTS: tuple = ("analyst", "news")
+# Since 2026-10-20 (parity with the backtest, user decision): (). The backtest has no history of
+# analyst or news data, so every setup it measures is scored without context and the remaining
+# weights are renormalized; the live scan now scores exactly that way.
+CONTEXT_SCORE_COMPONENTS: tuple = ()
+# Context still fetched, stored and shown on the cards (never in the score while left out above),
+# so it can be tested later.
+CONTEXT_DISPLAY_COMPONENTS: tuple = ("analyst", "news")
 
 # Trade-hygiene filters (profitability program, Phase 2, keep/kill rule R1 in CLAUDE.md). They act
 # at issuance, after the score qualifies an idea (new ideas only; open ideas are never closed by them).

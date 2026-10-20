@@ -22,8 +22,9 @@ class ContextScorer:
       * analyst:      a mean price target is present
       * fundamental:  each of D/E and current ratio separately, when known
       * news:         scored headlines (DataQuality.VALID or article_count > 0)
-    Only the components listed in quant_config.CONTEXT_SCORE_COMPONENTS count (fundamentals are
-    display-only by default).
+    By default the components in quant_config.CONTEXT_DISPLAY_COMPONENTS count (fundamentals are
+    display-only). Whether the context score enters the composite score is decided by the pipeline
+    (quant_config.CONTEXT_SCORE_COMPONENTS; none since 2026-10-20).
     No technical inputs (RSI / ADX / volume / price-volume events) are used: those are already in
     the momentum sub-score.
     """
@@ -49,11 +50,11 @@ class ContextScorer:
     ) -> Dict[str, Tuple[float, float]]:
         """
         {component: (points_earned, points_available)} for components with data that count toward
-        the score (`components`, default quant_config.CONTEXT_SCORE_COMPONENTS).
+        the score (`components`, default quant_config.CONTEXT_DISPLAY_COMPONENTS).
         """
         if components is None:
             from src import quant_config
-            components = quant_config.CONTEXT_SCORE_COMPONENTS
+            components = quant_config.CONTEXT_DISPLAY_COMPONENTS
         include = set(components)
         out: Dict[str, Tuple[float, float]] = {}
 

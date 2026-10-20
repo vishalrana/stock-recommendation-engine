@@ -971,10 +971,10 @@ def run_scan(
     if dry_run:
         os.environ["SKIP_NLP"] = "true"
 
-    if cache_mode is None:
-        cache_mode = "local" if is_targeted else "incremental"
-    elif force_refresh:
+    if force_refresh:
         cache_mode = "force"
+    elif cache_mode is None:
+        cache_mode = "local" if is_targeted else "incremental"
 
     # Enforce request budget for external earnings provider
     if max_provider_fetches is None:
@@ -2213,6 +2213,25 @@ def run_scan(
     logger.info("=" * 60)
 
 
+def session_already_succeeded() -> bool:
+    """
+    Scheduled reruns (nightly_scan.yml's second attempt): True when scan_log already records a
+    successful scan of the latest completed session. Any other status, or an unreadable scan_log,
+    means the session is scanned again.
+    """
+    from src.utils.market_date import latest_completed_session
+    session = latest_completed_session().isoformat()
+    try:
+        rows = get_client().table("scan_log").select("status").eq("scan_date", session).execute().data or []
+    except Exception as e:
+        logger.warning("[SECOND ATTEMPT] scan_log unreadable (%s); scanning %s.", e, session)
+        return False
+    if any(r.get("status") == "success" for r in rows):
+        logger.info("[SECOND ATTEMPT] Session %s already scanned successfully; nothing to do.", session)
+        return True
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate Nightly Stock Signals")
     parser.add_argument("--dry-run", action="store_true", help="Run scan logic without writing to database")
@@ -2261,6 +2280,12 @@ def main():
                     flat_tickers.append(t_clean)
         if flat_tickers:
             sanitized_tickers = sorted(list(set(flat_tickers)))
+
+    if os.environ.get("SKIP_IF_SESSION_DONE") == "true" and not sanitized_tickers and session_already_succeeded():
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+                f.write("skipped=true\n")
+        return
 
     run_scan(
         dry_run=getattr(args, "dry_run", False),

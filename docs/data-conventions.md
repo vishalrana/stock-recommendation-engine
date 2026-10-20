@@ -2,6 +2,16 @@
 
 Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules and links here.
 
+## Live = backtest parity (since 2026-10-20)
+
+- The nightly Ideas scan and the backtest harness apply the same rules through the same functions; a rule change goes into both and needs a backtest run.
+- Score: no context. Every candidate is scored with `context_available=False` and renormalized weights (`CONTEXT_SCORE_COMPONENTS = ()`). Analyst and news context is fetched for the candidates that qualify, stored and shown (`CONTEXT_DISPLAY_COMPONENTS`), never scored.
+- Earnings dates: SEC 8-K item 2.02 reports known at the decision (accepted by 20:00 ET; `src/earnings_pit.py`) for PEAD's last report, Pullback's next-report buffer and the issuance gate (`trade_hygiene.earnings_gate`). The next report is a point-in-time estimate (±5-session band in the full-hold rule), never the actual later filing. An unknown next report rejects a new non-ETF idea (`REJECT_UNKNOWN_EARNINGS`). The provider `earnings_calendar` is display-only. Live refetches companies with an 8-K in EDGAR's daily index over the last 10 days.
+- Hygiene order: stop cap, earnings (unknown, fixed days, full hold), event lock, then the entry gate, in both.
+- Market date: the latest completed NYSE session from the run's clock (`src/utils/market_date.latest_completed_session`, 16:15 ET); cached bars that stop before it make the scan `stale_data`.
+- `signals_history` is idempotent per scan date + ticker + strategy: a rerun replaces the earlier rejected rows and never touches a published idea's row.
+- Check: `parity_replay.yml` replays a live session through the harness (`--replay-session`) and lists every difference with its cause.
+
 ## Lifecycle and outcome conventions (since 2026-10-09)
 
 - Open recommendations are tracked by replaying every bar after the signal date through `PositionScaleOutTracker` (`reconcile_recommendation_lifecycle`). A missed nightly run never hides a stop or target hit.
@@ -14,9 +24,9 @@ Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules a
 ## Data and context conventions (since 2026-10-10)
 
 - `CacheManager.refresh_cache(start, end)` treats `end` as inclusive and adds a day for yfinance, whose `end` is exclusive. Before this, every nightly scan ran one session behind its regime date. If the cache still does not reach the market date after refresh, the scan publishes no new ideas and logs `stale_data`.
-- Context (analyst, fundamentals, news) counts only when the provider actually returned data (`DataQuality.VALID`). Provider failures make context unavailable, so the weights are renormalized. `ContextScorer` has no technical fallback, because RSI, ADX and volume already sit in the momentum score. Failed fetches are never written to `context_cache`.
-- The context score is the share of available points earned (earned ÷ available × 100). It counts only components that have data and are listed in `CONTEXT_SCORE_COMPONENTS` (`src/quant_config.py`, default: analyst + news). A missing component is excluded, never scored as 0. Rows carry `context_max_points` so the ranker uses the same denominator.
-- Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
+- (Superseded 2026-10-20: context is display-only, see "Live = backtest parity".) Context (analyst, fundamentals, news) counts only when the provider actually returned data (`DataQuality.VALID`). Provider failures make context unavailable, so the weights are renormalized. `ContextScorer` has no technical fallback, because RSI, ADX and volume already sit in the momentum score. Failed fetches are never written to `context_cache`.
+- (Superseded 2026-10-20: context is display-only, see "Live = backtest parity".) The context score is the share of available points earned (earned ÷ available × 100). It counts only components that have data and are listed in `CONTEXT_SCORE_COMPONENTS` (`src/quant_config.py`, default: analyst + news). A missing component is excluded, never scored as 0. Rows carry `context_max_points` so the ranker uses the same denominator.
+- (Superseded 2026-10-20: context is display-only, see "Live = backtest parity".) Context is fetched only for candidates that could reach 65 with a perfect context score, which is safe because a renormalized score can never exceed that best case. Yahoo `.info` is called once per ticker with backoff.
 - News sentiment is the mean over all scored headlines, with neutral headlines counted as 0.
 - D/E display: `negative_equity` (stored with each idea) is True when total equity is zero or negative. The card then shows "Neg. equity", and a D/E above 10 is shown as ">10", with the reason on hover. Yahoo's D/E is never used for a negative-equity company, and an older D/E on an open idea is cleared once equity turns negative.
 - **Strategy evidence on cards:**

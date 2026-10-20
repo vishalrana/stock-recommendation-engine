@@ -4,7 +4,7 @@
 // the random-stock placebo, and survives StepM at 5%. Updated by hand from the run's summary.
 export const BACKTEST_VERDICT = {
   edgeClaimPassed: false,
-  runId: '38500883442',
+  runId: '39384088732',
   line: 'Backtest: no edge vs SPY after beta; holding SPY did as well or better.',
 } as const;
 

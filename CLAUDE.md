@@ -57,13 +57,15 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 - **Pre-registration**: research programs are pre-registered before any run. Their definitions and keep/kill rules are applied mechanically, every trial is logged in `outputs/research_trials.jsonl`, and parameters never change after results exist. Swing: `docs/swing-program.md`. Profitability program: `docs/research-history.md`.
 - **Results come from GitHub runs**: adopt research or evidence files only from a successful, non-smoke GitHub Actions run, with the run id recorded in the file. Never report anything as passed or verified without a GitHub Actions run id showing success.
 - **Never write "edge" or "profitable"** unless the pre-registered edge criteria pass.
+- **Live = backtest (parity, since 2026-10-20)**: the nightly Ideas scan and the backtest harness apply the same rules through the same functions, and a rule change goes into both. Context (analyst, news) is display-only; every earnings date comes from SEC 8-K item 2.02 filings known at the decision (`src/earnings_pit.py`, `trade_hygiene.earnings_gate`); unknown dates are rejected. Check with `parity_replay.yml`.
 - **Secrets and backups**: the repo is public. Never commit `.env`, keys, `backups/` or the SEC contact email; secrets live in `.env` and GitHub secrets only.
 
-## Current state (2026-10-14)
+## Current state (2026-10-20)
 
-- **Ideas** (nightly scan, `nightly_scan.yml`): live, with the full-hold earnings blackout, event lock and stop cap (R:R floor off). Backtest of exactly this configuration (run 38500883442): about 45 ideas a month on average but strongly seasonal (October 1.1 a session; Oct 10–20 of 2023–2025 0.4 a session, because the full-hold earnings rule blocks most ideas in reporting season), −0.42%/idea beta-adjusted (CI −1.04 to +0.15), no edge; the cards say so.
+- **Ideas** (nightly scan, `nightly_scan.yml`): live on the parity configuration (score without context; point-in-time SEC earnings dates with unknown dates rejected; full-hold earnings rule, event lock, stop cap; R:R floor off). Backtest of exactly this configuration (run 39384088732): 1,663 ideas, about 34 a month (strongly seasonal: 0.7–0.8 a session in March, April and October), −0.79%/idea beta-adjusted (CI −1.39 to −0.24, below zero), LATE −0.95 (CI −2.06 to +0.06): no edge; the cards say so.
+- **Forward test**: starts with scan date 2026-10-19 (nightly run 39377064887, the first on the parity configuration). Ideas issued before it (OBE, 2026-10-16) stay tracked but are excluded from forward-test evaluation.
 - **Swing signals** (`swing_signals.yml`, 01:20 UTC Tue–Sat): all five sleeves T, E, N, P and I are **SHADOW**. The pre-registered 2008–2022 holdout (run 38436737951) failed P1 for every sleeve, so they are shown under "Not validated - do not trade" and never alerted.
-- **Data**: Supabase was reset on 2026-10-14 (backup `backups/supabase_20261013T230522Z/`, local only). Details: `docs/research-history.md`, Status log.
+- **Data**: Supabase was reset on 2026-10-14 (backup `backups/supabase_20261013T230522Z/`, local only). Duplicate `signals_history` rows of 2026-10-12 and 2026-10-13 were removed on 2026-10-20 (backup `backups/supabase_20261020T064853Z/`). Details: `docs/research-history.md`.
 - **Open items**: no `APPRISE_URLS` secret; sleeve I has no live signals until SEC publishes the 2026 Q2–Q4 insider data sets.
 
 ## Tests

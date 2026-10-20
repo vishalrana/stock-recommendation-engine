@@ -1,58 +1,58 @@
 {
-  "run_id": "38500883442",
+  "run_id": "39384088732",
   "strategies": {
     "Cross-Sectional Momentum": {
-      "n": 62,
-      "win_rate_pct": 43.548,
+      "n": 42,
+      "win_rate_pct": 45.238,
       "win_rate_ci95": [
-        30.769,
-        55.885
+        34.041,
+        58.974
       ],
-      "net_expectancy_pct": -0.399,
+      "net_expectancy_pct": 0.169,
       "net_expectancy_ci95": [
-        -2.303,
-        1.586
+        -1.601,
+        2.564
       ],
-      "beta_adjusted_pct": -1.202,
+      "beta_adjusted_pct": -0.603,
       "beta_adjusted_ci95": [
-        -3.173,
-        0.944
+        -2.08,
+        1.167
       ]
     },
     "Mean Reversion": {
-      "n": 187,
-      "win_rate_pct": 70.053,
+      "n": 157,
+      "win_rate_pct": 72.611,
       "win_rate_ci95": [
-        42.857,
-        74.561
+        40.0,
+        77.0
       ],
-      "net_expectancy_pct": 1.613,
+      "net_expectancy_pct": 1.902,
       "net_expectancy_ci95": [
-        -1.372,
-        2.496
+        -1.727,
+        2.862
       ],
-      "beta_adjusted_pct": 0.575,
+      "beta_adjusted_pct": 0.54,
       "beta_adjusted_ci95": [
-        0.429,
-        1.482
+        0.398,
+        1.361
       ]
     },
     "Post-Earnings Drift": {
-      "n": 106,
-      "win_rate_pct": 58.491,
+      "n": 100,
+      "win_rate_pct": 59.0,
       "win_rate_ci95": [
-        48.957,
-        63.78
+        50.0,
+        65.354
       ],
-      "net_expectancy_pct": 0.961,
+      "net_expectancy_pct": 0.976,
       "net_expectancy_ci95": [
-        -0.508,
-        2.029
+        -0.627,
+        2.328
       ],
-      "beta_adjusted_pct": 0.321,
+      "beta_adjusted_pct": 0.338,
       "beta_adjusted_ci95": [
-        -0.443,
-        1.658
+        -0.38,
+        1.57
       ]
     },
     "Sector Rotation": {
@@ -74,21 +74,21 @@
       ]
     },
     "Trend Following": {
-      "n": 1853,
-      "win_rate_pct": 50.027,
+      "n": 1347,
+      "win_rate_pct": 47.661,
       "win_rate_ci95": [
-        44.926,
-        55.061
+        42.594,
+        53.026
       ],
-      "net_expectancy_pct": 0.047,
+      "net_expectancy_pct": -0.4,
       "net_expectancy_ci95": [
-        -0.577,
-        0.675
+        -1.046,
+        0.311
       ],
-      "beta_adjusted_pct": -0.538,
+      "beta_adjusted_pct": -1.031,
       "beta_adjusted_ci95": [
-        -1.237,
-        0.153
+        -1.652,
+        -0.367
       ]
     }
   }

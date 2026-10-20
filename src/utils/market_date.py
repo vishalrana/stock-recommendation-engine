@@ -58,6 +58,18 @@ def get_market_date(as_of: Optional[datetime.datetime] = None) -> datetime.date:
     return current_date
 
 
+def latest_completed_session(now: Optional[datetime.datetime] = None) -> datetime.date:
+    """The last NYSE session whose close has passed (16:15 ET buffer), from the run's clock."""
+    now = (now or datetime.datetime.now(EASTERN_TZ)).astimezone(EASTERN_TZ)
+    d = now.date()
+    if is_nyse_session(d) and (now.hour, now.minute) >= (16, 15):
+        return d
+    k = d - datetime.timedelta(days=1)
+    while not is_nyse_session(k):
+        k -= datetime.timedelta(days=1)
+    return k
+
+
 def get_trading_days_ago(n_days: int, as_of: Optional[datetime.date] = None) -> datetime.date:
     """
     Calculate the date approximately n trading days in the past from as_of (skipping weekends).

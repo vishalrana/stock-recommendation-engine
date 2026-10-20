@@ -38,16 +38,7 @@ FILER_FORMS = {"8-K", "8-K/A", "6-K", "6-K/A", "425", "PREM14A", "DEFM14A", "S-4
                "15-12B", "15-12G", "15-15D"}
 
 
-def latest_completed_session(now: Optional[datetime] = None) -> date:
-    from src.utils.market_date import is_nyse_session, session_on_or_after
-    now = (now or datetime.now(tz=NY)).astimezone(NY)
-    d = now.date()
-    if is_nyse_session(d) and (now.hour, now.minute) >= (16, 15):
-        return d
-    k = d - timedelta(days=1)
-    while not is_nyse_session(k):
-        k -= timedelta(days=1)
-    return k
+from src.utils.market_date import latest_completed_session  # noqa: E402  (shared with the Ideas scan)
 
 
 MIN_FRESH_PCT = 95.0   # share of recently trading tickers that must have the session's bar

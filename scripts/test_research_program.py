@@ -18,6 +18,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,40 @@ class TestTrialsRegistry(unittest.TestCase):
             self.assertTrue(rows[1]["smoke"])
             for k in ("phase", "params", "n_ideas", "ci95", "late_mean", "series_path", "recorded_at"):
                 self.assertIn(k, rows[0])
+
+
+    def test_merge_dedupes_and_tags_run_id(self):
+        from src.research.trials import merge_trials
+        with tempfile.TemporaryDirectory() as d:
+            run, dst = os.path.join(d, "run.jsonl"), os.path.join(d, "committed.jsonl")
+            record_trial("production", "phase2", {}, 10, -0.1, [-0.5, 0.3], None, path=run, sha="abc")
+            record_trial("stop_cap_off", "phase2", {}, 12, -0.2, [-0.6, 0.2], None, path=run, sha="abc")
+            self.assertEqual(merge_trials([run, os.path.join(d, "missing.jsonl")], dst, run_id="42"), 2)
+            self.assertEqual(merge_trials([run], dst, run_id="42"), 0)          # idempotent
+            rows = read_trials(dst)
+            self.assertEqual([r["name"] for r in rows], ["production", "stop_cap_off"])
+            self.assertEqual({r["run_id"] for r in rows}, {"42"})
+
+    def test_persist_pushes_to_main_once(self):
+        import subprocess
+        from scripts.persist_trials import REL_PATH, push
+        git = lambda *a, cwd: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+        with tempfile.TemporaryDirectory() as d:
+            origin, clone = os.path.join(d, "origin.git"), os.path.join(d, "clone")
+            git("init", "-q", "--bare", "-b", "main", origin, cwd=d)
+            git("clone", "-q", origin, clone, cwd=d)
+            os.makedirs(os.path.join(clone, os.path.dirname(REL_PATH)))
+            open(os.path.join(clone, REL_PATH), "w").close()
+            git("add", REL_PATH, cwd=clone)
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=clone)
+            git("push", "-q", "origin", "HEAD:main", cwd=clone)
+            run = os.path.join(d, "run.jsonl")
+            record_trial("production", "phase2", {}, 10, -0.1, None, None, path=run, sha="abc")
+            with mock.patch("time.sleep"):
+                self.assertEqual(push([run], "7", repo=clone), 1)
+                self.assertEqual(push([run], "7", repo=clone), 0)              # already on main
+            shown = subprocess.run(["git", "show", f"main:{REL_PATH}"], cwd=origin, capture_output=True, text=True).stdout
+            self.assertEqual([json.loads(l)["run_id"] for l in shown.splitlines()], ["7"])
 
 
 def _random_path(rng, n, start=100.0, vol=0.025, gap_prob=0.08, nan_prob=0.03):

@@ -64,6 +64,7 @@ jobs:
         if: always()
         with:
           name: swing-data-summary
+          retention-days: 90
           path: outputs/swing/
           if-no-files-found: warn
 
@@ -91,6 +92,7 @@ jobs:
         if: always()
         with:
           name: swing-replication
+          retention-days: 90
           path: |
             outputs/swing/replication.json
             outputs/swing/patterns.json
@@ -123,6 +125,7 @@ jobs:
         if: always()
         with:
           name: swing-sleeve-${{ matrix.sleeve }}
+          retention-days: 90
           path: |
             outputs/swing/sleeve_${{ matrix.sleeve }}.json
             outputs/swing/trades_${{ matrix.sleeve }}_*.csv
@@ -132,6 +135,8 @@ jobs:
     needs: [replication, sleeve]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the trials registry is pushed to main
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -153,9 +158,13 @@ jobs:
           find artifacts -name 'data_summary.json' -exec cp {} outputs/swing/ \;
           ls -la outputs/swing
       - run: python scripts/research_swing.py --stage decide $LIMIT_ARG
+      - name: Persist trials (config/research_trials.jsonl on main)
+        if: always()
+        run: python scripts/persist_trials.py $(find artifacts -name research_trials.jsonl) outputs/research_trials.jsonl --run-id "${{ github.run_id }}" --push
       - uses: actions/upload-artifact@v4
         with:
           name: swing-decisions
+          retention-days: 90
           path: |
             outputs/swing/decisions.json
             outputs/swing/replication.json

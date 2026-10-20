@@ -29,6 +29,9 @@ concurrency:
   group: backtest-production-universe
   cancel-in-progress: false
 
+permissions:
+  contents: write   # the trials registry is pushed to main
+
 jobs:
   backtest:
     name: Production-universe backtest
@@ -106,6 +109,10 @@ jobs:
           python scripts/validate_backtest_pipeline.py --universe production --workers 4
           $LIMIT_ARG $VARIANTS_ARG $PLACEBO_ARG --trial-phase "$TRIAL_PHASE"
 
+      - name: Persist trials (config/research_trials.jsonl on main)
+        if: always()
+        run: python scripts/persist_trials.py outputs/research_trials.jsonl --run-id "${{ github.run_id }}" --push
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -122,4 +129,4 @@ jobs:
             outputs/production_backtest_variant_trades.csv
             outputs/research_trials.jsonl
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90

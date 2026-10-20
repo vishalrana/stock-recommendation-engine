@@ -16,8 +16,8 @@ test('strategy stats below 100 ideas are suppressed', () => {
 });
 
 test('adopted issued-idea evidence: small strategies are hidden', () => {
-  assert.strictEqual(ISSUED_RUN_ID, '39384088732');
-  assert.strictEqual(issuedStatsLine('Cross-Sectional Momentum'), 'insufficient sample (n=42)');
+  assert.strictEqual(ISSUED_RUN_ID, '39451924637');
+  assert.strictEqual(issuedStatsLine('Cross-Sectional Momentum'), 'insufficient sample (n=43)');
   assert.strictEqual(issuedStatsLine('Sector Rotation'), 'insufficient sample (n=8)');
-  assert.ok((issuedStatsLine('Trend Following') || '').startsWith('1347 ideas'));
+  assert.ok((issuedStatsLine('Trend Following') || '').startsWith('1342 ideas'));
 });

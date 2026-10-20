@@ -392,7 +392,7 @@ Recorded before any of its backtests or IC studies were run. The definitions and
 
 ### Parity run (GitHub run 39384088732, sha 4d2f2b7; extra trial "parity-correction-extra")
 
-- Logged in `outputs/research_trials.jsonl` as an extra trial (a parity correction, not a rule search), with the stop-cap trial in the same pass.
+- Logged in the trials registry (now `config/research_trials.jsonl`) as an extra trial (a parity correction, not a rule search), with the stop-cap trial in the same pass.
 
   | | Run 38500883442 (before) | Run 39384088732 (parity) |
   |---|---|---|
@@ -434,3 +434,79 @@ Recorded before any of its backtests or IC studies were run. The definitions and
   - Candidates: live 238, harness 235; 232 in common, all at the same stage; largest composite gap 0.60 (DRI, at 49.5), four above 0.05, all below 65.
   - Differences: ABBV (Trend Following) and DEO (Cross-Sectional) were candidates in the harness only, both rejected by the stop cap. Cause: the strategy scan saw different price bars (the harness re-downloaded adjusted history on 2026-10-20; the live cache adds bars to history adjusted earlier). Six live-only candidates all scored below 65.
 - Survivorship: the universe is today's security master, so delisted stocks are missing, which flatters every result above.
+
+## Parity follow-up 2 (2026-10-20; PRs #20–#27)
+
+- User decisions: Ideas go to SHADOW (PR #25); the stop cap stays on; a second nightly attempt at 04:00 UTC and a weekly full price refresh (PR #26). Nothing else changes the forward test's rules (it started with scan date 2026-10-19).
+- Fixes:
+  - PR #20, Cross-Sectional screen: live and backtest call `src/pipeline_steps.cross_sectional_screen`. Before, the backtest ranked only stocks with more than 265 bars and live took each ticker's own 64th row back, so the 15% cut-off differed.
+  - PR #21, SEC unavailable: `earnings_sec_unavailable` (no `SEC_USER_AGENT`, no CIK mapping, fetch failed) is kept apart from `earnings_unknown` (filings read, no report), under the same switch. Live writes per-cause counts to `scan_log.error_message` and marks the run `degraded_sec` when SEC returned nothing usable; the harness counts the rule and sets `sec_degraded`.
+  - PR #22, card earnings date: the card shows the date the gate tested (`trade_hygiene.gate_earnings_date`), labelled "estimated ±5 sessions", and warns with the gate's own test (band against fill .. hold + 2 sessions).
+  - PR #24, trials registry: committed `config/research_trials.jsonl`, pushed by each research workflow (`scripts/persist_trials.py`); artifacts kept 90 days; backfilled with 85 records from 12 runs and 116 local smoke records. The first automatic push came from run 39451924637 (commit bcce3a5).
+  - PR #23: backtest variant `allow_unknown_earnings` (the decomposition below).
+- Parity replay of 2026-10-19 after PR #20 (GitHub run 39397672788). The issued sets are equal (none). Candidates: live 238, harness 243, 237 in common. Every one-sided candidate, before and after the fix:
+
+  | Candidate | First replay (39384095078) | After PR #20 (39397672788) | Cause |
+  |---|---|---|---|
+  | DK, FLXS, NDSN, NUE, RGA / Cross-Sectional | live only (scores 38–63) | in both | the two screens (fixed) |
+  | DEO / Pullback | live only (49.9) | live only (49.9) | dividend-adjusted bars (DEO ex-dividend 2026-10-16) |
+  | ABBV / Trend Following | harness only, stop cap | harness only, stop cap | dividend-adjusted bars (ex-dividend 2026-10-15) |
+  | DEO / Cross-Sectional | harness only, stop cap | harness only, stop cap | ex-dividend 2026-10-16, or the old live screen |
+  | IGR / Cross-Sectional | harness only (33.7) | harness only (33.7) | monthly distributions in the window, or the old live screen |
+  | HAS, GGB, JOE / Cross-Sectional | — | harness only (HAS 68.1 stop cap; GGB 55.6, JOE 59.4) | the new screen admits them; the live scan of 2026-10-19 still used the old one (or ex-dividend days 08-19 / 08-21 / 08-21 in the window) |
+
+  - No candidate changes an outcome: the only harness-only ones at 65 or more (ABBV, DEO, HAS) fail the stop cap.
+  - The live cache adds bars to history adjusted at an earlier download, while the harness re-downloads adjusted history. The weekly full refresh (PR #26) realigns them every Saturday; between refreshes an ex-dividend day can still move a candidate.
+  - The first clean check of the shared screen is a replay of 2026-10-20, the first live session that used it.
+
+### Decomposition run (GitHub run 39451924637, sha cf140e2; extra trial "parity-decomposition-extra")
+
+The production book (the parity configuration with the shared screen) and `allow_unknown_earnings` were run in one pass. Beta-adjusted %/idea, signal-month block-bootstrap 95% CI; differences are paired signal-month bootstraps:
+
+| Book | FULL | LATE |
+|---|---|---|
+| Run 39355364038 (earnings dates from the actual later filing; unknown dates issued) | −0.43 (−1.05 to +0.15), n 2,202 | −0.36 (−1.47 to +0.66), n 950 |
+| `allow_unknown_earnings` (point-in-time dates; unknown dates issued) | −0.56 (−1.14 to −0.02), n 2,012 | −0.58 (−1.61 to +0.39), n 860 |
+| Production (point-in-time dates; unknown dates rejected) | −0.77 (−1.37 to −0.23), n 1,651 | −0.95 (−2.06 to +0.07), n 672 |
+| Parity run 39384088732 (old screen) | −0.79 (−1.39 to −0.24), n 1,654 | −0.95 (−2.06 to +0.06), n 672 |
+
+| Step | FULL | LATE |
+|---|---|---|
+| Point-in-time dates (variant − run 39355364038) | −0.13 (−0.29 to +0.02) | −0.22 (−0.52 to +0.05) |
+| Unknown-date rejection (production − variant) | −0.21 (−0.44 to −0.02) | −0.37 (−0.78 to +0.03) |
+| Shared screen (production − parity run) | +0.02 (−0.00 to +0.04) | −0.00 (−0.03 to +0.02) |
+| Total (production − run 39355364038) | −0.34 (−0.60 to −0.12) | |
+
+- The variant's dated ideas are exactly the production set, so the rejection step compares the same ideas plus the 361 unknown-date ones (+0.41, CI −0.72 to +1.39).
+- The shared screen changed 9 of 1,657 ideas (3 new, 6 dropped).
+- Funnel: earnings unknown 1,235, SEC unavailable 16 (7 tickers without a CIK mapping), fixed days 1,349, full hold 2,503, stop cap 15,913, event lock 232, entry gate 2,410; issued 1,660, 33.9 a month (median 26).
+- Placebo: percentile 88.5; paired diff vs the per-idea placebo median +0.30 (−0.18 to +0.77). The parity run gave 85.5 and +0.30 (−0.20 to +0.77). The placebo book means are right-skewed: a few extreme draws put their mean (−0.37) above their 95th percentile (−0.46).
+- Verdict: the FULL CI is below zero (NEGATIVE_EDGE); LATE includes zero. No EDGE CLAIM criterion passes.
+- Evidence: the cards' issued-idea figures (`frontend/src/lib/issued-evidence.json`) and the verdict line now come from this run.
+  - The scoring evidence (`config/strategy_performance.json`) stays at run 39384088732 so live scores do not move during the forward test.
+  - This run's setup-level aggregates differ slightly: win rate within 0.04 points and expectancy within 0.008%/setup for 5 strategies.
+
+### Unknown-date ideas: left tail (run 39355364038, report only)
+
+| | Unknown date (n 341) | Known date (n 1,861) |
+|---|---|---|
+| 5th-percentile idea | −9.23% | −8.66% |
+| Worst idea | −14.67% | −18.07% |
+| Initial-stop exits gapped through | 16.9% (21 of 124) | 10.3% (60 of 582) |
+| A report inside the hold (actual, ex post) | 23.3% (77 of 331 with Yahoo dates; SEC has no item 2.02 for them) | 0.0% in this run (gated on the actual later filing); 6.7% under point-in-time dates (parity run) |
+
+- The 77 unknown-date ideas with a report inside the hold averaged +3.70%/idea beta-adjusted and the other 254 averaged −0.68%.
+- In run 39451924637 the 361 unknown-date ideas show the same shape: 5th percentile −9.05%, worst −13.58%, 15.9% of stops gapped (21 of 132); the known-date ideas show −8.89%, −18.58% and 13.3% (72 of 542).
+
+### Robustness (production book, run 39451924637; run 39384088732 gives the same to the second decimal)
+
+- Mean Reversion: 157 ideas in 3 signal months only (2022-10: 10, 2022-11: 100, 2022-12: 47), all in the 2022 bear market; +0.54. Without its best month (2022-10) +0.48. Leave-one-month-out range +0.48 to +0.79. A month bootstrap over 3 months is not informative.
+- PEAD: 101 ideas in 10 months, 91% of them (92) from 2022-10 to 2023-02; +0.37 (−0.31 to +1.71). Without its best month (2022-10) −0.14 (−0.40 to +0.31). Leave-one-month-out range −0.14 to +0.59.
+- Trend Following vs all other strategies:
+
+  | | Trend Following | Others |
+  |---|---|---|
+  | FULL | −1.02 (−1.65 to −0.35), n 1,342 | +0.31 (−0.36 to +0.89), n 309 |
+  | LATE | −0.95 (−2.09 to +0.11), n 642 | −0.88 (−2.45 to +1.16), n 30 |
+
+  - The FULL gap comes from Mean Reversion and PEAD in late 2022 and early 2023. In LATE the others have 30 ideas and are no better.

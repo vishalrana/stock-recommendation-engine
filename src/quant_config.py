@@ -133,7 +133,11 @@ CONTEXT_DISPLAY_COMPONENTS: tuple = ("analyst", "news")
 #                          "full_hold":  no idea when a confirmed earnings reaction session falls in
 #                          [fill, fill + hold_days + FULL_HOLD_BUFFER_SESSIONS]; an estimated date
 #                          blocks when its +/- ESTIMATED_EARNINGS_BAND_SESSIONS band overlaps that
-#                          window; an unknown date issues the idea marked earnings_unknown.
+#                          window; an unknown date issues the idea marked earnings_unknown
+#                          unless REJECT_UNKNOWN_EARNINGS.
+#   Since 2026-10-20 (parity) every earnings date comes from SEC 8-K item 2.02 filings known at the
+#   decision (src/earnings_pit.py): the next report is a point-in-time estimate in the live scan and
+#   in the backtest alike, never the actual later filing (src/trade_hygiene.earnings_gate).
 #   EVENT_LOCK_ENABLED     SEC deal / tender / rights-offering filings and the price-pin backstop
 #                          (src/providers/context/sec_filings.py) block new ideas.
 #   STOP_CAP_ENABLED       reject when entry - stop > min(STOP_CAP_ATR_MULT x ATR14, STOP_CAP_PCT x entry).
@@ -145,6 +149,9 @@ CONTEXT_DISPLAY_COMPONENTS: tuple = ("analyst", "news")
 # On 2026-10-11, by user decision, RR_FLOOR_ENABLED is turned off (False) for the Ideas product,
 # while STOP_CAP_ENABLED remains True.
 EARNINGS_BLACKOUT_MODE: str = "full_hold"
+# A new non-ETF idea whose next report date is unknown (no 8-K item 2.02 report in the last 200 days,
+# e.g. foreign 6-K filers) is not issued (user decision 2026-10-20; live and backtest alike).
+REJECT_UNKNOWN_EARNINGS: bool = True
 FULL_HOLD_BUFFER_SESSIONS: int = 2
 ESTIMATED_EARNINGS_BAND_SESSIONS: int = 5
 EVENT_LOCK_ENABLED: bool = True

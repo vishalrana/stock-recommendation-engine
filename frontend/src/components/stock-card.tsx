@@ -78,12 +78,15 @@ export default function StockCard({
   const company = recommendation.company_name || '';
 
   // Prefer live quote data when available, falling back to stored recommendation.price
-  const displayedPriceVal = (livePrice !== undefined && livePrice !== null)
-    ? livePrice
-    : recommendation.price;
+  const isLivePrice = livePrice !== undefined && livePrice !== null;
+  const displayedPriceVal = isLivePrice ? livePrice : recommendation.price;
   const price = (displayedPriceVal !== undefined && displayedPriceVal !== null && !isNaN(Number(displayedPriceVal)))
     ? Number(displayedPriceVal).toFixed(2)
     : '—';
+  // The stored price is the scan close, not a quote: say so until quotes are refreshed
+  const priceCaption = isLivePrice
+    ? 'live quote'
+    : `at scan${recommendation.scan_date ? ` · ${formatEarningsDate(recommendation.scan_date)}` : ''}`;
 
   // Reference entry price when this stock idea was generated
   const entryPriceVal = recommendation.reference_entry_price ?? recommendation.entry_price;
@@ -233,23 +236,25 @@ export default function StockCard({
     });
   }
 
-  // Strategy evidence (production-pipeline backtest of this strategy) and analytical R:R
+  // Strategy evidence (production-pipeline backtest of this strategy) and analytical R:R.
+  // These figures cover every setup the strategy flagged (one open per stock), before the score,
+  // earnings, stop-cap and entry filters; the issued-ideas line below is the filtered book.
   let winRateDisplay = 'Not enough history';
   const swr = recommendation.strategy_win_rate;
   const strades = recommendation.strategy_trades;
   if (swr !== null && swr !== undefined && !isNaN(Number(swr)) && strades) {
     const exp = recommendation.strategy_expectancy_pct;
     const expText = (exp !== null && exp !== undefined && !isNaN(Number(exp)))
-      ? ` · ${Number(exp) >= 0 ? '+' : ''}${Number(exp).toFixed(2)}%/trade`
+      ? ` · ${Number(exp) >= 0 ? '+' : ''}${Number(exp).toFixed(2)}%/setup`
       : '';
     winRateDisplay = Number(strades) < MIN_STRATEGY_SAMPLE
       ? insufficientSample(Number(strades))
-      : `${Number(swr).toFixed(0)}% of ${strades} trades${expText}`;
+      : `${Number(swr).toFixed(0)}% of ${Number(strades).toLocaleString('en-US')} setups${expText}`;
   }
   const issuedDisplay = issuedStatsLine(strategy);
   // Same backtest, measured against SPY held over the same days with the same market risk (beta).
   // A rising market lifts the absolute figure on its own; this one shows whether the strategy beat it.
-  const fmtPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%/trade`;
+  const fmtPct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%/setup`;
   const sba = recommendation.strategy_beta_adjusted_pct;
   const sxs = recommendation.strategy_excess_vs_spy_pct;
   const betaAdjValue = (sba !== null && sba !== undefined && !isNaN(Number(sba)) && Number(strades) >= MIN_STRATEGY_SAMPLE) ? Number(sba) : null;
@@ -267,16 +272,29 @@ export default function StockCard({
     ['time limit', recommendation.strategy_exit_expiry_pct],
     ['all targets', recommendation.strategy_exit_target_pct],
   ].filter(([, v]) => v !== null && v !== undefined && !isNaN(Number(v)));
-  const exitMixDisplay = mix.length ? mix.map(([k, v]) => `${k} ${Number(v).toFixed(0)}%`).join(' · ') : null;
+  const mixPct = (v: number) => (v > 0 && v < 1 ? '<1%' : `${v.toFixed(0)}%`);
+  const exitMixDisplay = mix.length ? mix.map(([k, v]) => `${k} ${mixPct(Number(v))}`).join(' · ') : null;
 
   const entryNum = recommendation.entry_price ? Number(recommendation.entry_price) : null;
   const stopNum = recommendation.stop_loss ? Number(recommendation.stop_loss) : null;
   const guide = sizing ? sizeIdea(sizing.account, sizing.riskPct, entryNum, stopNum) : null;
 
+  // Reward:risk if targets are hit. T1 alone = (T1 - entry) / (entry - initial stop). The scale-out
+  // figure weights each exit of the plan, so a runner closed at breakeven adds no reward.
   const rrVal = recommendation.weighted_rr_honest ?? recommendation.weighted_rr ?? recommendation.risk_reward;
-  const rrDisplay = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal)))
-    ? `${Number(rrVal).toFixed(2)}:1 (if targets hit)`
+  const rrNum = (rrVal !== null && rrVal !== undefined && !isNaN(Number(rrVal))) ? Number(rrVal) : null;
+  const rrEntry = Number(entryPriceVal);
+  const rrStop = Number(recommendation.stop_loss);
+  const rrT1 = Number(recommendation.target_1);
+  const t1Rr = (recommendation.target_1 && recommendation.stop_loss && rrEntry > rrStop && rrT1 > 0)
+    ? (rrT1 - rrEntry) / (rrEntry - rrStop) : null;
+  const [w1, w2, w3] = (recommendation.scale_out_weights || '').split('/').map(Number);
+  const planText = Number.isFinite(w1) && w1 > 0
+    ? (t2 ? `${w1}% at T1, ${w2}% at T2${w3 > 0 ? `, ${w3}% at T3` : ''}` : `${w1}% at T1, ${w2}% runner closed at breakeven`)
     : null;
+  const rrTitle = planText
+    ? `T1 alone: (T1 - entry) / (entry - stop). Scale-out plan (${planText}) weights each exit, so it is lower than T1 alone. Both assume the targets are hit.`
+    : 'Both assume the targets are hit.';
 
   return (
     <div
@@ -317,6 +335,7 @@ export default function StockCard({
           <span className="font-mono text-xl font-bold text-white tracking-tight">
             ${price}
           </span>
+          <span className="text-[10px] font-medium text-slate-500">{priceCaption}</span>
         </div>
       </div>
 
@@ -332,14 +351,13 @@ export default function StockCard({
           </span>
         </div>
 
-        <div className="flex items-baseline justify-between text-slate-300">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Fundamentals</span>
-          <span className="font-mono text-slate-300" title={fundamentalsTitle}>
-            P/E {peDisplay}
-            <span className="text-slate-600"> · </span>
-            D/E {deDisplay}
-            <span className="text-slate-600"> · </span>
-            CR {crDisplay}
+        <div className="flex items-baseline justify-between gap-x-3 text-slate-300">
+          <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-slate-400">Fundamentals</span>
+          {/* Each ratio stays whole; on a narrow screen the ratios wrap as units, right-aligned */}
+          <span className="font-mono text-slate-300 flex flex-wrap justify-end gap-x-2.5 gap-y-0.5" title={fundamentalsTitle}>
+            <span className="whitespace-nowrap">P/E {peDisplay}</span>
+            <span className="whitespace-nowrap">D/E {deDisplay}</span>
+            <span className="whitespace-nowrap">CR {crDisplay}</span>
           </span>
         </div>
 
@@ -457,9 +475,9 @@ export default function StockCard({
 
             {/* Analytical Metrics Block */}
             <div className="pt-2 border-t border-slate-800/60 grid grid-cols-2 gap-2 text-[11px]">
-              <div>
+              <div title="Every setup this strategy flagged in the backtest (one open per stock), before the score, earnings, stop-cap and entry filters. Not the ideas that were issued: see Issued ideas.">
                 <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
-                  Strategy Backtest
+                  Win rate, all setups (unfiltered)
                 </span>
                 <span className="text-slate-300 font-mono font-medium block">
                   {winRateDisplay}
@@ -473,20 +491,23 @@ export default function StockCard({
                   </span>
                 )}
               </div>
-              {rrDisplay && (
-                <div>
+              {(t1Rr !== null || rrNum !== null) && (
+                <div title={rrTitle}>
                   <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
-                    Scale-out R:R
+                    Reward : risk (if targets hit)
                   </span>
-                  <span className="text-slate-300 font-mono font-medium">
-                    {rrDisplay}
-                  </span>
+                  {t1Rr !== null && (
+                    <span className="text-slate-300 font-mono font-medium block">T1 alone {t1Rr.toFixed(2)}:1</span>
+                  )}
+                  {rrNum !== null && (
+                    <span className="text-slate-400 font-mono block">Scale-out plan {rrNum.toFixed(2)}:1</span>
+                  )}
                 </div>
               )}
               {issuedDisplay && (
                 <div className="col-span-2">
                   <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
-                    Ideas issued by this strategy (backtest)
+                    Issued ideas (backtest, live filters)
                   </span>
                   <span className="text-slate-300 font-mono font-medium block"
                         title={`Live filters applied; backtest run ${ISSUED_RUN_ID}, Oct 2022 - Oct 2026; delisted stocks are missing, which flatters results`}>
@@ -497,7 +518,7 @@ export default function StockCard({
               {(expRDisplay || exitMixDisplay) && (
                 <div className="col-span-2">
                   <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
-                    What actually happened (backtest)
+                    What happened to all setups (backtest)
                   </span>
                   {expRDisplay && (
                     <span className={`font-mono font-medium block ${Number(expR) < 0 ? 'text-rose-300' : 'text-slate-300'}`}
@@ -516,7 +537,7 @@ export default function StockCard({
                 </span>
                 {guide ? (
                   <span className="font-mono text-slate-300 block"
-                        title="Guidance only, from your browser-saved account size and risk per idea. Not advice; you decide whether and how much to trade.">
+                        title="Guidance only, from your browser-saved account size and risk per idea, using the scan entry and stop (not a live quote). Not advice; you decide whether and how much to trade.">
                     {guide.shares} shares ≈ ${guide.positionUsd.toFixed(0)} · loses ≈ ${guide.riskUsd.toFixed(0)} at the stop
                     {guide.cappedByAccount ? ' (capped at account size)' : ''}
                   </span>

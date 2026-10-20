@@ -191,6 +191,29 @@ def build_trade_plan(
     return calc_res
 
 
+CROSS_SECTIONAL_TOP_FRACTION = 0.15
+CROSS_SECTIONAL_LOOKBACK = 63
+
+
+def cross_sectional_screen(closes: pd.DataFrame, top_fraction: float = CROSS_SECTIONAL_TOP_FRACTION,
+                           lookback: int = CROSS_SECTIONAL_LOOKBACK) -> Dict[pd.Timestamp, list]:
+    """
+    Cross-Sectional Momentum eligibility, one definition for the live scan and the backtest: on each
+    session, the top `top_fraction` of stocks by the return over the last `lookback` sessions (close /
+    close `lookback` rows earlier on the session index), ranked among every stock with both closes;
+    ties broken by ticker. Returns {session: [(ticker, return %), ...]} in rank order.
+    """
+    ret = closes / closes.shift(lookback) - 1.0
+    out: Dict[pd.Timestamp, list] = {}
+    for d, row in ret.iterrows():
+        valid = row[np.isfinite(row.to_numpy(dtype=float))]
+        if valid.empty:
+            continue
+        ordered = sorted(valid.items(), key=lambda kv: (-kv[1], kv[0]))
+        out[d] = [(t, float(r) * 100.0) for t, r in ordered[: max(1, int(len(ordered) * top_fraction))]]
+    return out
+
+
 def holding_days_for(strategy: Optional[str]) -> Optional[int]:
     """Strategy holding period (trading days) after which an open idea expires."""
     from src.quant_config import STRATEGY_TARGET_CONFIG

@@ -69,6 +69,7 @@ TEST_SUITES = [
     "tests/test_history_idempotent.py",
     "tests/test_scoring_failure_audit.py",
     "tests/test_parity_replay.py",
+    "tests/test_cross_sectional_screen.py",
 ]
 
 

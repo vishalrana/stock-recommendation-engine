@@ -274,41 +274,34 @@ def load_etf_universe() -> list[str]:
 
 
 def run_cross_sectional_screen(universe: list[str], cache_manager, as_of_date: Optional[str] = None) -> list[tuple]:
-    """Pre-screen: calculate 3-month returns for all tickers in universe, keep top 15%."""
-    returns = []
-    
-    # Calculate returns over last 120 days to ensure 63 trading days are covered
+    """
+    Cross-Sectional Momentum pre-screen for the scan session: the backtest's definition
+    (src/pipeline_steps.cross_sectional_screen) on the cached closes of the last 120 days, so both
+    rank the same stocks the same way. Returns [(ticker, 63-session return %), ...].
+    """
+    from src.pipeline_steps import cross_sectional_screen
     ref_dt = datetime.fromisoformat(as_of_date).date() if as_of_date else datetime.now().date()
-    end_date_str = ref_dt.isoformat()
     start_date_str = (ref_dt - timedelta(days=120)).isoformat()
-
+    closes = {}
     for ticker in universe:
         try:
-            raw = cache_manager.get_ticker_history(ticker, start_date_str, end_date_str)
-            if raw is None or len(raw) < 64:
-                continue
-            close_col = "CLOSE" if "CLOSE" in raw.columns else "Close"
-            price = raw[close_col].iloc[-1]
-            price_63d = raw[close_col].iloc[-64]  # 63 trading-day intervals back
-            if price is not None and price_63d is not None and float(price_63d) > 0:
-                ret = (float(price) / float(price_63d) - 1.0) * 100.0
-                if ret is not None and not np.isnan(ret) and np.isfinite(ret):
-                    returns.append((ticker, float(ret)))
+            raw = cache_manager.get_ticker_history(ticker, start_date_str, ref_dt.isoformat())
+            if raw is not None and len(raw):
+                closes[ticker] = raw["CLOSE" if "CLOSE" in raw.columns else "Close"]
         except Exception:
             continue
-    
-    # Deterministic sort: descending by return, ties broken alphabetically by ticker (Section 5)
-    returns.sort(key=lambda x: (-x[1], x[0]))
-    if not returns:
-        logger.info("[CROSS-SECTIONAL] No valid returns computed; returning empty candidate list.")
+    if not closes:
+        logger.info("[CROSS-SECTIONAL] No closes available; returning empty candidate list.")
         return []
-    top_15pct = max(1, int(len(returns) * 0.15))
-    logger.info(
-        "[CROSS-SECTIONAL] Evaluated %d tickers with valid 63D data. Top 15%% threshold selects %d candidates.",
-        len(returns),
-        top_15pct,
-    )
-    return returns[:top_15pct]
+    frame = pd.DataFrame(closes).sort_index()
+    frame.index = pd.DatetimeIndex(frame.index).tz_localize(None).normalize()
+    frame = frame.loc[:pd.Timestamp(ref_dt)]
+    if frame.empty:
+        return []
+    top = cross_sectional_screen(frame).get(frame.index[-1], [])
+    logger.info("[CROSS-SECTIONAL] %s: top 15%% of 63-session returns selects %d candidates.",
+                frame.index[-1].date(), len(top))
+    return top
 
 
 def load_metrics(ticker: str, metrics_map: dict, company_names: dict, industries: dict) -> dict:

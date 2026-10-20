@@ -115,6 +115,7 @@ jobs:
             outputs/production_backtest_summary_production_universe.json
             outputs/production_backtest_trades_production_universe.csv
             outputs/production_backtest_setup_trades_production_universe.csv
+            outputs/production_backtest_funnel_by_date_production_universe.csv
             outputs/strategy_performance_production_universe.json
             outputs/production_backtest_summary_production_universe_smoke.json
             outputs/production_backtest_variants.json

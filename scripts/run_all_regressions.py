@@ -73,6 +73,7 @@ TEST_SUITES = [
     "tests/test_nightly_second_attempt.py",
     "tests/test_price_refetch.py",
     "tests/test_split_rebase.py",
+    "tests/test_verify_head.py",
 ]
 
 

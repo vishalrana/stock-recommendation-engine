@@ -6,6 +6,7 @@ import { Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { getStrategyExplanation } from '../lib/strategy-explanations';
 import { RARELY_REACHED_PCT } from '../lib/backtest-verdict';
 import { sizeIdea } from '../lib/sizing';
+import { IDEAS_SHADOW } from '../lib/ideas-mode';
 import { MIN_STRATEGY_SAMPLE, ISSUED_RUN_ID, insufficientSample, issuedStatsLine } from '../lib/strategy-sample';
 
 interface StockCardProps {
@@ -316,7 +317,9 @@ export default function StockCard({
             {recommendation.tier_label && (
               <span
                 className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                  recommendation.tier_label === 'Strong Buy'
+                  IDEAS_SHADOW
+                    ? 'bg-slate-800/60 text-slate-300 border-slate-700/80'
+                    : recommendation.tier_label === 'Strong Buy'
                     ? 'bg-purple-950/60 text-purple-300 border-purple-800/80'
                     : 'bg-emerald-950/60 text-emerald-300 border-emerald-800/80'
                 }`}
@@ -330,9 +333,11 @@ export default function StockCard({
               {company}
             </p>
           )}
-          <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400 mt-0.5">
-            Shadow · Not validated - do not trade
-          </p>
+          {IDEAS_SHADOW && (
+            <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400 mt-0.5">
+              Shadow · Not validated - do not trade
+            </p>
+          )}
         </div>
 
         <div className="text-right flex-shrink-0 flex flex-col items-end">
@@ -535,6 +540,7 @@ export default function StockCard({
                   )}
                 </div>
               )}
+              {!IDEAS_SHADOW && (
               <div className="col-span-2">
                 <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">
                   Sizing guidance
@@ -549,6 +555,7 @@ export default function StockCard({
                   <span className="text-slate-500 block">Set an account size above the ideas to see a guide.</span>
                 )}
               </div>
+              )}
             </div>
           </div>
         </div>

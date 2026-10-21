@@ -17,6 +17,7 @@ import {
 import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldCheck, TrendingUp } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { BACKTEST_VERDICT } from '../lib/backtest-verdict';
+import { IDEAS_SHADOW } from '../lib/ideas-mode';
 import { useSizing } from '../lib/sizing';
 
 interface StockIdeasAppProps {
@@ -536,6 +537,7 @@ export default function StockIdeasApp({
               }`}>
                 {BACKTEST_VERDICT.line}
               </div>
+              {!IDEAS_SHADOW && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                 <span className="font-bold uppercase tracking-wider text-[10px]">Sizing guide</span>
                 <label className="flex items-center gap-1">
@@ -572,6 +574,7 @@ export default function StockIdeasApp({
                 </label>
                 <span className="text-slate-500">Saved in this browser only. Guidance, not advice.</span>
               </div>
+              )}
             </div>
 
             {activeIdeas.length === 0 ? (
@@ -597,7 +600,7 @@ export default function StockIdeasApp({
                       isExpanded={expandedId === cardId}
                       onToggleExpand={() => toggleExpand(cardId)}
                       onRemove={(rec) => setRemovingIdea(rec)}
-                      sizing={{ account: sizingSettings.account, riskPct: sizingSettings.riskPct }}
+                      sizing={IDEAS_SHADOW ? undefined : { account: sizingSettings.account, riskPct: sizingSettings.riskPct }}
                     />
                   );
                 })}

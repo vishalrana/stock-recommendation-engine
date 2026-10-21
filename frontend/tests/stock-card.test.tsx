@@ -68,3 +68,13 @@ test('card: next earnings is the gate date, labelled estimated, warning by the g
 test('card: Ideas are SHADOW, labelled not validated', () => {
   assert.ok(render().includes('Shadow · Not validated - do not trade'));
 });
+
+test('card: while Ideas are SHADOW the tier badge is neutral and there is no sizing guidance', () => {
+  const html = renderToStaticMarkup(
+    <StockCard recommendation={obe} isExpanded={true} onToggleExpand={() => {}} onRemove={() => {}}
+      sizing={{ account: 10000, riskPct: 1 }} />,
+  );
+  assert.ok(/class="[^"]*text-slate-300[^"]*">Buy<\/span>/.test(html), 'neutral Buy badge');
+  assert.ok(!/text-emerald-300[^"]*">Buy</.test(html), 'no green Buy next to do not trade');
+  assert.ok(!html.includes('Sizing guidance') && !html.includes('shares ≈'));
+});

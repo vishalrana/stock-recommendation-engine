@@ -56,5 +56,41 @@ class TestParityReplay(unittest.TestCase):
         self.assertEqual(res["unexplained"], [])
 
 
+    def _main(self, live_rows, harness_rows):
+        """Exit code of parity_replay.main() for these decisions, and the step summary it wrote."""
+        import tempfile
+        from unittest import mock
+        import scripts.parity_replay as pr
+        cols = ["ticker", "strategy", "composite_score", "stage"]
+        with tempfile.TemporaryDirectory() as d:
+            csv, out, summ = (os.path.join(d, x) for x in ("h.csv", "o.json", "summary.md"))
+            pd.DataFrame(harness_rows, columns=cols).to_csv(csv, index=False)
+            with mock.patch.object(pr, "load_live", return_value=(pd.DataFrame(live_rows, columns=cols), [])),                     mock.patch("jobs.supabase_client.get_client"),                     mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summ}):
+                code = pr.main(["--date", "2026-10-20", "--harness-csv", csv, "--out", out])
+            return code, open(summ, encoding="utf-8").read()
+
+    def test_exit_code_fails_on_material_differences(self):
+        same = [("AAA", "Trend Following", 70.0, "issued"), ("BBB", "Trend Following", 60.0, "score_below_65")]
+        code, summary = self._main(same, same)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", summary)
+        # different issued sets
+        code, summary = self._main(same, [("AAA", "Trend Following", 70.0, "rr_floor_stop_cap")] + same[1:])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", summary)
+        self.assertIn("| AAA / Trend Following | issued | rr_floor_stop_cap |", summary)
+        # a 65+ candidate with a different stage, neither side issuing it
+        code, _ = self._main(same + [("CCC", "Trend Following", 66.0, "earnings_full_hold")],
+                             same + [("CCC", "Trend Following", 66.0, "rr_floor_stop_cap")])
+        self.assertEqual(code, 1)
+        code, _ = self._main(same, same + [("DDD", "Cross-Sectional Momentum", 68.9, "earnings_full_hold")])
+        self.assertEqual(code, 1)                                         # harness-only at 65+
+        # differences below 65 only: green, but still listed in the summary
+        code, summary = self._main(same, same + [("EEE", "Trend Following", 62.9, "entry_location"),
+                                                  ("BBB", "Pullback Recovery", 51.0, "entry_location")])
+        self.assertEqual(code, 0)
+        self.assertIn("EEE / Trend Following", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,9 @@ sys.path.insert(0, PROJECT_ROOT)
 SCORE_TOLERANCE = 0.05   # composite points; below this the scores are the same
 
 
+MATERIAL_SCORE = 65.0   # the Buy threshold: differences at or above it fail the replay
+
+
 def live_stage(reason: Optional[str]) -> str:
     """Stage name for a live rejection reason (None = published)."""
     r = (reason or "").strip()
@@ -52,20 +55,22 @@ def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str]) -> 
     key = ["ticker", "strategy"]
     m = live.merge(harness, on=key, how="outer", suffixes=("_live", "_bt"), indicator="side")
     diffs = []
+    num = lambda v: None if pd.isna(v) else round(float(v), 2)
     for r in m.itertuples(index=False):
         k = f"{r.ticker} / {r.strategy}"
         side = r.side
+        scores = {"score_live": num(r.composite_score_live), "score_harness": num(r.composite_score_bt)}
         if side == "left_only":
             if r.stage_live == "score_below_65":
                 continue  # both sides reject it; the harness only logs its own candidates
-            diffs.append({"candidate": k, "live": r.stage_live, "harness": None,
+            diffs.append({"candidate": k, "live": r.stage_live, "harness": None, **scores,
                           "cause": "candidate in the live scan only: the strategy scan saw different inputs (price bars, universe)"})
         elif side == "right_only":
             if r.stage_bt in ("score_below_65", "scoring"):
                 continue
             if r.stage_bt == "already_active" and r.ticker in live_open:
                 continue  # live re-evaluates open ideas without logging a row
-            diffs.append({"candidate": k, "live": None, "harness": r.stage_bt,
+            diffs.append({"candidate": k, "live": None, "harness": r.stage_bt, **scores,
                           "cause": "candidate in the harness only: the strategy scan saw different inputs (price bars, universe)"})
         else:
             if r.stage_live == r.stage_bt:
@@ -75,12 +80,29 @@ def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str]) -> 
                 cause = f"score differs by {gap:+.2f} (live - harness): price data or strategy evidence differ"
             else:
                 cause = f"same score, different stage: a rule read different inputs ({r.stage_live} live vs {r.stage_bt} harness)"
-            diffs.append({"candidate": k, "live": r.stage_live, "harness": r.stage_bt, "cause": cause})
+            diffs.append({"candidate": k, "live": r.stage_live, "harness": r.stage_bt, **scores, "cause": cause})
     issued_live = sorted(f"{t} / {s}" for t, s in live.loc[live.stage == "issued", key].itertuples(index=False))
     issued_bt = sorted(f"{t} / {s}" for t, s in harness.loc[harness.stage == "issued", key].itertuples(index=False))
+    # A difference fails the replay when the candidate scores at least 65 on either side: there the
+    # stage decides whether an idea is issued. Below 65 both sides reject it before any rule.
+    material = [d for d in diffs if max(d["score_live"] or 0, d["score_harness"] or 0) >= MATERIAL_SCORE]
     return {"issued_live": issued_live, "issued_harness": issued_bt, "issued_sets_equal": issued_live == issued_bt,
             "candidates_live": int(len(live)), "candidates_harness": int(len(harness)), "differences": diffs,
-            "unexplained": [d for d in diffs if not d.get("cause")]}
+            "material_differences": material, "unexplained": [d for d in diffs if not d.get("cause")],
+            "passed": issued_live == issued_bt and not material}
+
+
+def summary_markdown(res: Dict) -> str:
+    """The summary line and the difference table, for $GITHUB_STEP_SUMMARY."""
+    lines = [f"### Parity replay {res.get('date', '')}: {'PASSED' if res['passed'] else 'FAILED'}", "",
+             f"Issued live {res['issued_live']} | harness {res['issued_harness']} | equal {res['issued_sets_equal']}. "
+             f"Candidates live {res['candidates_live']} | harness {res['candidates_harness']} | differences "
+             f"{len(res['differences'])} ({len(res['material_differences'])} at {MATERIAL_SCORE:g}+).", ""]
+    if res["differences"]:
+        lines += ["| Candidate | Live | Harness | Score live | Score harness | Cause |", "|---|---|---|---|---|---|"]
+        lines += [f"| {d['candidate']} | {d['live']} | {d['harness']} | {d['score_live']} | {d['score_harness']} | {d['cause']} |"
+                  for d in res["differences"]]
+    return "\n".join(lines) + "\n"
 
 
 def load_live(client, scan_date: str) -> Tuple[pd.DataFrame, List[str]]:
@@ -128,7 +150,10 @@ def main(argv=None) -> int:
     print(f"Candidates live {res['candidates_live']} | harness {res['candidates_harness']} | differences {len(res['differences'])}")
     for d in res["differences"]:
         print(f"  {d['candidate']:40s} live {str(d['live']):20s} harness {str(d['harness']):20s} {d['cause']}")
-    return 0 if res["issued_sets_equal"] or not res["unexplained"] else 1
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write(summary_markdown(res))
+    return 0 if res["passed"] else 1
 
 
 if __name__ == "__main__":

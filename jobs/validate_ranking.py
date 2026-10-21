@@ -40,8 +40,8 @@ def evaluate_signal(row: dict) -> dict | None:
     if not target_1:
         return None
 
-    # Fetch daily OHLCV from scan_date + 1 forward
-    start = scan_date + timedelta(days=1)
+    # Fetch daily OHLCV from the scan date (its close is the basis check) forward
+    start = scan_date
     end = get_market_date()
 
     try:
@@ -57,7 +57,16 @@ def evaluate_signal(row: dict) -> dict | None:
     except Exception:
         return None
 
-    from src.outcome.outcome_calculator import evaluate_signal_outcome, SAME_DAY_AMBIGUITY_POLICY
+    from src.outcome.outcome_calculator import evaluate_signal_outcome, rebase_levels, SAME_DAY_AMBIGUITY_POLICY
+    # Stored levels are in scan-time prices; a split or dividend since then re-adjusted the download
+    dates = pd.DatetimeIndex(df.index).date
+    basis = df[dates == scan_date]
+    if not basis.empty:
+        (entry_price, stop_loss, target_1, target_2, target_3), _ = rebase_levels(
+            (entry_price, stop_loss, target_1, target_2, target_3), row['entry_price'], basis['Close'].iloc[-1])
+    df = df[dates > scan_date]
+    if df.empty:
+        return None
 
     res = evaluate_signal_outcome(
         df=df,

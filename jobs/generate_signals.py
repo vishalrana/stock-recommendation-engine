@@ -801,7 +801,7 @@ def reconcile_recommendation_lifecycle(
     try:
         from src.pipeline_steps import holding_days_for
         from jobs.supabase_client import get_bars_after, update_signals_price, update_signals_status, update_history_outcome
-        from src.outcome.outcome_calculator import evaluate_signal_outcome
+        from src.outcome.outcome_calculator import evaluate_signal_outcome, rebase_levels
 
         res = supabase.table("signals").select("id, ticker, status, stop_loss, entry_price, price, target_1, target_2, target_3, strategy, scan_date").in_("status", ["open", "pending"]).execute()
         active_signals = res.data or []
@@ -830,10 +830,14 @@ def reconcile_recommendation_lifecycle(
                 logger.info(f"[LIFECYCLE SEPARATION] {ticker}: created on current scan date {scan_date}. Trade activates next trading day (D+1). Skipping stop/target evaluation.")
                 continue
 
-            bars = get_bars_after(ticker, scan_date, eff_current_date)
-            if bars is None:
+            # From the scan date itself: its cached close tells whether the bars were re-adjusted
+            scan_day = datetime.fromisoformat(str(scan_date)[:10]).date()
+            frame = get_bars_after(ticker, (scan_day - timedelta(days=1)).isoformat(), eff_current_date)
+            if frame is None:
                 logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: Unable to retrieve price history. Skipping lifecycle transition.")
                 continue
+            basis = frame[frame.index.date == scan_day]
+            bars = frame[frame.index.date > scan_day]
             if bars.empty:
                 logger.info(f"[LIFECYCLE SEPARATION] {ticker}: no bar after scan date {scan_date} yet. Awaiting D+1 fill.")
                 continue
@@ -857,6 +861,11 @@ def reconcile_recommendation_lifecycle(
             if not target_1:
                 # Legacy record without targets: only the stop or the holding period can close it.
                 target_1, target_2, target_3 = float("inf"), None, None
+            if not basis.empty:   # a split or dividend re-adjusted the bars: put the levels on their basis
+                (stop_loss, target_1, target_2, target_3), ratio = rebase_levels(
+                    (stop_loss, target_1, target_2, target_3), existing.get("entry_price"), basis["CLOSE"].iloc[-1])
+                if ratio != 1.0:
+                    logger.info(f"[LIFECYCLE REBASE] {ticker}: cached history re-adjusted since {scan_date} (x{ratio:.4f}); stop and targets rescaled for the replay.")
 
             hold_days = holding_days_for(existing.get("strategy"))
             if hold_days is None:

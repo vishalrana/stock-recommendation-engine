@@ -332,6 +332,26 @@ def calculate_static_scale_out_return(
     return float(round(tracker.realized_return_pct, 4))
 
 
+REBASE_TOLERANCE = 0.001   # stored and cached scan-date closes this close are the same basis
+
+
+def rebase_levels(levels, stored_close, cached_close, tol: float = REBASE_TOLERANCE):
+    """
+    Trade levels are stored in scan-time prices, but cached or downloaded bars may have been
+    re-adjusted since (a split, a dividend). Returns (levels on the bars' basis, ratio): every level
+    times cached_close / stored_close when the two scan-date closes differ by more than `tol`,
+    else the levels unchanged and ratio 1. None levels stay None; unusable closes give ratio 1.
+    """
+    try:
+        s, c = float(stored_close), float(cached_close)
+    except (TypeError, ValueError):
+        return list(levels), 1.0
+    if not (math.isfinite(s) and math.isfinite(c) and s > 0 and c > 0) or abs(c / s - 1.0) <= tol:
+        return list(levels), 1.0
+    r = c / s
+    return [None if x is None else x * r for x in levels], r
+
+
 def evaluate_signal_outcome(
     df: pd.DataFrame,
     entry_price: float,

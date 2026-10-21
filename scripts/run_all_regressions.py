@@ -71,6 +71,7 @@ TEST_SUITES = [
     "tests/test_parity_replay.py",
     "tests/test_cross_sectional_screen.py",
     "tests/test_nightly_second_attempt.py",
+    "tests/test_split_rebase.py",
 ]
 
 

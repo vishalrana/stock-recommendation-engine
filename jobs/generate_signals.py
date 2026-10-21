@@ -811,11 +811,16 @@ def reconcile_recommendation_lifecycle(
             return
 
         eff_current_date = str(current_scan_date)[:10] if current_scan_date else None
+        from src.data.cache_manager import get_cache_manager
+        refetch_pending = get_cache_manager().pending_refetch()
 
         logger.info("Reconciling recommendation lifecycle for %d active recommendations...", len(active_signals))
         for existing in active_signals:
             ticker = existing["ticker"].upper()
             if target_tickers is not None and ticker not in target_tickers:
+                continue
+            if ticker in refetch_pending:
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: cached history awaits a full refetch after a dividend or split. Skipping lifecycle transition.")
                 continue
 
             signal_id = existing.get("id")
@@ -1134,9 +1139,17 @@ def run_scan(
         else:
             start_date_dt = end_date_dt - timedelta(days=500)
             logger.info(f"INCREMENTAL: No cache found. Full download from {start_date_dt} to {end_date_dt}")
+        full_start = (end_date_dt - timedelta(days=500)).isoformat()
         if not dry_run and start_date_dt <= end_date_dt:
-            cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+            if last_cached:   # new bars, plus a full refetch of tickers with a new dividend or split
+                cache_manager.refresh_with_actions(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat(),
+                                                   full_start=full_start, since=last_cached)
+            else:
+                cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
             logger.info(f"Incremental refresh completed in {time.time() - t_download_start:.1f}s")
+        elif not dry_run and cache_manager.pending_refetch():
+            cache_manager.refresh_with_actions([], end_date_dt.isoformat(), end_date_dt.isoformat(),
+                                               full_start=full_start, since=last_cached)
         else:
             logger.info("INCREMENTAL: Skipping network download (dry_run=%s, start_date=%s, end_date=%s).", dry_run, start_date_dt, end_date_dt)
 
@@ -1152,10 +1165,18 @@ def run_scan(
             # market date (the per-ticker freshness gate below would otherwise skip them).
             start_date_dt = last_cached - timedelta(days=INCREMENTAL_OVERLAP_DAYS)
             logger.info(f"LOCAL: Cache behind (last: {last_cached}). Downloading {start_date_dt} to {end_date_dt}...")
-            cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())
+            cache_manager.refresh_with_actions(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat(),
+                                               full_start=(end_date_dt - timedelta(days=500)).isoformat(), since=last_cached)
             logger.info(f"Local refresh completed in {time.time() - t_download_start:.1f}s")
         else:
             logger.info("LOCAL: Using existing cache (last: %s). Skipping downloads.", last_cached)
+
+    # Tickers whose history mixes two adjustments (a dividend or split whose full refetch failed):
+    # no new idea and no lifecycle step on them until a refetch succeeds (retried every run).
+    refetch_pending = cache_manager.pending_refetch()
+    if refetch_pending:
+        logger.warning("[CACHE SYNC] %d tickers await a full refetch after a dividend or split; excluded from new "
+                       "ideas and lifecycle tonight: %s", len(refetch_pending), ", ".join(sorted(refetch_pending)[:30]))
 
     daily_files = glob.glob(os.path.join(by_date_dir, "*.parquet"))
     total_files = len(daily_files)
@@ -1313,7 +1334,7 @@ def run_scan(
         t_strat_start = time.time()
         for idx, ticker in enumerate(current_universe, 1):
             ticker = ticker.upper()
-            if ticker in BLACKLIST:
+            if ticker in BLACKLIST or ticker in refetch_pending:
                 continue
 
             try:

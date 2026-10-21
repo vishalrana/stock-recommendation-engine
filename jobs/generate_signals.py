@@ -625,18 +625,26 @@ def _ticker_earnings_events(ticker: str, recent_only: bool = False):
     return _EVENTS_CACHE[ticker]
 
 
+SEC_MAX_FETCH_FAILED_PCT = 5.0   # above this share of failed SEC reads the run is degraded_sec (rescanned)
+
+
 def _sec_run_status() -> Tuple[Optional[str], bool]:
     """(note for scan_log.error_message, degraded) for this run's SEC earnings reads. Degraded when
-    SEC returned nothing usable: no SEC_USER_AGENT, or every ticker read failed."""
+    there is no SEC_USER_AGENT, every read failed, or more than SEC_MAX_FETCH_FAILED_PCT of the reads
+    the run needed failed to fetch (a transient outage the 04:00 retry can repair). A missing CIK
+    mapping is structural, not an outage, so it does not count toward the share."""
     usable = sum(1 for t, v in _EVENTS_CACHE.items() if v is not None)
     failed = len(_SEC_UNAVAILABLE)
+    fetch_failed = sum(1 for c in _SEC_UNAVAILABLE.values() if c == "fetch_failed")
+    fetch_failed_pct = 100.0 * fetch_failed / (usable + fetch_failed) if usable + fetch_failed else 0.0
     rejected = sum(_SEC_REJECTIONS.values())
-    degraded = (not _sec_filings().available) or (failed > 0 and usable == 0)
+    degraded = ((not _sec_filings().available) or (failed > 0 and usable == 0)
+                or fetch_failed_pct > SEC_MAX_FETCH_FAILED_PCT)
     if not (rejected or degraded):
         return None, False
     causes = ", ".join(f"{k} {v}" for k, v in sorted(_SEC_REJECTIONS.items())) or "none"
     return (f"SEC earnings unavailable: {rejected} new ideas rejected ({causes}); "
-            f"{usable} of {usable + failed} SEC reads usable"), degraded
+            f"{usable} of {usable + failed} SEC reads usable; fetch failures {fetch_failed_pct:.1f}%"), degraded
 
 
 def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFrame], scan_date,
@@ -801,7 +809,7 @@ def reconcile_recommendation_lifecycle(
     try:
         from src.pipeline_steps import holding_days_for
         from jobs.supabase_client import get_bars_after, update_signals_price, update_signals_status, update_history_outcome
-        from src.outcome.outcome_calculator import evaluate_signal_outcome
+        from src.outcome.outcome_calculator import evaluate_signal_outcome, rebase_levels
 
         res = supabase.table("signals").select("id, ticker, status, stop_loss, entry_price, price, target_1, target_2, target_3, strategy, scan_date").in_("status", ["open", "pending"]).execute()
         active_signals = res.data or []
@@ -835,10 +843,14 @@ def reconcile_recommendation_lifecycle(
                 logger.info(f"[LIFECYCLE SEPARATION] {ticker}: created on current scan date {scan_date}. Trade activates next trading day (D+1). Skipping stop/target evaluation.")
                 continue
 
-            bars = get_bars_after(ticker, scan_date, eff_current_date)
-            if bars is None:
+            # From the scan date itself: its cached close tells whether the bars were re-adjusted
+            scan_day = datetime.fromisoformat(str(scan_date)[:10]).date()
+            frame = get_bars_after(ticker, (scan_day - timedelta(days=1)).isoformat(), eff_current_date)
+            if frame is None:
                 logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: Unable to retrieve price history. Skipping lifecycle transition.")
                 continue
+            basis = frame[frame.index.date == scan_day]
+            bars = frame[frame.index.date > scan_day]
             if bars.empty:
                 logger.info(f"[LIFECYCLE SEPARATION] {ticker}: no bar after scan date {scan_date} yet. Awaiting D+1 fill.")
                 continue
@@ -862,6 +874,11 @@ def reconcile_recommendation_lifecycle(
             if not target_1:
                 # Legacy record without targets: only the stop or the holding period can close it.
                 target_1, target_2, target_3 = float("inf"), None, None
+            if not basis.empty:   # a split or dividend re-adjusted the bars: put the levels on their basis
+                (stop_loss, target_1, target_2, target_3), ratio = rebase_levels(
+                    (stop_loss, target_1, target_2, target_3), existing.get("entry_price"), basis["CLOSE"].iloc[-1])
+                if ratio != 1.0:
+                    logger.info(f"[LIFECYCLE REBASE] {ticker}: cached history re-adjusted since {scan_date} (x{ratio:.4f}); stop and targets rescaled for the replay.")
 
             hold_days = holding_days_for(existing.get("strategy"))
             if hold_days is None:

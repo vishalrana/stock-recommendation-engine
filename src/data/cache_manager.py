@@ -9,10 +9,11 @@ New: data/cache/by_date/{YYYY-MM-DD}.parquet (1 file per day)
 
 import os
 import glob
+import json
 import logging
 import time
 import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set, Tuple
 import pandas as pd
 from pandas.tseries.offsets import BDay
 import yfinance as yf
@@ -26,6 +27,8 @@ DEFAULT_BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 # short pause between them instead of a fixed 1 s sleep. Rate-limited chunks still back off.
 REFRESH_BATCH_SIZE = int(os.environ.get("REFRESH_BATCH_SIZE", "200"))
 REFRESH_CHUNK_PAUSE_S = float(os.environ.get("REFRESH_CHUNK_PAUSE_S", "0.25"))
+REFETCH_PENDING_FILE = ".refetch_pending.json"   # tickers whose full refetch after a corporate action failed
+REFETCH_MIN_COVERAGE = 0.98                      # a refetched history must keep >= 98% of the cached bars
 
 class CacheManager:
     """Manages date-partitioned price data cache with batch downloads and in-memory preloading."""
@@ -150,7 +153,8 @@ class CacheManager:
                 except Exception:
                     pass
 
-    def download_batch_with_retry(self, tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
+    def download_batch_with_retry(self, tickers: List[str], start_date: str, end_date: str,
+                                  actions: bool = False) -> pd.DataFrame:
         """
         Download OHLCV data for multiple tickers in batch with retry/exponential backoff.
         Falls back to smaller batches if a 429 rate limit is encountered.
@@ -170,6 +174,7 @@ class CacheManager:
                         progress=False,
                         group_by='ticker',
                         auto_adjust=True,
+                        actions=actions,
                         timeout=30
                     )
                     if not df.empty:
@@ -214,6 +219,17 @@ class CacheManager:
             logger.error(f"Failed to merge batch downloads: {e}")
             return pd.DataFrame()
 
+    @staticmethod
+    def _stack(df: pd.DataFrame) -> pd.DataFrame:
+        """yfinance group_by='ticker' frame -> rows indexed (Ticker, Date) with OPEN..VOLUME."""
+        df = df.dropna(how='all', axis=1)
+        stacked = df.stack(level=0)
+        stacked.index.names = ["Date", "Ticker"]
+        stacked = stacked.reorder_levels(["Ticker", "Date"]).sort_index()
+        stacked.columns = stacked.columns.str.upper()
+        valid_cols = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
+        return stacked[[c for c in valid_cols if c in stacked.columns]]
+
     def ingest_dataframe_to_cache(self, df: pd.DataFrame) -> int:
         """
         Transform yfinance group_by='ticker' DataFrame and save/merge to daily parquet files.
@@ -222,14 +238,7 @@ class CacheManager:
         if df is None or df.empty:
             return 0
         try:
-            df = df.dropna(how='all', axis=1)
-            stacked = df.stack(level=0)
-            stacked.index.names = ["Date", "Ticker"]
-            stacked = stacked.reorder_levels(["Ticker", "Date"]).sort_index()
-            stacked.columns = stacked.columns.str.upper()
-            
-            valid_cols = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
-            stacked = stacked[[c for c in valid_cols if c in stacked.columns]]
+            stacked = self._stack(df)
             if stacked.empty:
                 return 0
                 
@@ -271,6 +280,119 @@ class CacheManager:
             else:
                 logger.warning(f"[CACHE SYNC] Chunk {chunk_num}/{total_chunks} returned no data.")
             time.sleep(REFRESH_CHUNK_PAUSE_S)
+
+    # Corporate actions: keep adjusted history consistent, as the swing job does (src/swing/live.py)
+    def pending_refetch(self) -> Set[str]:
+        """Tickers whose full refetch after a dividend or split failed. Their cached history mixes two
+        adjustments, so the scan keeps them out of new ideas and lifecycle until a refetch succeeds."""
+        try:
+            with open(os.path.join(self.cache_dir, REFETCH_PENDING_FILE), encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+
+    def _set_pending(self, tickers: Set[str]) -> None:
+        path = os.path.join(self.cache_dir, REFETCH_PENDING_FILE)
+        with open(f"{path}.tmp", "w", encoding="utf-8") as f:
+            json.dump(sorted(tickers), f)
+        os.replace(f"{path}.tmp", path)
+
+    @staticmethod
+    def tickers_with_actions(df: pd.DataFrame, since: Optional[datetime.date]) -> Set[str]:
+        """Tickers with a dividend or split dated after `since` in a yfinance actions=True download."""
+        out: Set[str] = set()
+        if df is None or df.empty or not isinstance(df.columns, pd.MultiIndex):
+            return out
+        cutoff = pd.Timestamp(since) if since else None
+        for t in df.columns.get_level_values(0).unique():
+            sub = df[t]
+            for col in ("Dividends", "Stock Splits"):
+                if col not in sub.columns:
+                    continue
+                idx = pd.DatetimeIndex(sub.index[sub[col].fillna(0) > 0])
+                if idx.tz is not None:
+                    idx = idx.tz_localize(None)
+                if len(idx) and (cutoff is None or (idx > cutoff).any()):
+                    out.add(str(t).upper())
+        return out
+
+    def replace_ticker_history(self, stacked: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
+        """
+        Replace the cached rows of the tickers in `stacked` (rows indexed (Ticker, Date)) in every
+        existing daily file. A ticker is replaced only when its new history keeps at least
+        REFETCH_MIN_COVERAGE of its cached bars; otherwise its old rows stay. Returns (replaced, kept).
+        """
+        if stacked is None or stacked.empty:
+            return set(), set()
+        stacked = stacked[stacked["CLOSE"].notna()]
+        tickers = set(stacked.index.get_level_values("Ticker"))
+        loaded = {}
+        old_counts = pd.Series(0, index=sorted(tickers), dtype=float)
+        for fpath in sorted(glob.glob(os.path.join(self.cache_dir, "*.parquet"))):
+            try:
+                df = pd.read_parquet(fpath, engine="pyarrow")
+            except Exception:
+                continue
+            loaded[fpath] = df
+            present = df.index.get_level_values("Ticker")
+            old_counts = old_counts.add(pd.Series(present[present.isin(tickers)]).value_counts(), fill_value=0)
+        new_counts = stacked.groupby(level="Ticker").size()
+        ok = {t for t in tickers if new_counts.get(t, 0) >= max(1, REFETCH_MIN_COVERAGE * old_counts.get(t, 0))}
+        if not ok:
+            return set(), tickers
+        new_rows = stacked[stacked.index.get_level_values("Ticker").isin(ok)]
+        by_date = {pd.Timestamp(d).strftime("%Y-%m-%d"): g for d, g in new_rows.groupby(level="Date")}
+        for fpath, df in loaded.items():          # existing days only: never create a partial day
+            add = by_date.get(os.path.basename(fpath).replace(".parquet", ""))
+            out = df[~df.index.get_level_values("Ticker").isin(ok)]
+            out = (pd.concat([out, add]) if add is not None else out).sort_index()
+            tmp = f"{fpath}.tmp.{os.getpid()}"
+            out.to_parquet(tmp, engine="pyarrow")
+            os.replace(tmp, fpath)
+        self._history_cache.clear()
+        return ok, tickers - ok
+
+    def refresh_with_actions(self, tickers: List[str], start_date: str, end_date: str, full_start: str,
+                             since: Optional[datetime.date] = None, batch_size: Optional[int] = None) -> Dict[str, object]:
+        """
+        Incremental refresh that keeps adjusted history consistent. New bars come with dividends and
+        splits; a ticker with one dated after `since` (default: the last cached session) is
+        re-downloaded from `full_start` and its cached rows replaced, because Yahoo re-adjusts every
+        earlier bar (the incremental overlap alone leaves a step, e.g. -50% for a 2:1 split). The
+        scan never waits on that: incremental bars are stored first, and a ticker whose refetch
+        fails stays in pending_refetch() and is retried next run. end_date is inclusive.
+        """
+        since = since or self.get_last_cached_date()
+        batch_size = batch_size or REFRESH_BATCH_SIZE
+        end_x = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        t0 = time.time()
+        with_actions: Set[str] = set()
+        for i in range(0, len(tickers), batch_size):
+            chunk_df = self.download_batch_with_retry(tickers[i:i + batch_size], start_date, end_x, actions=True)
+            if not chunk_df.empty:
+                with_actions |= self.tickers_with_actions(chunk_df, since)
+                self.ingest_dataframe_to_cache(chunk_df)
+            time.sleep(REFRESH_CHUNK_PAUSE_S)
+        t1 = time.time()
+        todo = sorted(with_actions | self.pending_refetch())
+        replaced: Set[str] = set()
+        for i in range(0, len(todo), batch_size):
+            chunk_df = self.download_batch_with_retry(todo[i:i + batch_size], full_start, end_x)
+            if not chunk_df.empty:
+                try:
+                    replaced |= self.replace_ticker_history(self._stack(chunk_df))[0]
+                except Exception as e:
+                    logger.warning("[CACHE SYNC] Could not replace refetched history: %s", e)
+            time.sleep(REFRESH_CHUNK_PAUSE_S)
+        pending = set(todo) - replaced
+        self._set_pending(pending)
+        stats = {"tickers": len(tickers), "with_actions": len(with_actions), "refetched": len(replaced),
+                 "pending": sorted(pending), "seconds_incremental": round(t1 - t0, 1),
+                 "seconds_refetch": round(time.time() - t1, 1)}
+        logger.info("[CACHE SYNC] Corporate actions: %d tickers with a dividend or split, %d re-downloaded in full, "
+                    "%d pending (%s); incremental %.0fs, refetch %.0fs", stats["with_actions"], stats["refetched"],
+                    len(pending), ", ".join(sorted(pending)[:20]), stats["seconds_incremental"], stats["seconds_refetch"])
+        return stats
 
     def preload_history(self, start_date: str, end_date: str) -> int:
         """

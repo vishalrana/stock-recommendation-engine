@@ -510,3 +510,46 @@ The production book (the parity configuration with the shared screen) and `allow
   | LATE | −0.95 (−2.09 to +0.11), n 642 | −0.88 (−2.45 to +1.16), n 30 |
 
   - The FULL gap comes from Mean Reversion and PEAD in late 2022 and early 2023. In LATE the others have 30 ideas and are no better.
+
+## Data handling after the forward-test start (2026-10-21; PRs #28–#39)
+
+Changes to data handling and display made after the forward test started. No rule, threshold or scoring input changed. `config/strategy_performance.json` stays at run 39384088732 and unknown earnings dates stay rejected (user decisions).
+
+- Forward-test configuration: final from scan date 2026-10-20. The 2026-10-19 scan ran the Cross-Sectional screen from before PR #20 and issued nothing, so no forward-test data is affected.
+- Fix 1, price history (PRs #28, #29, #37, #38, #39):
+  - #28 reverted the Saturday force refresh of #26 before its first run. It wiped the cache inside the job that scans Friday's session, nothing checked completeness, and a partial cache would have stayed all week.
+  - #29, design (a): the nightly's incremental download brings dividends and splits. A ticker with one after the last cached session is re-downloaded in full and its rows replaced; #39 makes that the whole cached span. A replacement must keep at least 98% of the cached bars. A failed refetch is retried every run, and the ticker gets no new idea and no lifecycle step until then. #37 does the replacement in one pass over the daily files.
+  - Why (a) over (b):
+    - history stays on one basis every night; with (b) it would be mixed for up to a week, and the incremental overlap leaves a step at every split;
+    - the scan never depends on a full download;
+    - it is the swing job's tested rule.
+  - Timing on GitHub (`price_refresh_timing.yml`, no Supabase):
+    - run 39633503248, the full universe (5,606 tickers), counting a heavy week of actions (since 2026-10-14): 441 s in total; the incremental download took 426 s, and refetching and replacing 199 tickers took 15 s;
+    - 3 tickers stayed pending: JAN and PWRL are 2026 listings and OBAI did a 1-for-20 reverse split on 2026-10-19, so Yahoo's history is shorter than the cached rows;
+    - a normal night is the nightly's download (324 s on 2026-10-21, run 39552049144) plus a few seconds of refetch;
+    - the first attempt (run 39631673097) replaced none of 202 tickers, because the live cache keeps days older than the 500-day refetch start; that is the bug #39 fixed.
+  - One-off rebuild (run 39634873548), outside any scan: the live cache had been built incrementally for weeks, so older dividends were still mixed in. A full adjusted download (5,606 tickers, 500 days, 505.5 s) went into a fresh directory. It passed every check: 99.98% of the tickers the live cache had on 2026-10-20 present, 100% of tickers with a year of history keep it, last bar 2026-10-20. It is saved as the newest nightly cache (`Linux-data-cache-v2-39634873548`), and 24 tickers that were short in the live cache now have a full year. On the rebuilt cache a normal-night refresh took 456 s and found nothing to refetch (run 39636361598).
+- Fix 2, open ideas across splits (PR #30): before each replay, the stored stop and targets are rescaled by the ratio of the bars' scan-date close to the stored scan close when the two differ by more than 0.1% (`rebase_levels`, in the lifecycle and `validate_ranking`). Stored levels never change.
+- Display and operations:
+  - per-strategy card figures need at least 100 ideas and 12 signal months (#31);
+  - `degraded_sec` is also set when more than 5% of the SEC reads failed to fetch (#32);
+  - the latest scan's status and note show next to the scan date (#33);
+  - SHADOW cards have no sizing guide and a neutral tier badge (#34);
+  - the nightly HEAD check allows trials-registry commits (#35);
+  - the parity replay runs every Saturday for a successful Friday nightly (#36).
+
+### Parity replay of 2026-10-20 (GitHub run 39618808815; the first session on the shared screen)
+
+- Issued sets are equal: none on either side. Candidates: live 347, harness 356, 346 in common. The live screen diagnostic on the live cache as the nightly used it (run 39631673097) ranked 5,482 stocks, top 822.
+
+| Candidate | Live | Harness | Cause |
+|---|---|---|---|
+| WSM, ABBV, OSCR, RGA, TREX, FFIV / Cross-Sectional | — | candidates (TREX 68.9 earnings full hold; the others below 65) | live screen ranks 824, 830, 831, 832, 835 and 837, just below the live cutoff of 822. On the rebuilt (re-adjusted) cache the same session ranks them 793, 787, 817, 818, 821 and 824, with cutoff 823 (run 39636361598). So the cause is the live cache's mixed dividend adjustment; 11 more stocks are ranked after the rebuild, a minor part. |
+| IGR / Cross-Sectional | — | 33.4 | Yahoo did not adjust IGR's history for its 1-for-3 reverse split on 2026-09-08: a false +147% 63-session return (live rank 50) on both sides; the longer harness history gives a candidate below 65 |
+| MTN, APOG / Trend Following; DGX / Pullback | — | 65.3 entry gate; 62.9; 52.6 | ex-dividend 10-08, 10-20 and 10-06: the live cache's older bars are on an earlier adjustment (the 7-day overlap re-adjusts only recent bars) |
+| CBC / Pullback | 51.6 | — | ex-dividend 2026-08-21: older bars on an earlier adjustment |
+| Common, scores differ (DCOM 73.0 vs 74.5, both stop cap; ABBV TF 64.5 vs 63.9; DEO, DRI, SAIC, A) | | | ex-dividend 10-16, 10-15, 10-16, 10-09, 10-09 and 10-06: the same cause |
+
+- No difference changes an outcome. The only ones at 65 or more are TREX, rejected by the earnings rule, and MTN, blocked by the entry gate.
+- Every price-history cause is what the refetch (#29, #39) prevents from now on. The validated rebuild replaces what the live cache had accumulated.
+- IGR is a provider error that no refetch can repair.

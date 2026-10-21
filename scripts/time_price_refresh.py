@@ -43,6 +43,7 @@ def on_session(cache_dir: str, session: date) -> set:
 def screen(cm, tickers, session: date, wanted) -> dict:
     from src.pipeline_steps import CROSS_SECTIONAL_LOOKBACK, CROSS_SECTIONAL_TOP_FRACTION
     start = (session - timedelta(days=120)).isoformat()
+    cm.preload_history(start, session.isoformat())   # as the nightly does; per-ticker disk reads take hours
     closes = {}
     for t in tickers:
         h = cm.get_ticker_history(t, start, session.isoformat())

@@ -625,18 +625,26 @@ def _ticker_earnings_events(ticker: str, recent_only: bool = False):
     return _EVENTS_CACHE[ticker]
 
 
+SEC_MAX_FETCH_FAILED_PCT = 5.0   # above this share of failed SEC reads the run is degraded_sec (rescanned)
+
+
 def _sec_run_status() -> Tuple[Optional[str], bool]:
     """(note for scan_log.error_message, degraded) for this run's SEC earnings reads. Degraded when
-    SEC returned nothing usable: no SEC_USER_AGENT, or every ticker read failed."""
+    there is no SEC_USER_AGENT, every read failed, or more than SEC_MAX_FETCH_FAILED_PCT of the reads
+    the run needed failed to fetch (a transient outage the 04:00 retry can repair). A missing CIK
+    mapping is structural, not an outage, so it does not count toward the share."""
     usable = sum(1 for t, v in _EVENTS_CACHE.items() if v is not None)
     failed = len(_SEC_UNAVAILABLE)
+    fetch_failed = sum(1 for c in _SEC_UNAVAILABLE.values() if c == "fetch_failed")
+    fetch_failed_pct = 100.0 * fetch_failed / (usable + fetch_failed) if usable + fetch_failed else 0.0
     rejected = sum(_SEC_REJECTIONS.values())
-    degraded = (not _sec_filings().available) or (failed > 0 and usable == 0)
+    degraded = ((not _sec_filings().available) or (failed > 0 and usable == 0)
+                or fetch_failed_pct > SEC_MAX_FETCH_FAILED_PCT)
     if not (rejected or degraded):
         return None, False
     causes = ", ".join(f"{k} {v}" for k, v in sorted(_SEC_REJECTIONS.items())) or "none"
     return (f"SEC earnings unavailable: {rejected} new ideas rejected ({causes}); "
-            f"{usable} of {usable + failed} SEC reads usable"), degraded
+            f"{usable} of {usable + failed} SEC reads usable; fetch failures {fetch_failed_pct:.1f}%"), degraded
 
 
 def _trade_hygiene_rejection(sig: Dict[str, Any], ticker_df: Optional[pd.DataFrame], scan_date,

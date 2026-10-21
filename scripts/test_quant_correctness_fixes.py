@@ -878,6 +878,18 @@ class TestAdoptStrategyEvidence(unittest.TestCase):
                 self.assertEqual(adopt.main(), 1)
             self.assertFalse(os.path.exists(out))
 
+    def test_issued_stats_count_signal_months(self):
+        import tempfile
+        import scripts.adopt_strategy_evidence as adopt
+        with tempfile.TemporaryDirectory() as tmp:
+            pd.DataFrame({"strategy": ["Mean Reversion"] * 3 + ["Trend Following"],
+                          "signal_date": ["2022-10-03", "2022-10-20", "2022-11-01", "2023-01-05"],
+                          "net_return_pct": [1.0, -1.0, 2.0, 0.5], "beta_adjusted_pct": [0.5, -0.5, 1.0, 0.2]}
+                         ).to_csv(os.path.join(tmp, adopt.ARTIFACT_TRADES), index=False)
+            st = adopt.issued_by_strategy(tmp)
+        self.assertEqual((st["Mean Reversion"]["n"], st["Mean Reversion"]["months"]), (3, 2))
+        self.assertEqual(st["Trend Following"]["months"], 1)
+
     def test_cache_start_run_never_writes_config(self):
         import scripts.validate_backtest_pipeline as harness
         self.assertFalse(hasattr(harness, "EVIDENCE_OUT"))

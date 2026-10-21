@@ -3,6 +3,7 @@
   "strategies": {
     "Cross-Sectional Momentum": {
       "n": 43,
+      "months": 23,
       "win_rate_pct": 46.512,
       "win_rate_ci95": [
         34.78,
@@ -21,6 +22,7 @@
     },
     "Mean Reversion": {
       "n": 157,
+      "months": 3,
       "win_rate_pct": 72.611,
       "win_rate_ci95": [
         40.0,
@@ -39,6 +41,7 @@
     },
     "Post-Earnings Drift": {
       "n": 101,
+      "months": 10,
       "win_rate_pct": 59.406,
       "win_rate_ci95": [
         50.818,
@@ -57,6 +60,7 @@
     },
     "Sector Rotation": {
       "n": 8,
+      "months": 5,
       "win_rate_pct": 50.0,
       "win_rate_ci95": [
         12.5,
@@ -75,6 +79,7 @@
     },
     "Trend Following": {
       "n": 1342,
+      "months": 41,
       "win_rate_pct": 47.765,
       "win_rate_ci95": [
         42.612,

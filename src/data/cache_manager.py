@@ -363,6 +363,10 @@ class CacheManager:
         fails stays in pending_refetch() and is retried next run. end_date is inclusive.
         """
         since = since or self.get_last_cached_date()
+        # Re-download the whole cached span: the cache keeps days older than `full_start`, and a
+        # shorter refetch could never keep 98% of the cached bars (nor put those days on one basis).
+        days = sorted(os.path.basename(f)[:10] for f in glob.glob(os.path.join(self.cache_dir, "*.parquet")))
+        full_start = min([full_start] + days[:1])
         batch_size = batch_size or REFRESH_BATCH_SIZE
         end_x = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         t0 = time.time()

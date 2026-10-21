@@ -436,9 +436,16 @@ class TestLiveSecEvents(unittest.TestCase):
                 self.assertEqual(len(gs._ticker_earnings_events("OK")), 1)
                 gs._SEC_REJECTIONS.update({"fetch_failed": 1})
                 note, degraded = gs._sec_run_status()
-                self.assertFalse(degraded)
+                self.assertTrue(degraded)                                           # 1 of 2 fetches failed: 50%
                 self.assertEqual(note, "SEC earnings unavailable: 1 new ideas rejected (fetch_failed 1); "
-                                       "1 of 3 SEC reads usable")
+                                       "1 of 3 SEC reads usable; fetch failures 50.0%")
+                # A partial outage: degraded only above 5% of the reads (a missing CIK never counts)
+                for usable, expect in ((19, False), (18, True)):        # 1 fetch failure: 5.0% vs 5.3%
+                    gs._EVENTS_CACHE.clear()
+                    gs._EVENTS_CACHE.update({f"U{i}": [] for i in range(usable)})
+                    gs._SEC_UNAVAILABLE.clear()
+                    gs._SEC_UNAVAILABLE.update({"DOWN": "fetch_failed", "NOCIK": "no_cik"})
+                    self.assertEqual(gs._sec_run_status()[1], expect, usable)
                 fake.available = False                                              # no SEC_USER_AGENT
                 gs._EVENTS_CACHE.clear(); gs._SEC_UNAVAILABLE.clear(); gs._SEC_REJECTIONS.clear()
                 self.assertIsNone(gs._ticker_earnings_events("OK"))

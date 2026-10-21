@@ -10,7 +10,7 @@ A personal-use, quantitative research and recommendation engine for US equities.
 
 - Not a trading bot: no order placement or brokerage execution.
 - Not a portfolio manager: no position sizing, Kelly sizing, capital allocation or portfolio-state logic.
-  - **Exception (adopted 2026-10-11, profitability program Phase 6):** display-only sizing guidance on the cards.
+  - **Exception (adopted 2026-10-11, profitability program Phase 6):** display-only sizing guidance on the cards (hidden while Ideas are SHADOW, `frontend/src/lib/ideas-mode.ts`).
     - Shares are floor(account × risk % ÷ (entry − stop)), capped at the account size.
     - The account size and risk per idea are stored only in the viewer's browser (`localStorage`, `frontend/src/lib/sizing.ts`). They are never sent to the server, stored in Supabase, or read by the engine.
     - Nothing is ordered, allocated or tracked as a portfolio.
@@ -63,7 +63,7 @@ Get the maths and recommendation logic right first. Do not add complexity for it
 ## Current state (2026-10-20)
 
 - **Ideas** (nightly scan, `nightly_scan.yml`): **SHADOW** since 2026-10-20 (user decision). Still scanned and logged every night on the parity configuration (score without context; point-in-time SEC earnings dates with unknown dates rejected; full-hold earnings rule, event lock, stop cap; R:R floor off), shown under "Not validated - do not trade", never alerted (the Ideas scan has no alert path). Backtest of exactly this configuration (run 39451924637, with the shared Cross-Sectional screen): 1,660 ideas, about 34 a month (strongly seasonal: 0.7–0.8 a session in March, April and October), −0.77%/idea beta-adjusted (CI −1.37 to −0.23, below zero: the book loses to SPY after beta), LATE −0.95 (CI −2.06 to +0.07). Scoring evidence (`config/strategy_performance.json`) stays at run 39384088732 for the forward test; the cards' issued-idea figures come from run 39451924637.
-- **Forward test**: starts with scan date 2026-10-19 (nightly run 39377064887, the first on the parity configuration). Ideas issued before it (OBE, 2026-10-16) stay tracked but are excluded from forward-test evaluation.
+- **Forward test**: starts with scan date 2026-10-19 (nightly run 39377064887, the first on the parity configuration); the configuration is final from scan date 2026-10-20. The 2026-10-19 scan ran the Cross-Sectional screen from before PR #20 and issued nothing, so no forward-test data is affected. Ideas issued before it (OBE, 2026-10-16) stay tracked but are excluded from forward-test evaluation. Data-handling changes made after the start (price refetch after dividends and splits, stored levels rebased before replays) are logged in `docs/research-history.md`.
 - **Swing signals** (`swing_signals.yml`, 01:20 UTC Tue–Sat): all five sleeves T, E, N, P and I are **SHADOW**. The pre-registered 2008–2022 holdout (run 38436737951) failed P1 for every sleeve, so they are shown under "Not validated - do not trade" and never alerted.
 - **Data**: Supabase was reset on 2026-10-14 (backup `backups/supabase_20261013T230522Z/`, local only). Duplicate `signals_history` rows of 2026-10-12 and 2026-10-13 were removed on 2026-10-20 (backup `backups/supabase_20261020T064853Z/`). Details: `docs/research-history.md`.
 - **Open items**: no `APPRISE_URLS` secret; sleeve I has no live signals until SEC publishes the 2026 Q2–Q4 insider data sets.

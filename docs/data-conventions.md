@@ -15,6 +15,7 @@ Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules a
 ## Lifecycle and outcome conventions (since 2026-10-09)
 
 - Open recommendations are tracked by replaying every bar after the signal date through `PositionScaleOutTracker` (`reconcile_recommendation_lifecycle`). A missed nightly run never hides a stop or target hit.
+- Rebase before every replay (2026-10-21): entry, stop and targets are stored in scan-time prices, while cached or downloaded bars may have been re-adjusted since (a split, a dividend). When the bars' close on the scan date differs from the stored entry (the scan close) by more than 0.1%, the levels are multiplied by their ratio for the replay (`outcome_calculator.rebase_levels`, used by the lifecycle and `jobs/validate_ranking.py`); the stored levels never change. A 2:1 split no longer reads as a -50% bar and a false stop.
 - The tracked fill is the open of the first bar after the signal date (`entry_fill_price`). `entry_price` is the indicative entry shown at issuance. Returns are measured from the fill.
 - Stop, targets, reach probabilities, R:R and strategy are frozen at issuance. A re-scan refreshes only analytical fields (score, tier, indicators, P/E).
 - Same-bar ambiguity is STOP_FIRST, including the ratcheted stop on the bar where a target fills. A target fills at the open when the bar gaps above it. Trades whose data runs out are left unresolved, never force-closed.

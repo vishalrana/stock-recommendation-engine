@@ -91,13 +91,8 @@ jobs:
           echo "Starting signal generation..."
           START_EPOCH=$(date +%s)
 
-          # Weekly (Saturday UTC, the Friday session): re-download the whole adjusted history so
-          # dividends and splits since the last download match the backtest's adjusted bars.
-          CACHE_MODE=incremental
-          if [ "$(date -u +%u)" = "6" ]; then CACHE_MODE=force; fi
-          echo "Cache mode: $CACHE_MODE"
-
-          python -m jobs.generate_signals --cache-mode "$CACHE_MODE"
+          # Always incremental: a scan must never depend on a full re-download finishing.
+          python -m jobs.generate_signals --cache-mode incremental
           EXIT_CODE=$?
 
           END_EPOCH=$(date +%s)

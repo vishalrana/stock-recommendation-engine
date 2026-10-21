@@ -95,6 +95,18 @@ class TestRefetchAfterActions(unittest.TestCase):
         stats = self._refresh(truth)                                     # dividend before `since`
         self.assertEqual((stats["with_actions"], stats["refetched"]), (0, 0))
 
+    def test_one_pass_over_the_daily_files(self):
+        truth = dict(self.truth, AAA=_bars(100.0, dividend_on=DAYS[30]))   # two refetches, one chunk each
+        with mock.patch.object(self.cm, "download_batch_with_retry",
+                               side_effect=lambda t, s, e, actions=False: _yahoo(truth, t, s, e, actions)), \
+                mock.patch.object(self.cm, "replace_ticker_history", wraps=self.cm.replace_ticker_history) as rep, \
+                mock.patch("time.sleep"):
+            stats = self.cm.refresh_with_actions(["AAA", "BBB"], (DAYS[29] - pd.Timedelta(days=7)).date().isoformat(),
+                                                 DAYS[30].date().isoformat(), DAYS[0].date().isoformat(),
+                                                 since=DAYS[29].date(), batch_size=1)
+        rep.assert_called_once()
+        self.assertEqual((stats["refetched"], stats["pending"]), (2, []))
+
     def test_lifecycle_skips_pending_tickers(self):
         import jobs.generate_signals as gs
         sb = mock.MagicMock()

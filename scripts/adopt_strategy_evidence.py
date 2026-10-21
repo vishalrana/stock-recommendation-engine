@@ -12,9 +12,11 @@ rebuilt aggregates add the display-only beta-adjusted and vs-SPY sums and counts
 Usage:
   python scripts/adopt_strategy_evidence.py outputs/production_universe_run_<run id> --run-id <run id> [--check-only]
 
-It also writes per-strategy stats of the run's issued ideas (n, win rate, net and beta-adjusted
-expectancy with signal-month block-bootstrap 95% CIs) under issued_ideas_by_strategy, and copies
-them to frontend/src/lib/issued-evidence.json for the cards. Display only: scoring never reads them.
+It also writes per-strategy stats of the run's issued ideas (n, distinct signal months, win rate,
+net and beta-adjusted expectancy with signal-month block-bootstrap 95% CIs) under
+issued_ideas_by_strategy, and copies them to frontend/src/lib/issued-evidence.json for the cards.
+Display only: scoring never reads them. --issued-only writes just the cards' file (the scoring
+evidence stays as adopted).
 """
 
 import argparse
@@ -87,6 +89,7 @@ def issued_by_strategy(artifact_dir: str) -> dict:
         ba_months = g.loc[ba.index, "signal_date"].str[:7].to_numpy()
         out[strat] = {
             "n": int(len(g)),
+            "months": int(len(set(months))),   # a month-block bootstrap needs many months to mean anything
             "win_rate_pct": r(100 * win.mean()),
             "win_rate_ci95": [None if x is None else r(100 * x) for x in block_bootstrap_ci(win, months, np.mean)],
             "net_expectancy_pct": r(net.mean()),
@@ -103,6 +106,8 @@ def main() -> int:
     parser.add_argument("--run-id", required=True, help="GitHub Actions run id of the backtest (recorded in the file)")
     parser.add_argument("--check-only", action="store_true", help="Verify the match without writing")
     parser.add_argument("--out", default=EVIDENCE_PATH)
+    parser.add_argument("--issued-only", action="store_true",
+                        help="Write only frontend/src/lib/issued-evidence.json (leave the scoring evidence)")
     args = parser.parse_args()
 
     doc, rebuilt, mismatches = rebuild(args.artifact_dir)
@@ -114,6 +119,11 @@ def main() -> int:
     n_fields = sum(len(v) for v in (doc.get("strategy_evidence") or {}).values())
     print(f"Match: all {n_fields} existing fields in {len(rebuilt)} strategies reproduce exactly.")
     if args.check_only:
+        return 0
+    if args.issued_only:
+        with open(FRONTEND_ISSUED, "w", encoding="utf-8") as f:
+            json.dump({"run_id": str(args.run_id), "strategies": issued_by_strategy(args.artifact_dir)}, f, indent=2)
+        print(f"Wrote {FRONTEND_ISSUED} (scoring evidence unchanged)")
         return 0
 
     out = dict(doc)

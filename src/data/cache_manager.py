@@ -376,14 +376,17 @@ class CacheManager:
         t1 = time.time()
         todo = sorted(with_actions | self.pending_refetch())
         replaced: Set[str] = set()
+        refetched = []
         for i in range(0, len(todo), batch_size):
             chunk_df = self.download_batch_with_retry(todo[i:i + batch_size], full_start, end_x)
             if not chunk_df.empty:
-                try:
-                    replaced |= self.replace_ticker_history(self._stack(chunk_df))[0]
-                except Exception as e:
-                    logger.warning("[CACHE SYNC] Could not replace refetched history: %s", e)
+                refetched.append(self._stack(chunk_df))
             time.sleep(REFRESH_CHUNK_PAUSE_S)
+        if refetched:   # one pass over the daily files for every refetched ticker
+            try:
+                replaced = self.replace_ticker_history(pd.concat(refetched))[0]
+            except Exception as e:
+                logger.warning("[CACHE SYNC] Could not replace refetched history: %s", e)
         pending = set(todo) - replaced
         self._set_pending(pending)
         stats = {"tickers": len(tickers), "with_actions": len(with_actions), "refetched": len(replaced),

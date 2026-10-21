@@ -1,0 +1,71 @@
+name: Price cache tools
+
+# Runs scripts/time_price_refresh.py on a copy of the nightly's restored price cache. No Supabase
+# access. Modes:
+#   time     time the nightly refresh with corporate-action refetch (the cache is not saved back)
+#   rebuild  full adjusted history into a fresh directory; only if it passes the coverage,
+#            history-length and last-bar checks is it saved as the newest nightly cache
+# Run outside the nightly window (01:00-10:00 UTC), so no nightly saves an older cache after it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'time or rebuild'
+        required: true
+        default: 'time'
+      actions_since:
+        description: 'time: count dividends and splits from this date as new (YYYY-MM-DD; empty = last cached session)'
+        required: false
+        default: ''
+      screen:
+        description: 'Also report the live Cross-Sectional screen on this session (YYYY-MM-DD; empty = skip)'
+        required: false
+        default: ''
+      tickers:
+        description: 'With screen: comma-separated tickers to report ranks for'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-scan          # never alongside a nightly that restores or saves the same cache
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-data-cache-v2-none
+          restore-keys: |
+            ${{ runner.os }}-data-cache-v2-
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r jobs/requirements.txt
+      - name: Run
+        run: >
+          python scripts/time_price_refresh.py
+          ${{ inputs.mode == 'rebuild' && '--rebuild' || '' }}
+          ${{ inputs.actions_since && format('--actions-since {0}', inputs.actions_since) || '' }}
+          ${{ inputs.screen && format('--screen {0} --tickers "{1}"', inputs.screen, inputs.tickers) || '' }}
+      - name: Save the rebuilt cache (only when the checks passed)
+        if: success() && inputs.mode == 'rebuild'
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-data-cache-v2-${{ github.run_id }}

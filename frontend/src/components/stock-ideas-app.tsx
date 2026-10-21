@@ -18,6 +18,7 @@ import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldChec
 import { useRouter } from 'next/navigation';
 import { BACKTEST_VERDICT } from '../lib/backtest-verdict';
 import { IDEAS_SHADOW } from '../lib/ideas-mode';
+import { scanStatusNote } from '../lib/scan-status';
 import { useSizing } from '../lib/sizing';
 
 interface StockIdeasAppProps {
@@ -290,6 +291,7 @@ export default function StockIdeasApp({
   };
 
   const lastScanDate = formatScanDateHeader(latestScanLog?.scan_date);
+  const scanStatus = scanStatusNote(latestScanLog);
 
   // Header status line: live refresh progress first, then the last result
   const headerStatusText = ideasStatus === 'updating'
@@ -324,6 +326,7 @@ export default function StockIdeasApp({
               {lastScanDate && (
                 <p className="text-[11px] text-slate-400 font-medium">
                   Scan date: <span className="text-slate-300 font-semibold">{lastScanDate}</span>
+                  {scanStatus && <span className="text-amber-300"> · {scanStatus}</span>}
                 </p>
               )}
             </div>

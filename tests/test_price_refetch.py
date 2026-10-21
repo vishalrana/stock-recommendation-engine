@@ -95,6 +95,18 @@ class TestRefetchAfterActions(unittest.TestCase):
         stats = self._refresh(truth)                                     # dividend before `since`
         self.assertEqual((stats["with_actions"], stats["refetched"]), (0, 0))
 
+    def test_refetch_covers_days_older_than_full_start(self):
+        # The live cache keeps days older than the nightly's 500-day start: the refetch must reach them
+        with mock.patch.object(self.cm, "download_batch_with_retry",
+                               side_effect=lambda t, s, e, actions=False: _yahoo(self.truth, t, s, e, actions)), \
+                mock.patch("time.sleep"):
+            stats = self.cm.refresh_with_actions(["AAA", "BBB"], (DAYS[29] - pd.Timedelta(days=7)).date().isoformat(),
+                                                 DAYS[30].date().isoformat(), DAYS[10].date().isoformat(),
+                                                 since=DAYS[29].date())
+        self.assertEqual((stats["refetched"], stats["pending"]), (1, []))
+        self.assertEqual(set(self._closes("BBB")), {50.0})
+        self.assertEqual(len(self._closes("BBB")), 31)
+
     def test_one_pass_over_the_daily_files(self):
         truth = dict(self.truth, AAA=_bars(100.0, dividend_on=DAYS[30]))   # two refetches, one chunk each
         with mock.patch.object(self.cm, "download_batch_with_retry",

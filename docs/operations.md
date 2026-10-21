@@ -38,7 +38,7 @@ Moved verbatim from CLAUDE.md on 2026-10-14; CLAUDE.md holds the binding rules a
 
 ## Parity tooling and the nightly schedule (2026-10-20)
 
-- `parity_replay.yml` (manual, input `session`): replays one live Ideas session through the harness and compares the decisions (`scripts/parity_replay.py`); about 25 minutes (prices and SEC filings re-downloaded; run 39384095078 took 23).
+- `parity_replay.yml` (manual, input `session`; and every Saturday 12:00 UTC for the latest completed session, i.e. Friday's): replays one live Ideas session through the harness and compares the decisions (`scripts/parity_replay.py`); about 25 minutes (prices and SEC filings re-downloaded; run 39384095078 took 23). A session whose nightly status is not `success` is not replayed (a warning in the run).
 - `scripts/dedupe_signals_history.py <dates>`: dry run by default; `--yes` backs up `signals_history` and removes earlier runs' rejected rows for those scan dates.
 - The nightly cron is 01:00 UTC Tuesday–Saturday, but GitHub has been starting it around 05:30 UTC. A run whose bars stop before the latest completed session is now `stale_data` and publishes nothing.
 - Second attempt (2026-10-20, user decision): cron `0 4 * * 2-6`. A scheduled run exits before any download when `scan_log` already has a `success` row for the latest completed session (`generate_signals.session_already_succeeded`, `SKIP_IF_SESSION_DONE`); any other status (`stale_data`, `degraded_sec`, ...) or an unreadable `scan_log` scans again. The two runs share the `nightly-scan` concurrency group, so they never overlap; `validate-outcomes` is skipped when the scan was. Manual dispatches always scan.

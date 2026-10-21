@@ -102,12 +102,18 @@ def main(argv=None) -> int:
     ap.add_argument("--date", required=True)
     ap.add_argument("--harness-csv")
     ap.add_argument("--print-open", action="store_true", help="print the tickers open before the session and exit")
+    ap.add_argument("--print-status", action="store_true", help="print the session's scan_log status and exit")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
     from dotenv import load_dotenv
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
     from jobs.supabase_client import get_client
-    live, live_open = load_live(get_client(), args.date)
+    client = get_client()
+    if args.print_status:
+        rows = client.table("scan_log").select("status").eq("scan_date", args.date).execute().data or []
+        print(rows[0]["status"] if rows else "missing")
+        return 0
+    live, live_open = load_live(client, args.date)
     if args.print_open:
         print(",".join(live_open))
         return 0

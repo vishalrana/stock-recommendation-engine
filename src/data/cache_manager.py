@@ -231,7 +231,10 @@ class CacheManager:
         stacked = stacked.reorder_levels(["Ticker", "Date"]).sort_index()
         stacked.columns = stacked.columns.str.upper()
         valid_cols = ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
-        return stacked[[c for c in valid_cols if c in stacked.columns]]
+        # A ticker missing some days of a multi-ticker download leaves rows without prices (newer pandas
+        # keeps them): a bar without a close is no bar
+        stacked = stacked[[c for c in valid_cols if c in stacked.columns]]
+        return stacked.dropna(subset=["CLOSE"]) if "CLOSE" in stacked.columns else stacked.dropna(how="all")
 
     def ingest_dataframe_to_cache(self, df: pd.DataFrame) -> int:
         """

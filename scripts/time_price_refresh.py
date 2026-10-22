@@ -30,7 +30,9 @@ CACHE_DIR = os.path.join("data", "cache", "by_date")
 
 
 def screen(cm, tickers, session: date, wanted) -> dict:
-    from src.pipeline_steps import CROSS_SECTIONAL_LOOKBACK, CROSS_SECTIONAL_TOP_FRACTION
+    """The live Cross-Sectional screen on `session` from the cache: counts, the cutoff, the ranks of
+    `wanted`, and the full ranking written to outputs/screen_<session>.csv (uploaded by the workflow)."""
+    from src.pipeline_steps import CROSS_SECTIONAL_TOP_FRACTION, cross_sectional_ranking
     start = (session - timedelta(days=120)).isoformat()
     cm.preload_history(start, session.isoformat())   # as the nightly does; per-ticker disk reads take hours
     closes = {}
@@ -41,13 +43,15 @@ def screen(cm, tickers, session: date, wanted) -> dict:
     frame = pd.DataFrame(closes).sort_index()
     frame.index = pd.DatetimeIndex(frame.index).tz_localize(None).normalize()
     frame = frame.loc[:pd.Timestamp(session)]
-    ret = (frame / frame.shift(CROSS_SECTIONAL_LOOKBACK) - 1.0).iloc[-1].dropna()
-    ranked = sorted(ret.items(), key=lambda kv: (-kv[1], kv[0]))
-    top = max(1, int(len(ranked) * CROSS_SECTIONAL_TOP_FRACTION))
-    rank = {t: i + 1 for i, (t, _) in enumerate(ranked)}
+    ranking = cross_sectional_ranking(frame, frame.index[-1])
+    os.makedirs("outputs", exist_ok=True)
+    ranking.to_csv(os.path.join("outputs", f"screen_{frame.index[-1].date().isoformat()}.csv"), index=False)
+    top = max(1, int(len(ranking) * CROSS_SECTIONAL_TOP_FRACTION))
+    by = ranking.set_index("ticker")
     return {"session": frame.index[-1].date().isoformat(), "stocks": len(tickers), "with_history": len(closes),
-            "ranked": len(ranked), "top": top,
-            "wanted": {t: {"rank": rank.get(t), "ret63_pct": round(100 * float(ret[t]), 3) if t in ret else None,
+            "ranked": len(ranking), "top": top,
+            "wanted": {t: {"rank": int(by.at[t, "rank"]) if t in by.index else None,
+                           "ret63_pct": float(by.at[t, "ret63_pct"]) if t in by.index else None,
                            "cached_rows_120d": int(frame[t].notna().sum()) if t in frame else 0} for t in wanted}}
 
 

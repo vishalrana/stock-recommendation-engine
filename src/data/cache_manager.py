@@ -30,6 +30,7 @@ REFRESH_CHUNK_PAUSE_S = float(os.environ.get("REFRESH_CHUNK_PAUSE_S", "0.25"))
 REFETCH_PENDING_FILE = ".refetch_pending.json"   # tickers whose full refetch after a corporate action failed
 REFETCH_MIN_COVERAGE = 0.98                      # a refetched history must keep >= 98% of the cached bars
 READJUST_TOLERANCE = 0.0005                      # downloaded vs cached close on an overlap session: re-adjusted above
+SHORT_REFETCH_FILE = ".short_refetch.json"       # refetches shorter than the cache: {ticker: first, last, bars}
 HISTORY_CHECKED_FILE = ".history_checked.json"   # tickers new to the cache already refetched once (new listings)
 OPEN_TICKERS_FILE = os.path.join("data", "cache", "open_idea_tickers.json")   # saved by the nightly, read by the rebuild
 
@@ -297,6 +298,19 @@ class CacheManager:
         except Exception:
             return set()
 
+    def _read_json(self, name: str) -> dict:
+        try:
+            with open(os.path.join(self.cache_dir, name), encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _write_json(self, name: str, doc: dict) -> None:
+        path = os.path.join(self.cache_dir, name)
+        with open(f"{path}.tmp", "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        os.replace(f"{path}.tmp", path)
+
     def _read_set(self, name: str) -> Set[str]:
         try:
             with open(os.path.join(self.cache_dir, name), encoding="utf-8") as f:
@@ -405,6 +419,22 @@ class CacheManager:
             old_counts = old_counts.add(pd.Series(present[present.isin(tickers)]).value_counts(), fill_value=0)
         new_counts = stacked.groupby(level="Ticker").size()
         ok = {t for t in tickers if new_counts.get(t, 0) >= max(1, REFETCH_MIN_COVERAGE * old_counts.get(t, 0))}
+        # A shorter history is accepted when the next refetch repeats it (same first date, same bars up
+        # to the last date seen before): Yahoo no longer serves the dropped rows, and the harness uses
+        # Yahoo's current history, so keeping them would differ from it by construction.
+        short = self._read_json(SHORT_REFETCH_FILE)
+        seen = {}
+        for t in tickers - ok:
+            idx = stacked.xs(t, level="Ticker").index
+            first, last = pd.Timestamp(idx.min()).strftime("%Y-%m-%d"), pd.Timestamp(idx.max()).strftime("%Y-%m-%d")
+            prev = short.get(t)
+            if prev and prev["first"] == first and int((idx <= pd.Timestamp(prev["last"])).sum()) == prev["bars"]:
+                ok.add(t)
+                logger.info("[CACHE SYNC] %s: Yahoo's history repeats shorter than the cache (from %s, %d bars); accepted.",
+                            t, first, prev["bars"])
+            else:
+                seen[t] = {"first": first, "last": last, "bars": int(len(idx))}
+        self._write_json(SHORT_REFETCH_FILE, {**{t: v for t, v in short.items() if t not in ok}, **seen})
         if not ok:
             return set(), tickers
         new_rows = stacked[stacked.index.get_level_values("Ticker").isin(ok)]

@@ -85,11 +85,16 @@ class TestRefetchAfterActions(unittest.TestCase):
         self.assertEqual((stats["refetched"], stats["pending"]), (1, []))
         self.assertEqual(set(self._closes("BBB")), {50.0})
 
-    def test_short_refetch_never_replaces_history(self):
+    def test_short_refetch_is_accepted_only_when_it_repeats(self):
         short = dict(self.truth, BBB=self.truth["BBB"].iloc[-10:])
-        stats = self._refresh(short)
+        stats = self._refresh(short)                                     # night 1: maybe a cut-short download
         self.assertEqual(stats["pending"], ["BBB"])
         self.assertEqual(len(self._closes("BBB")), 31)                   # old rows kept, tonight's added
+        cut = dict(self.truth, BBB=self.truth["BBB"].iloc[-6:])          # night 2 differs: still refused
+        self.assertEqual(self._refresh(cut, since=DAYS[30].date())["pending"], ["BBB"])
+        self.assertEqual(self._refresh(cut, since=DAYS[30].date())["pending"], [])   # night 3 repeats night 2
+        self.assertEqual(len(self._closes("BBB")), 6)                    # Yahoo's current history
+        self.assertEqual(set(self._closes("BBB")), {50.0})
 
     def _cache_from(self, yesterday):
         """Restart from a cache downloaded last night (through d29) from `yesterday`."""

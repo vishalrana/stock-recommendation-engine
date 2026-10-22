@@ -30,6 +30,8 @@ REFRESH_CHUNK_PAUSE_S = float(os.environ.get("REFRESH_CHUNK_PAUSE_S", "0.25"))
 REFETCH_PENDING_FILE = ".refetch_pending.json"   # tickers whose full refetch after a corporate action failed
 REFETCH_MIN_COVERAGE = 0.98                      # a refetched history must keep >= 98% of the cached bars
 READJUST_TOLERANCE = 0.0005                      # downloaded vs cached close on an overlap session: re-adjusted above
+SPLITS_FILE = ".splits.json"                     # split events seen in downloads: {ticker: [[date, ratio], ...]}
+SPLIT_FLAGS_FILE = ".split_flags.json"           # tickers whose history Yahoo left unadjusted for a split
 SHORT_REFETCH_FILE = ".short_refetch.json"       # refetches shorter than the cache: {ticker: first, last, bars}
 HISTORY_CHECKED_FILE = ".history_checked.json"   # tickers new to the cache already refetched once (new listings)
 OPEN_TICKERS_FILE = os.path.join("data", "cache", "open_idea_tickers.json")   # saved by the nightly, read by the rebuild
@@ -258,7 +260,8 @@ class CacheManager:
             logger.error(f"Failed to transform and cache dataframe: {e}", exc_info=True)
             return 0
 
-    def refresh_cache(self, tickers: List[str], start_date: str, end_date: str, batch_size: Optional[int] = None) -> None:
+    def refresh_cache(self, tickers: List[str], start_date: str, end_date: str, batch_size: Optional[int] = None,
+                      actions: bool = False) -> None:
         """
         Fetch data for multiple tickers, transform to MultiIndex, and cache by date.
         Processes in manageable chunks to ensure low memory usage and fault tolerance.
@@ -280,8 +283,10 @@ class CacheManager:
             chunk = tickers[idx:idx + batch_size]
             chunk_num = idx // batch_size + 1
             logger.info(f"[CACHE SYNC] Fetching chunk {chunk_num}/{total_chunks} ({len(chunk)} tickers)...")
-            chunk_df = self.download_batch_with_retry(chunk, start_date, end_date)
+            chunk_df = self.download_batch_with_retry(chunk, start_date, end_date, actions=actions)
             if not chunk_df.empty:
+                if actions:
+                    self.record_splits(self.extract_splits(chunk_df))
                 dates_updated = self.ingest_dataframe_to_cache(chunk_df)
                 logger.info(f"[CACHE SYNC] Chunk {chunk_num}/{total_chunks} ingested ({dates_updated} dates updated).")
             else:
@@ -323,6 +328,51 @@ class CacheManager:
         with open(f"{path}.tmp", "w", encoding="utf-8") as f:
             json.dump(sorted(tickers), f)
         os.replace(f"{path}.tmp", path)
+
+    @staticmethod
+    def extract_splits(df: pd.DataFrame) -> Dict[str, List[List[object]]]:
+        """{ticker: [[date, ratio], ...]} from a yfinance actions=True download."""
+        out: Dict[str, List[List[object]]] = {}
+        if df is None or df.empty or not isinstance(df.columns, pd.MultiIndex):
+            return out
+        for t in df.columns.get_level_values(0).unique():
+            sub = df[t]
+            if "Stock Splits" not in sub.columns:
+                continue
+            s = sub["Stock Splits"].fillna(0)
+            hits = s[s > 0]
+            if len(hits):
+                out[str(t).upper()] = [[pd.Timestamp(d).strftime("%Y-%m-%d"), float(v)] for d, v in hits.items()]
+        return out
+
+    def record_splits(self, splits: Dict[str, List[List[object]]]) -> None:
+        if not splits:
+            return
+        merged = self._read_json(SPLITS_FILE)
+        for t, events in splits.items():
+            seen = {(d, round(float(r), 8)) for d, r in merged.get(t, [])} | {(d, round(float(r), 8)) for d, r in events}
+            merged[t] = [[d, r] for d, r in sorted(seen)]
+        self._write_json(SPLITS_FILE, merged)
+
+    def split_flagged(self) -> Set[str]:
+        """Tickers whose cached history Yahoo left unadjusted for a split (src/data/splits.py): no new
+        idea, no lifecycle step, no Cross-Sectional ranking until a refetch shows the split adjusted."""
+        return self._read_set(SPLIT_FLAGS_FILE)
+
+    def update_split_flags(self) -> Dict[str, List[str]]:
+        """Re-check every ticker with a recorded split against its cached closes; returns the flagged
+        tickers with their unadjusted split dates and saves the set."""
+        from src.data.splits import flagged_split_dates
+        splits = self._read_json(SPLITS_FILE)
+        closes = self.cached_closes("0000-00-00", "9999-99-99") if splits else pd.DataFrame()
+        flags = {}
+        for t, events in splits.items():
+            if t in closes.columns:
+                dates = flagged_split_dates(closes[t], events)
+                if dates:
+                    flags[t] = dates
+        self._write_set(SPLIT_FLAGS_FILE, set(flags))
+        return flags
 
     def new_to_cache(self, tickers: List[str], before: str) -> Set[str]:
         """Tickers with no cached bar on the last cached day before `before` (the overlap start): new
@@ -477,15 +527,18 @@ class CacheManager:
             if not chunk_df.empty:
                 with_actions |= self.tickers_with_actions(chunk_df, since)
                 readjusted |= self.readjusted_tickers(chunk_df, cached)   # before the overlap overwrites them
+                self.record_splits(self.extract_splits(chunk_df))
                 self.ingest_dataframe_to_cache(chunk_df)
             time.sleep(REFRESH_CHUNK_PAUSE_S)
         t1 = time.time()
-        todo = sorted(with_actions | readjusted | new_history | self.pending_refetch())
+        flagged_before = self.split_flagged()
+        todo = sorted(with_actions | readjusted | new_history | self.pending_refetch() | flagged_before)
         replaced: Set[str] = set()
         refetched = []
         for i in range(0, len(todo), batch_size):
-            chunk_df = self.download_batch_with_retry(todo[i:i + batch_size], full_start, end_x)
+            chunk_df = self.download_batch_with_retry(todo[i:i + batch_size], full_start, end_x, actions=True)
             if not chunk_df.empty:
+                self.record_splits(self.extract_splits(chunk_df))   # every split in the refetched history
                 refetched.append(self._stack(chunk_df))
             time.sleep(REFRESH_CHUNK_PAUSE_S)
         if refetched:   # one pass over the daily files for every refetched ticker
@@ -498,15 +551,19 @@ class CacheManager:
         got = set(pd.concat(refetched).index.get_level_values("Ticker")) if refetched else set()
         if new_history & got:   # record the attempt: a genuinely new listing is not refetched every night
             self._write_set(HISTORY_CHECKED_FILE, self._read_set(HISTORY_CHECKED_FILE) | (new_history & got))
+        flags = self.update_split_flags()
         stats = {"tickers": len(tickers), "with_actions": len(with_actions), "readjusted": len(readjusted),
+                 "split_flagged": {t: flags[t] for t in sorted(flags)},
                  "new_history": len(new_history),
                  "refetched": len(replaced),
                  "pending": sorted(pending), "seconds_incremental": round(t1 - t0, 1),
                  "seconds_refetch": round(time.time() - t1, 1)}
         logger.info("[CACHE SYNC] Corporate actions: %d tickers with a dividend or split, %d re-adjusted by Yahoo, "
-                    "%d new to the cache, %d re-downloaded in full, %d pending (%s); incremental %.0fs, refetch %.0fs",
+                    "%d new to the cache, %d re-downloaded in full, %d pending (%s), %d with an unadjusted split (%s); "
+                    "incremental %.0fs, refetch %.0fs",
                     stats["with_actions"], stats["readjusted"], stats["new_history"], stats["refetched"],
-                    len(pending), ", ".join(sorted(pending)[:20]), stats["seconds_incremental"], stats["seconds_refetch"])
+                    len(pending), ", ".join(sorted(pending)[:20]), len(flags), ", ".join(sorted(flags)[:20]),
+                    stats["seconds_incremental"], stats["seconds_refetch"])
         return stats
 
     def preload_history(self, start_date: str, end_date: str) -> int:

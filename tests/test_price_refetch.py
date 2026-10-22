@@ -74,7 +74,7 @@ class TestRefetchAfterActions(unittest.TestCase):
         broken = dict(self.truth)
         with mock.patch.object(self.cm, "download_batch_with_retry",
                                side_effect=lambda t, s, e, actions=False:
-                               _yahoo(self.truth, t, s, e, actions) if actions else pd.DataFrame()), \
+                               _yahoo(self.truth, t, s, e, actions) if s != DAYS[0].date().isoformat() else pd.DataFrame()), \
                 mock.patch("time.sleep"):
             stats = self.cm.refresh_with_actions(["AAA", "BBB"], (DAYS[29] - pd.Timedelta(days=7)).date().isoformat(),
                                                  DAYS[30].date().isoformat(), DAYS[0].date().isoformat(), since=DAYS[29].date())

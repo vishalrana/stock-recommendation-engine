@@ -33,9 +33,16 @@ from jobs.generate_signals import reconcile_recommendation_lifecycle
 
 
 def _bars_after(start_date, *rows) -> pd.DataFrame:
-    """Daily OHLC bars after the signal date, as returned by get_bars_after(). Rows: (open, high, low, close)."""
+    """Daily OHLC bars from the signal date, as returned by get_bars_after(): the scan-date bar (the
+    business day before start_date; the lifecycle skips an idea without it), then the rows.
+    Rows: (open, high, low, close)."""
     idx = pd.bdate_range(start=start_date, periods=len(rows))
-    return pd.DataFrame([{"OPEN": o, "HIGH": h, "LOW": l, "CLOSE": c} for (o, h, l, c) in rows], index=idx)
+    df = pd.DataFrame([{"OPEN": o, "HIGH": h, "LOW": l, "CLOSE": c} for (o, h, l, c) in rows], index=idx)
+    if rows:
+        p0 = rows[0][0]
+        df = pd.concat([pd.DataFrame([{"OPEN": p0, "HIGH": p0, "LOW": p0, "CLOSE": p0}],
+                                     index=[pd.Timestamp(start_date) - pd.offsets.BDay(1)]), df])
+    return df
 
 
 def generate_deterministic_ohlcv(bars=100, trend='up', last_price=100.0) -> pd.DataFrame:

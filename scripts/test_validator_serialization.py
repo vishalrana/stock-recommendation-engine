@@ -25,7 +25,7 @@ class TestValidatorSerialization(unittest.TestCase):
         self.sample_row = {
             'id': 101,
             'ticker': 'TEST',
-            'scan_date': '2026-02-01',
+            'scan_date': '2026-01-30',   # a session: the evaluation needs its bar
             'entry_price': 100.0,
             'stop_loss': 95.0,
             'target_1': 110.0,
@@ -37,7 +37,9 @@ class TestValidatorSerialization(unittest.TestCase):
         """Helper to create mock daily OHLCV dataframe with DatetimeIndex."""
         dates = pd.date_range(start='2026-02-02', periods=len(rows), freq='B')
         df = pd.DataFrame(rows, index=dates)
-        return df
+        # The download starts at the scan date: its close (the stored entry) checks the basis
+        scan = pd.DataFrame([{k: 100.0 for k in df.columns}], index=[pd.Timestamp('2026-01-30')])
+        return pd.concat([scan, df])
 
     @patch('jobs.validate_ranking.yf.download')
     def test_stopped_outcome_serialization(self, mock_download):

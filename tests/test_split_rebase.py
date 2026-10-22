@@ -100,5 +100,28 @@ class TestValidatorAcrossSplits(unittest.TestCase):
         self.assertAlmostEqual(res[0.5]["outcome_return_pct"], res[1.0]["outcome_return_pct"], places=6)
 
 
+class TestFailClosedWithoutScanDateBar(unittest.TestCase):
+    def test_lifecycle_skips_and_lists_the_idea(self):
+        import jobs.generate_signals as gs
+        closed, opened = _lifecycle(_frame(EXPIRES).iloc[1:])          # the scan-date bar is gone
+        self.assertIsNone(closed)
+        self.assertIsNone(opened)
+        self.assertEqual(gs.LIFECYCLE_SKIPPED_NO_BASIS, ["ABC (2026-09-01)"])
+        self.assertEqual(gs.data_note({"PEND"}, {"IGR"}),
+                         "Price data: 1 awaiting a price refetch: PEND; 1 with a split Yahoo left unadjusted: IGR; "
+                         "lifecycle skipped, no scan-date bar: ABC (2026-09-01)")
+        _lifecycle(_frame(EXPIRES))                                      # the next run starts a fresh list
+        self.assertEqual(gs.LIFECYCLE_SKIPPED_NO_BASIS, [])
+        self.assertIsNone(gs.data_note(set(), set()))
+
+    def test_validator_skips(self):
+        import jobs.validate_ranking as vr
+        row = {"ticker": "ABC", "scan_date": SCAN, "entry_price": 100.0, "stop_loss": 92.0,
+               "target_1": 115.0, "target_2": 125.0, "target_3": 135.0}
+        df = _frame(HITS_T3).iloc[1:].rename(columns=str.title)
+        with mock.patch("jobs.validate_ranking.yf.download", return_value=df):
+            self.assertIsNone(vr.evaluate_signal(row))
+
+
 if __name__ == "__main__":
     unittest.main()

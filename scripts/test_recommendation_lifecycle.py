@@ -27,14 +27,21 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
-def _bars(start_date, *rows):
-    """Daily OHLC bars (business days from start_date) as returned by get_bars_after().
+def _bars(start_date, *rows, scan_close=100.0):
+    """Daily OHLC bars (business days from start_date) as returned by get_bars_after(), led by the
+    scan-date bar (the business day before start_date) at scan_close, the idea's stored entry: the
+    lifecycle reads it to check the bars' basis and skips an idea without it.
     Each row is (open, high, low, close)."""
     idx = pd.bdate_range(start=start_date, periods=len(rows))
-    return pd.DataFrame(
+    df = pd.DataFrame(
         [{"OPEN": o, "HIGH": h, "LOW": l, "CLOSE": c} for (o, h, l, c) in rows],
         index=idx,
     )
+    if rows and scan_close is not None:
+        scan_day = pd.Timestamp(start_date) - pd.offsets.BDay(1)
+        df = pd.concat([pd.DataFrame([{"OPEN": scan_close, "HIGH": scan_close, "LOW": scan_close, "CLOSE": scan_close}],
+                                     index=[scan_day]), df])
+    return df
 
 
 class TestRecommendationLifecycle(unittest.TestCase):
@@ -326,7 +333,7 @@ class TestRecommendationLifecycle(unittest.TestCase):
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig, \
              patch("jobs.supabase_client.update_history_outcome") as mock_update_hist:
 
-            mock_bar.return_value = _bars("2026-09-02", (51.50, 53.00, 51.00, 52.00))
+            mock_bar.return_value = _bars("2026-09-02", (51.50, 53.00, 51.00, 52.00), scan_close=50.0)
 
             # Scenario A: scan_successful = False (e.g. unhandled error during scan)
             reconcile_recommendation_lifecycle(
@@ -388,7 +395,7 @@ class TestRecommendationLifecycle(unittest.TestCase):
              patch("jobs.supabase_client.update_signals_status") as mock_update_sig:
 
             # NVDA is still qualified, low is 123.00 > stop 112.00
-            mock_bar.return_value = _bars("2026-09-02", (124.00, 127.00, 123.00, 126.50))
+            mock_bar.return_value = _bars("2026-09-02", (124.00, 127.00, 123.00, 126.50), scan_close=120.0)
 
             reconcile_recommendation_lifecycle(
                 supabase=mock_supabase,

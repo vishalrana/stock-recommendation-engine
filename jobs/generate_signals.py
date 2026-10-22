@@ -756,6 +756,25 @@ def _display_fundamentals(ticker: str, price: Optional[float] = None) -> Dict[st
         return {}
 
 
+LIFECYCLE_SKIPPED_NO_BASIS: List[str] = []   # open ideas whose scan-date bar is not cached, this run
+
+
+def data_note(pending, flagged) -> Optional[str]:
+    """Price-data items for scan_log.error_message: tickers awaiting a refetch, splits Yahoo left
+    unadjusted, and open ideas skipped by the lifecycle for want of their scan-date bar."""
+    def few(items):
+        items = sorted(items)
+        return ", ".join(items[:15]) + (f" (+{len(items) - 15})" if len(items) > 15 else "")
+    parts = []
+    if pending:
+        parts.append(f"{len(pending)} awaiting a price refetch: {few(pending)}")
+    if flagged:
+        parts.append(f"{len(flagged)} with a split Yahoo left unadjusted: {few(flagged)}")
+    if LIFECYCLE_SKIPPED_NO_BASIS:
+        parts.append(f"lifecycle skipped, no scan-date bar: {few(LIFECYCLE_SKIPPED_NO_BASIS)}")
+    return ("Price data: " + "; ".join(parts)) if parts else None
+
+
 def reconcile_recommendation_lifecycle(
     supabase,
     qualified_tickers: set,
@@ -797,6 +816,7 @@ def reconcile_recommendation_lifecycle(
     - Never touch another recommendation instance for the same ticker (exact signal_id & scan_date targeting).
     - None of these actions blacklist the stock. Tickers remain 100% eligible for future scans.
     """
+    LIFECYCLE_SKIPPED_NO_BASIS.clear()
     if not scan_successful:
         logger.warning("[LIFECYCLE SAFEGUARD] Scan did not complete successfully. Skipping lifecycle reconciliation this run.")
         return
@@ -854,6 +874,10 @@ def reconcile_recommendation_lifecycle(
             if bars.empty:
                 logger.info(f"[LIFECYCLE SEPARATION] {ticker}: no bar after scan date {scan_date} yet. Awaiting D+1 fill.")
                 continue
+            if basis.empty:   # without it the stored levels cannot be put on the bars' basis: never replay unrebased
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: no cached bar on the scan date {scan_date}. Skipping lifecycle transition.")
+                LIFECYCLE_SKIPPED_NO_BASIS.append(f"{ticker} ({str(scan_date)[:10]})")
+                continue
 
             first_bar = bars.iloc[0]
             fill_raw = first_bar.get("OPEN")
@@ -874,11 +898,11 @@ def reconcile_recommendation_lifecycle(
             if not target_1:
                 # Legacy record without targets: only the stop or the holding period can close it.
                 target_1, target_2, target_3 = float("inf"), None, None
-            if not basis.empty:   # a split or dividend re-adjusted the bars: put the levels on their basis
-                (stop_loss, target_1, target_2, target_3), ratio = rebase_levels(
-                    (stop_loss, target_1, target_2, target_3), existing.get("entry_price"), basis["CLOSE"].iloc[-1])
-                if ratio != 1.0:
-                    logger.info(f"[LIFECYCLE REBASE] {ticker}: cached history re-adjusted since {scan_date} (x{ratio:.4f}); stop and targets rescaled for the replay.")
+            # A split or dividend may have re-adjusted the bars: put the levels on their basis
+            (stop_loss, target_1, target_2, target_3), ratio = rebase_levels(
+                (stop_loss, target_1, target_2, target_3), existing.get("entry_price"), basis["CLOSE"].iloc[-1])
+            if ratio != 1.0:
+                logger.info(f"[LIFECYCLE REBASE] {ticker}: cached history re-adjusted since {scan_date} (x{ratio:.4f}); stop and targets rescaled for the replay.")
 
             hold_days = holding_days_for(existing.get("strategy"))
             if hold_days is None:
@@ -2205,6 +2229,10 @@ def run_scan(
     if status == "success" and data_is_stale:
         status = "stale_data"
         error_msg = error_msg or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
+    note = data_note(cache_manager.pending_refetch(), cache_manager.split_flagged())
+    if note:
+        logger.warning("[CACHE SYNC] %s", note)
+        error_msg = f"{error_msg}; {note}" if error_msg else note
     sec_note, sec_degraded = _sec_run_status()
     if sec_note:
         logger.warning("[SEC EARNINGS] %s", sec_note)

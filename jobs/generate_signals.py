@@ -820,7 +820,7 @@ def reconcile_recommendation_lifecycle(
 
         eff_current_date = str(current_scan_date)[:10] if current_scan_date else None
         from src.data.cache_manager import get_cache_manager
-        refetch_pending = get_cache_manager().pending_refetch()
+        refetch_pending = get_cache_manager().pending_refetch() | get_cache_manager().split_flagged()
 
         logger.info("Reconciling recommendation lifecycle for %d active recommendations...", len(active_signals))
         for existing in active_signals:
@@ -828,7 +828,7 @@ def reconcile_recommendation_lifecycle(
             if target_tickers is not None and ticker not in target_tickers:
                 continue
             if ticker in refetch_pending:
-                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: cached history awaits a full refetch after a dividend or split. Skipping lifecycle transition.")
+                logger.warning(f"[LIFECYCLE DATA WARNING] {ticker}: cached history awaits a full refetch after a dividend or split, or Yahoo left a split unadjusted. Skipping lifecycle transition.")
                 continue
 
             signal_id = existing.get("id")
@@ -1206,6 +1206,13 @@ def run_scan(
     if refetch_pending:
         logger.warning("[CACHE SYNC] %d tickers await a full refetch after a dividend or split; excluded from new "
                        "ideas and lifecycle tonight: %s", len(refetch_pending), ", ".join(sorted(refetch_pending)[:30]))
+    # Yahoo listed a split but left the history unadjusted (src/data/splits.py): no new idea, no
+    # lifecycle step and no Cross-Sectional ranking, as in the backtest harness
+    split_flagged = cache_manager.split_flagged()
+    if split_flagged:
+        logger.warning("[CACHE SYNC] %d tickers with a split Yahoo did not adjust; excluded from new ideas, lifecycle "
+                       "and the Cross-Sectional ranking: %s", len(split_flagged), ", ".join(sorted(split_flagged)[:30]))
+    refetch_pending = refetch_pending | split_flagged
 
     daily_files = glob.glob(os.path.join(by_date_dir, "*.parquet"))
     total_files = len(daily_files)
@@ -1355,7 +1362,8 @@ def run_scan(
             if is_targeted:
                 current_universe = tickers
             else:
-                screened_info = run_cross_sectional_screen(tickers, cache_manager, as_of_date=market_data_date)
+                screened_info = run_cross_sectional_screen([t for t in tickers if t not in split_flagged], cache_manager,
+                                                           as_of_date=market_data_date)
                 current_universe = [x[0] for x in screened_info]
         else:
             current_universe = tickers

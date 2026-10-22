@@ -480,6 +480,30 @@ def load_sec_events(tickers: List[str], end: date) -> Optional[Dict[str, Any]]:
     return {"filings": filings, "events": events, "rights": rights_by_ticker, "stats": stats, "unavailable": unavailable}
 
 
+def truncate_unadjusted_splits(raw: Dict[str, pd.DataFrame]) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
+    """
+    Bars from the first split Yahoo left unadjusted (src/data/splits.py, the live cache's check) on
+    are dropped: the ticker is then neither scanned nor ranked after the split, as live excludes a
+    flagged ticker, and a trade open across it ends censored instead of on a false stop or target.
+    Histories stored before 2026-10-22 carry no split events and are not checked.
+    """
+    from src.data.splits import flagged_split_dates
+    out, cut = {}, {}
+    for t, df in raw.items():
+        if "SPLIT" in df.columns:
+            ev = [(d, r) for d, r in df["SPLIT"].fillna(0).items() if r and r > 0]
+            dates = flagged_split_dates(df["CLOSE"], ev) if ev else []
+            if dates:
+                cut[t] = dates[0]
+                df = df[df.index < pd.Timestamp(dates[0])]
+            df = df.drop(columns=["SPLIT"])
+        out[t] = df
+    if cut:
+        logger.warning("Unadjusted splits: %d tickers truncated at the split (%s)", len(cut),
+                       ", ".join(f"{t} {d}" for t, d in sorted(cut.items())[:20]))
+    return out, cut
+
+
 def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.DataFrame]:
     """Daily adjusted OHLCV per ticker, downloaded once and stored under data/backtest_history/."""
     import yfinance as yf
@@ -495,7 +519,8 @@ def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.Data
     for i in range(0, len(missing), 100):
         chunk = missing[i:i + 100]
         logger.info("Downloading %s history for %d tickers (%d/%d)...", HISTORY_PERIOD, len(chunk), i + len(chunk), len(missing))
-        raw = yf.download(chunk, period=HISTORY_PERIOD, group_by="ticker", auto_adjust=True, progress=False, threads=True)
+        raw = yf.download(chunk, period=HISTORY_PERIOD, group_by="ticker", auto_adjust=True, actions=True,
+                          progress=False, threads=True)
         for t in chunk:
             try:
                 df = raw[t] if isinstance(raw.columns, pd.MultiIndex) else raw
@@ -503,7 +528,10 @@ def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.Data
                 if df.empty:
                     continue
                 df.columns = [str(c).upper() for c in df.columns]
-                df = df[["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]]
+                df = df.dropna(subset=["CLOSE"])
+                # Split events kept for the unadjusted-split check (src/data/splits.py), as the live cache does
+                df = df[["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"] + (["STOCK SPLITS"] if "STOCK SPLITS" in df.columns else [])]
+                df = df.rename(columns={"STOCK SPLITS": "SPLIT"})
                 df.index = pd.to_datetime(df.index).tz_localize(None)
                 df.to_parquet(os.path.join(BACKTEST_DATA_DIR, f"{t}.parquet"))
                 out[t] = df
@@ -977,6 +1005,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     raw = load_history(stocks + etfs + ["SPY"], refresh=refresh_data)
     if "SPY" not in raw:
         raise RuntimeError("SPY history unavailable; cannot apply the production regime rule.")
+    raw, split_truncated = truncate_unadjusted_splits(raw)
     missing_stocks = [t for t in stocks if t not in raw]
 
     # Regime per date (production rule)
@@ -1446,6 +1475,7 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     summary["survivorship_gauge"] = gauge
     summary["sec_calendar"] = sec_events["stats"] if sec_events is not None else None
     summary["sec_degraded"] = sec_events is None or bool(sec_events["stats"]["sec_degraded"])  # SEC returned nothing usable
+    summary["unadjusted_splits"] = split_truncated   # ticker -> split date: bars from it on dropped
     summary["left_tail"] = left_tail(trades, sec_events)
 
     # Random-stock placebo, cost scenarios and monthly series for every book

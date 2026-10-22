@@ -74,6 +74,7 @@ TEST_SUITES = [
     "tests/test_price_refetch.py",
     "tests/test_split_rebase.py",
     "tests/test_verify_head.py",
+    "tests/test_unadjusted_splits.py",
 ]
 
 

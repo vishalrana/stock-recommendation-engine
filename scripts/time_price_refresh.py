@@ -95,7 +95,9 @@ def main() -> int:
         fresh = CACHE_DIR + ".rebuild"
         shutil.rmtree(fresh, ignore_errors=True)
         t0 = time.time()
-        CacheManager(cache_dir=fresh).refresh_cache(tickers, full_start, end.isoformat())
+        rebuilt = CacheManager(cache_dir=fresh)
+        rebuilt.refresh_cache(tickers, full_start, end.isoformat(), actions=True)   # split events seed the check
+        split_flags = rebuilt.update_split_flags()
         old_rows, new_rows = rows_per_ticker(CACHE_DIR), rows_per_ticker(fresh)
         old_on, new_on = on_session(CACHE_DIR, end), on_session(fresh, end)
         long_old = set(old_rows[old_rows >= 253].index) & set(tickers)
@@ -110,7 +112,8 @@ def main() -> int:
         out["rebuild"] = dict(checks, passed=passed, seconds=round(time.time() - t0, 1), tickers=len(tickers),
                               old_files=len(glob.glob(os.path.join(CACHE_DIR, "*.parquet"))),
                               new_files=len(glob.glob(os.path.join(fresh, "*.parquet"))),
-                              newly_long=int(sum(new_rows.get(t, 0) >= 253 > old_rows.get(t, 0) for t in tickers)))
+                              newly_long=int(sum(new_rows.get(t, 0) >= 253 > old_rows.get(t, 0) for t in tickers)),
+                              split_flagged={t: split_flags[t] for t in sorted(split_flags)})
         if passed:
             shutil.rmtree(CACHE_DIR)
             os.replace(fresh, CACHE_DIR)

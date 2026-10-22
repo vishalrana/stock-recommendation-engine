@@ -1,0 +1,114 @@
+"""Splits Yahoo leaves unadjusted (src/data/splits.py): live cache flags, harness truncation, lifecycle."""
+
+import os
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.data.cache_manager import CacheManager
+from src.data.splits import unadjusted_split
+
+DAYS = pd.bdate_range("2026-08-03", periods=31)
+SPLIT = DAYS[20]
+
+
+def _closes(before, after, jump_at=SPLIT):
+    return pd.Series([before if d < jump_at else after for d in DAYS], index=DAYS)
+
+
+class TestCheck(unittest.TestCase):
+    def test_rule(self):
+        self.assertTrue(unadjusted_split(_closes(4.2, 12.6), SPLIT, 1 / 3))      # IGR: 1-for-3 left unadjusted
+        self.assertFalse(unadjusted_split(_closes(12.6, 12.6), SPLIT, 1 / 3))    # adjusted history
+        self.assertTrue(unadjusted_split(_closes(100.0, 50.0), SPLIT, 2.0))      # 2-for-1 left unadjusted
+        self.assertTrue(unadjusted_split(_closes(100.0, 50.0, DAYS[21]), SPLIT, 2.0))   # Yahoo's date off by one
+        self.assertFalse(unadjusted_split(_closes(100.0, 97.0), SPLIT, 2.0))     # an ordinary -3% day
+        self.assertFalse(unadjusted_split(_closes(100.0, 50.0), SPLIT, 1.0))
+
+
+def _yahoo(frames, tickers, start, end, actions):
+    parts = {}
+    for t in tickers:
+        df = frames.get(t)
+        if df is None:
+            continue
+        df = df[(df.index >= pd.Timestamp(start)) & (df.index < pd.Timestamp(end))]
+        parts[t] = df if actions else df.drop(columns=["Dividends", "Stock Splits"])
+    return pd.concat(parts, axis=1) if parts else pd.DataFrame()
+
+
+def _frame(closes, split_on=None, ratio=1 / 3):
+    df = pd.DataFrame({"Open": closes, "High": closes, "Low": closes, "Close": closes, "Volume": 1000.0,
+                       "Dividends": 0.0, "Stock Splits": 0.0}, index=closes.index)
+    if split_on is not None:
+        df.loc[split_on, "Stock Splits"] = ratio
+    return df
+
+
+class TestLiveCache(unittest.TestCase):
+    def test_flag_refetch_and_clear(self):
+        with tempfile.TemporaryDirectory() as d:
+            cm = CacheManager(cache_dir=d)
+            unadj = {"IGR": _frame(_closes(4.2, 12.6), SPLIT), "OK": _frame(_closes(50.0, 50.0))}
+            # The rebuild (refresh_cache with actions) seeds the split events and the flags
+            with mock.patch.object(cm, "download_batch_with_retry",
+                                   side_effect=lambda t, s, e, actions=False: _yahoo(
+                                       {k: v.iloc[:30] for k, v in unadj.items()}, t, s, e, actions)), mock.patch("time.sleep"):
+                cm.refresh_cache(["IGR", "OK"], DAYS[0].date().isoformat(), DAYS[29].date().isoformat(), actions=True)
+            self.assertEqual(cm.update_split_flags(), {"IGR": [SPLIT.date().isoformat()]})
+            self.assertEqual(cm.split_flagged(), {"IGR"})
+
+            def night(frames):
+                with mock.patch.object(cm, "download_batch_with_retry",
+                                       side_effect=lambda t, s, e, actions=False: _yahoo(frames, t, s, e, actions)), \
+                        mock.patch("time.sleep"):
+                    return cm.refresh_with_actions(["IGR", "OK"], DAYS[22].date().isoformat(), DAYS[30].date().isoformat(),
+                                                   DAYS[0].date().isoformat(), since=DAYS[29].date())
+            stats = night(unadj)                                           # still unadjusted: refetched, still flagged
+            self.assertEqual(list(stats["split_flagged"]), ["IGR"])
+            self.assertEqual(stats["refetched"], 1)
+            adjusted = dict(unadj, IGR=_frame(_closes(12.6, 12.6), SPLIT))  # Yahoo fixes the history
+            stats = night(adjusted)
+            self.assertEqual(stats["split_flagged"], {})
+            self.assertEqual(cm.split_flagged(), set())
+
+
+class TestHarness(unittest.TestCase):
+    def test_truncated_at_the_unadjusted_split(self):
+        from scripts.validate_backtest_pipeline import truncate_unadjusted_splits
+        bad = pd.DataFrame({"CLOSE": _closes(4.2, 12.6), "SPLIT": 0.0})
+        bad.loc[SPLIT, "SPLIT"] = 1 / 3
+        good = bad.assign(CLOSE=_closes(12.6, 12.6))
+        out, cut = truncate_unadjusted_splits({"IGR": bad, "OK": good, "OLD": pd.DataFrame({"CLOSE": _closes(1.0, 1.0)})})
+        self.assertEqual(cut, {"IGR": SPLIT.date().isoformat()})
+        self.assertEqual(out["IGR"].index.max(), DAYS[19])               # no bar from the split on
+        self.assertEqual(len(out["OK"]), 31)
+        self.assertNotIn("SPLIT", out["OK"].columns)
+        self.assertEqual(len(out["OLD"]), 31)                            # stored before split events: unchecked
+
+
+class TestLifecycle(unittest.TestCase):
+    def test_flagged_ticker_gets_no_lifecycle_step(self):
+        import jobs.generate_signals as gs
+        sb = mock.MagicMock()
+        sb.table().select().in_().execute.return_value.data = [
+            {"id": "s1", "ticker": "IGR", "status": "open", "entry_price": 10.0, "stop_loss": 9.0, "price": 10.0,
+             "target_1": 11.0, "strategy": "Trend Following", "scan_date": "2026-09-01"}]
+        fake = mock.Mock()
+        fake.pending_refetch.return_value = set()
+        fake.split_flagged.return_value = {"IGR"}
+        with mock.patch("src.data.cache_manager.get_cache_manager", return_value=fake), \
+                mock.patch("jobs.supabase_client.get_bars_after") as bars:
+            gs.reconcile_recommendation_lifecycle(supabase=sb, qualified_tickers=set(), scan_successful=True,
+                                                  scanned_count=500, min_required_scanned=50)
+        bars.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -76,7 +76,13 @@ def main() -> int:
 
     universe, _, _ = gs.load_universe("expanded")
     stocks = [t for t in dict.fromkeys(universe) if t not in SECTOR_ETFS]
-    tickers = [t for t in dict.fromkeys(universe + list(SECTOR_ETFS)) if t not in gs.BLACKLIST]
+    from src.data.cache_manager import OPEN_TICKERS_FILE
+    try:   # open and pending ideas, as the nightly last saved them (this tool has no Supabase access)
+        with open(OPEN_TICKERS_FILE, encoding="utf-8") as f:
+            open_now = [str(t).upper() for t in json.load(f)]
+    except Exception:
+        open_now = []
+    tickers = [t for t in dict.fromkeys(universe + list(SECTOR_ETFS) + open_now) if t not in gs.BLACKLIST]
     end = latest_completed_session()
     full_start = (end - timedelta(days=500)).isoformat()
     out = {}

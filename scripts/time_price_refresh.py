@@ -29,17 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CACHE_DIR = os.path.join("data", "cache", "by_date")
 
 
-def rows_per_ticker(cache_dir: str) -> pd.Series:
-    idx = [pd.read_parquet(f, columns=["CLOSE"]).index.get_level_values("Ticker")
-           for f in glob.glob(os.path.join(cache_dir, "*.parquet"))]
-    return pd.Series(pd.Index([]).append(idx) if idx else [], dtype=object).value_counts()
-
-
-def on_session(cache_dir: str, session: date) -> set:
-    p = os.path.join(cache_dir, f"{session.isoformat()}.parquet")
-    return set(pd.read_parquet(p, columns=["CLOSE"]).index.get_level_values("Ticker")) if os.path.exists(p) else set()
-
-
 def screen(cm, tickers, session: date, wanted) -> dict:
     from src.pipeline_steps import CROSS_SECTIONAL_LOOKBACK, CROSS_SECTIONAL_TOP_FRACTION
     start = (session - timedelta(days=120)).isoformat()
@@ -60,6 +49,61 @@ def screen(cm, tickers, session: date, wanted) -> dict:
             "ranked": len(ranked), "top": top,
             "wanted": {t: {"rank": rank.get(t), "ret63_pct": round(100 * float(ret[t]), 3) if t in ret else None,
                            "cached_rows_120d": int(frame[t].notna().sum()) if t in frame else 0} for t in wanted}}
+
+
+DRIFT_TOLERANCE = 0.001   # a close that moved more than 0.1% between the live cache and the rebuild
+LONG_BARS = 252            # a year of bars: what the scan needs
+
+
+def drift_report(old: pd.DataFrame, new: pd.DataFrame, tickers, session: date) -> dict:
+    """
+    What the rebuild changes against the live cache (closes, sessions x tickers), before any swap:
+    tickers whose close moved more than DRIFT_TOLERANCE on a common session, tickers newly at a
+    year of bars, tickers with fewer bars (counted on the rebuild's date range), plus the checks:
+    coverage of the live cache's last session and of tickers holding a year of bars.
+    Bars are non-missing closes, so close-less rows of older caches do not count.
+    """
+    wanted = set(tickers)
+    if old.empty or new.empty:
+        return {"session_coverage_pct": 0.0, "history_kept_pct": 0.0, "last_bar": None,
+                "drifted": [], "newly_long": [], "shorter": []}
+    common_t = sorted(set(old.columns) & set(new.columns) & wanted)
+    common_d = old.index.intersection(new.index)
+    rel = (new.loc[common_d, common_t] / old.loc[common_d, common_t] - 1.0).abs()
+    drifted = sorted(t for t in common_t if (rel[t] > DRIFT_TOLERANCE).any())
+    old_n = old.loc[old.index >= new.index.min()].notna().sum()
+    new_n = new.notna().sum()
+    newly_long = sorted(t for t in wanted if new_n.get(t, 0) >= LONG_BARS > old_n.get(t, 0))
+    shorter = sorted(t for t in wanted if old_n.get(t, 0) > new_n.get(t, 0))
+    last_old = old.index.max()                        # the live cache's last session
+    had = {t for t in wanted if t in old.columns and pd.notna(old.at[last_old, t])}
+    has = {t for t in had if t in new.columns and last_old in new.index and pd.notna(new.at[last_old, t])}
+    long_old = {t for t in wanted if old_n.get(t, 0) >= LONG_BARS}
+    return {
+        "session_coverage_pct": round(100 * len(has) / max(1, len(had)), 2),
+        "history_kept_pct": round(float(100 * sum(new_n.get(t, 0) >= LONG_BARS for t in long_old) / max(1, len(long_old))), 2),
+        "last_bar": new.index.max().date().isoformat(), "compared_session": last_old.date().isoformat(),
+        "drifted": drifted, "newly_long": newly_long, "shorter": shorter,
+    }
+
+
+def write_summary(r: dict) -> None:
+    """Counts and lists in the GitHub job summary (near-zero counts mean the nightly refetch holds)."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    few = lambda xs: ", ".join(xs[:60]) + (f" (+{len(xs) - 60})" if len(xs) > 60 else "") if xs else "none"
+    flags = r.get("split_flagged", {})
+    lines = [f"### Price cache rebuild: {'PASSED, cache replaced' if r['passed'] else 'FAILED, cache kept'}", "",
+             f"Coverage of {r.get('compared_session')}: {r['session_coverage_pct']}% · tickers keeping a year of bars: "
+             f"{r['history_kept_pct']}% · last bar {r['last_bar']} · {r.get('seconds')} s", "",
+             "| Drift report | Count | Tickers |", "|---|---|---|",
+             f"| Closes moved > 0.1% on a common session | {len(r['drifted'])} | {few(r['drifted'])} |",
+             f"| Newly at {LONG_BARS}+ bars | {len(r['newly_long'])} | {few(r['newly_long'])} |",
+             f"| Fewer bars than the live cache | {len(r['shorter'])} | {few(r['shorter'])} |",
+             f"| Split Yahoo left unadjusted | {len(flags)} | {few([f'{t} {d[0]}' for t, d in sorted(flags.items())])} |", ""]
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def main() -> int:
@@ -98,22 +142,13 @@ def main() -> int:
         rebuilt = CacheManager(cache_dir=fresh)
         rebuilt.refresh_cache(tickers, full_start, end.isoformat(), actions=True)   # split events seed the check
         split_flags = rebuilt.update_split_flags()
-        old_rows, new_rows = rows_per_ticker(CACHE_DIR), rows_per_ticker(fresh)
-        old_on, new_on = on_session(CACHE_DIR, end), on_session(fresh, end)
-        long_old = set(old_rows[old_rows >= 253].index) & set(tickers)
-        checks = {
-            # every ticker the live cache had on the session is there again
-            "session_coverage_pct": round(100 * len(old_on & new_on & set(tickers)) / max(1, len(old_on & set(tickers))), 2),
-            # every ticker with a full year of history keeps it
-            "history_kept_pct": round(100 * sum(new_rows.get(t, 0) >= 253 for t in long_old) / max(1, len(long_old)), 2),
-            "last_bar": max((os.path.basename(f)[:10] for f in glob.glob(os.path.join(fresh, "*.parquet"))), default=None),
-        }
-        passed = checks["session_coverage_pct"] >= 99.0 and checks["history_kept_pct"] >= 99.0 and checks["last_bar"] == end.isoformat()
-        out["rebuild"] = dict(checks, passed=passed, seconds=round(time.time() - t0, 1), tickers=len(tickers),
-                              old_files=len(glob.glob(os.path.join(CACHE_DIR, "*.parquet"))),
-                              new_files=len(glob.glob(os.path.join(fresh, "*.parquet"))),
-                              newly_long=int(sum(new_rows.get(t, 0) >= 253 > old_rows.get(t, 0) for t in tickers)),
+        report = drift_report(CacheManager(cache_dir=CACHE_DIR).cached_closes("0000-00-00", "9999-99-99"),
+                              rebuilt.cached_closes("0000-00-00", "9999-99-99"), tickers, end)
+        passed = (report["session_coverage_pct"] >= 99.0 and report["history_kept_pct"] >= 99.0
+                  and report["last_bar"] == end.isoformat())
+        out["rebuild"] = dict(report, passed=passed, seconds=round(time.time() - t0, 1), tickers=len(tickers),
                               split_flagged={t: split_flags[t] for t in sorted(split_flags)})
+        write_summary(out["rebuild"])
         if passed:
             shutil.rmtree(CACHE_DIR)
             os.replace(fresh, CACHE_DIR)

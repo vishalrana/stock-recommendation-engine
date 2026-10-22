@@ -263,7 +263,7 @@ class TestDataAndPersistenceFixes(unittest.TestCase):
         from src.data.cache_manager import get_cache_manager
         cm = get_cache_manager()
         seen = {}
-        def fake_download(tickers, start, end):
+        def fake_download(tickers, start, end, actions=False):
             seen["start"], seen["end"] = start, end
             return pd.DataFrame()
         with patch.object(cm, "download_batch_with_retry", side_effect=fake_download), patch("time.sleep"):
@@ -751,7 +751,7 @@ class TestScanRuntimeFixes(unittest.TestCase):
         from src.data import cache_manager as cm
         mgr = cm.CacheManager.__new__(cm.CacheManager)
         calls = []
-        with patch.object(cm.CacheManager, "download_batch_with_retry", lambda self, t, s, e: calls.append(len(t)) or pd.DataFrame()), \
+        with patch.object(cm.CacheManager, "download_batch_with_retry", lambda self, t, s, e, actions=False: calls.append(len(t)) or pd.DataFrame()), \
              patch.object(cm.time, "sleep") as sleep:
             mgr.refresh_cache([f"T{i}" for i in range(450)], "2026-10-01", "2026-10-09")
         self.assertEqual(calls, [200, 200, 50])

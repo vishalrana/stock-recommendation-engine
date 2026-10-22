@@ -30,6 +30,11 @@ class TestCheck(unittest.TestCase):
         self.assertTrue(unadjusted_split(_closes(100.0, 50.0, DAYS[21]), SPLIT, 2.0))   # Yahoo's date off by one
         self.assertFalse(unadjusted_split(_closes(100.0, 97.0), SPLIT, 2.0))     # an ordinary -3% day
         self.assertFalse(unadjusted_split(_closes(100.0, 50.0), SPLIT, 1.0))
+        # Stock dividends listed as splits (SCCO 1.008, SNFCA 1.05): their move is an ordinary day's
+        self.assertFalse(unadjusted_split(_closes(100.0, 99.0), SPLIT, 1.008))
+        self.assertFalse(unadjusted_split(_closes(100.0, 95.0), SPLIT, 1.05))
+        self.assertTrue(unadjusted_split(_closes(100.0, 80.0), SPLIT, 1.25))      # 5-for-4: checked
+        self.assertTrue(unadjusted_split(_closes(10.0, 100.0), SPLIT, 0.1))       # KNDI-like 1-for-10
 
 
 def _yahoo(frames, tickers, start, end, actions):

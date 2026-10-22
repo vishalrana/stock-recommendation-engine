@@ -32,8 +32,9 @@ def _bars(close, days=DAYS, split_on=None, dividend_on=None):
                        "Dividends": 0.0, "Stock Splits": 0.0}, index=days)
     if split_on is not None:
         df.loc[split_on, "Stock Splits"] = 2.0
-    if dividend_on is not None:
+    if dividend_on is not None:   # as Yahoo does: a 1% dividend re-adjusts every earlier bar by 0.99
         df.loc[dividend_on, "Dividends"] = 1.0
+        df.loc[df.index < dividend_on, ["Open", "High", "Low", "Close"]] *= 0.99
     return df
 
 
@@ -90,10 +91,30 @@ class TestRefetchAfterActions(unittest.TestCase):
         self.assertEqual(stats["pending"], ["BBB"])
         self.assertEqual(len(self._closes("BBB")), 31)                   # old rows kept, tonight's added
 
-    def test_action_already_handled_is_not_refetched(self):
+    def _cache_from(self, yesterday):
+        """Restart from a cache downloaded last night (through d29) from `yesterday`."""
+        self.dir.cleanup()
+        self.dir = tempfile.TemporaryDirectory()
+        self.cm = CacheManager(cache_dir=self.dir.name)
+        self.cm.ingest_dataframe_to_cache(_yahoo({t: f.iloc[:30] for t, f in yesterday.items()},
+                                                 list(yesterday), DAYS[0], DAYS[30], False))
+
+    def test_dividend_listed_a_night_late_is_refetched(self):
+        # Ex-date d29 (the last cached session), but Yahoo lists it only tonight: never "after since",
+        # yet every earlier close was re-adjusted, so the overlap closes no longer match the cache.
+        self._cache_from({"AAA": _bars(100.0), "BBB": _bars(100.0)})
+        truth = {"AAA": _bars(100.0, dividend_on=DAYS[29]), "BBB": _bars(100.0)}
+        stats = self._refresh(truth)
+        self.assertEqual((stats["with_actions"], stats["readjusted"], stats["refetched"]), (0, 1, 1))
+        closes = self._closes("AAA")
+        self.assertTrue((closes[closes.index < DAYS[29]] == 99.0).all())   # one basis: Yahoo's tonight
+        self.assertTrue((closes[closes.index >= DAYS[29]] == 100.0).all())
+
+    def test_action_the_cache_already_reflects_is_not_refetched(self):
         truth = {"AAA": _bars(100.0, dividend_on=DAYS[27]), "BBB": _bars(100.0)}
-        stats = self._refresh(truth)                                     # dividend before `since`
-        self.assertEqual((stats["with_actions"], stats["refetched"]), (0, 0))
+        self._cache_from(truth)                                            # downloaded after the ex-date
+        stats = self._refresh(truth)
+        self.assertEqual((stats["with_actions"], stats["readjusted"], stats["refetched"]), (0, 0, 0))
 
     def test_refetch_covers_days_older_than_full_start(self):
         # The live cache keeps days older than the nightly's 500-day start: the refetch must reach them

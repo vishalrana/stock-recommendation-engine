@@ -29,6 +29,7 @@ REFRESH_BATCH_SIZE = int(os.environ.get("REFRESH_BATCH_SIZE", "200"))
 REFRESH_CHUNK_PAUSE_S = float(os.environ.get("REFRESH_CHUNK_PAUSE_S", "0.25"))
 REFETCH_PENDING_FILE = ".refetch_pending.json"   # tickers whose full refetch after a corporate action failed
 REFETCH_MIN_COVERAGE = 0.98                      # a refetched history must keep >= 98% of the cached bars
+READJUST_TOLERANCE = 0.0005                      # downloaded vs cached close on an overlap session: re-adjusted above
 
 class CacheManager:
     """Manages date-partitioned price data cache with batch downloads and in-memory preloading."""
@@ -316,6 +317,40 @@ class CacheManager:
                     out.add(str(t).upper())
         return out
 
+    def cached_closes(self, start: str, before: str) -> pd.DataFrame:
+        """Cached closes (sessions x tickers) on the daily files dated start <= day < before."""
+        cols = {}
+        for fpath in glob.glob(os.path.join(self.cache_dir, "*.parquet")):
+            day = os.path.basename(fpath)[:10]
+            if start <= day < before:
+                try:
+                    df = pd.read_parquet(fpath, columns=["CLOSE"])
+                    cols[pd.Timestamp(day)] = df["CLOSE"].droplevel("Date") if "Date" in df.index.names else df["CLOSE"]
+                except Exception:
+                    continue
+        return pd.DataFrame(cols).T.sort_index() if cols else pd.DataFrame()
+
+    @staticmethod
+    def readjusted_tickers(df: pd.DataFrame, cached: pd.DataFrame, tol: float = READJUST_TOLERANCE) -> Set[str]:
+        """Tickers whose downloaded close differs from the cached close by more than `tol` on any
+        overlap session: Yahoo re-adjusted their history (an action listed late, or a revision with
+        no event), so the cached bars before the overlap are on another basis."""
+        if df is None or df.empty or cached.empty or not isinstance(df.columns, pd.MultiIndex):
+            return set()
+        try:
+            new = df.xs("Close", axis=1, level=1)
+        except KeyError:
+            return set()
+        new.index = pd.DatetimeIndex(new.index).tz_localize(None).normalize() if pd.DatetimeIndex(new.index).tz is not None \
+            else pd.DatetimeIndex(new.index).normalize()
+        new.columns = [str(c).upper() for c in new.columns]
+        common_t = [t for t in new.columns if t in cached.columns]
+        common_d = new.index.intersection(cached.index)
+        if not common_t or not len(common_d):
+            return set()
+        rel = (new.loc[common_d, common_t] / cached.loc[common_d, common_t] - 1.0).abs()
+        return {t for t in common_t if (rel[t] > tol).any()}
+
     def replace_ticker_history(self, stacked: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
         """
         Replace the cached rows of the tickers in `stacked` (rows indexed (Ticker, Date)) in every
@@ -371,14 +406,18 @@ class CacheManager:
         end_x = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         t0 = time.time()
         with_actions: Set[str] = set()
+        readjusted: Set[str] = set()
+        # Overlap sessions before the last cached one: their cached closes must not change
+        cached = self.cached_closes(start_date, since.isoformat()) if since else pd.DataFrame()
         for i in range(0, len(tickers), batch_size):
             chunk_df = self.download_batch_with_retry(tickers[i:i + batch_size], start_date, end_x, actions=True)
             if not chunk_df.empty:
                 with_actions |= self.tickers_with_actions(chunk_df, since)
+                readjusted |= self.readjusted_tickers(chunk_df, cached)   # before the overlap overwrites them
                 self.ingest_dataframe_to_cache(chunk_df)
             time.sleep(REFRESH_CHUNK_PAUSE_S)
         t1 = time.time()
-        todo = sorted(with_actions | self.pending_refetch())
+        todo = sorted(with_actions | readjusted | self.pending_refetch())
         replaced: Set[str] = set()
         refetched = []
         for i in range(0, len(todo), batch_size):
@@ -393,11 +432,13 @@ class CacheManager:
                 logger.warning("[CACHE SYNC] Could not replace refetched history: %s", e)
         pending = set(todo) - replaced
         self._set_pending(pending)
-        stats = {"tickers": len(tickers), "with_actions": len(with_actions), "refetched": len(replaced),
+        stats = {"tickers": len(tickers), "with_actions": len(with_actions), "readjusted": len(readjusted),
+                 "refetched": len(replaced),
                  "pending": sorted(pending), "seconds_incremental": round(t1 - t0, 1),
                  "seconds_refetch": round(time.time() - t1, 1)}
-        logger.info("[CACHE SYNC] Corporate actions: %d tickers with a dividend or split, %d re-downloaded in full, "
-                    "%d pending (%s); incremental %.0fs, refetch %.0fs", stats["with_actions"], stats["refetched"],
+        logger.info("[CACHE SYNC] Corporate actions: %d tickers with a dividend or split, %d re-adjusted by Yahoo, "
+                    "%d re-downloaded in full, %d pending (%s); incremental %.0fs, refetch %.0fs",
+                    stats["with_actions"], stats["readjusted"], stats["refetched"],
                     len(pending), ", ".join(sorted(pending)[:20]), stats["seconds_incremental"], stats["seconds_refetch"])
         return stats
 

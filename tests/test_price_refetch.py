@@ -140,6 +140,24 @@ class TestRefetchAfterActions(unittest.TestCase):
         rep.assert_called_once()
         self.assertEqual((stats["refetched"], stats["pending"]), (2, []))
 
+    def _refresh_list(self, tickers, truth):
+        with mock.patch.object(self.cm, "download_batch_with_retry",
+                               side_effect=lambda t, s, e, actions=False: _yahoo(truth, t, s, e, actions)), \
+                mock.patch("time.sleep"):
+            return self.cm.refresh_with_actions(tickers, (DAYS[29] - pd.Timedelta(days=7)).date().isoformat(),
+                                                DAYS[30].date().isoformat(), DAYS[0].date().isoformat(),
+                                                since=DAYS[29].date())
+
+    def test_ticker_new_to_the_cache_gets_its_full_history_once(self):
+        truth = dict(self.truth, CCC=_bars(30.0), NEW=_bars(10.0, DAYS[28:]))   # NEW: listed on d28
+        stats = self._refresh_list(["AAA", "BBB", "CCC", "NEW"], truth)
+        self.assertEqual(stats["new_history"], 2)
+        self.assertEqual(len(self._closes("CCC")), 31)                   # not just the 7-day overlap
+        self.assertEqual(len(self._closes("NEW")), 3)
+        self.assertNotIn("NEW", stats["pending"])                        # a new listing is not "pending"
+        stats = self._refresh_list(["AAA", "BBB", "CCC", "NEW"], truth)
+        self.assertEqual(stats["new_history"], 0)                        # attempt recorded: not refetched again
+
     def test_lifecycle_skips_pending_tickers(self):
         import jobs.generate_signals as gs
         sb = mock.MagicMock()

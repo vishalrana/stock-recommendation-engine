@@ -1127,6 +1127,18 @@ def run_scan(
     else:
         all_download_tickers = list(dict.fromkeys(tickers + etf_tickers))
         all_download_tickers = [t for t in all_download_tickers if t not in BLACKLIST]
+        # Open and pending ideas keep getting bars even when their ticker leaves the universe; the
+        # list is saved with the cache so the (Supabase-free) rebuild downloads them too.
+        if not dry_run:
+            try:
+                open_now = open_idea_tickers(get_client())
+                all_download_tickers = list(dict.fromkeys(all_download_tickers + open_now))
+                from src.data.cache_manager import OPEN_TICKERS_FILE
+                os.makedirs(os.path.dirname(os.path.join(PROJECT_ROOT, OPEN_TICKERS_FILE)), exist_ok=True)
+                with open(os.path.join(PROJECT_ROOT, OPEN_TICKERS_FILE), "w", encoding="utf-8") as f:
+                    json.dump(open_now, f)
+            except Exception as open_err:
+                logger.warning("[CACHE SYNC] Open idea tickers unavailable (%s); downloading the universe only.", open_err)
 
     # ── Cache Refresh (mode-aware) ────────────────────────────────────
     t_download_start = time.time()

@@ -61,9 +61,10 @@ def evaluate_signal(row: dict) -> dict | None:
     # Stored levels are in scan-time prices; a split or dividend since then re-adjusted the download
     dates = pd.DatetimeIndex(df.index).date
     basis = df[dates == scan_date]
-    if not basis.empty:
-        (entry_price, stop_loss, target_1, target_2, target_3), _ = rebase_levels(
-            (entry_price, stop_loss, target_1, target_2, target_3), row['entry_price'], basis['Close'].iloc[-1])
+    if basis.empty:   # the levels cannot be put on the download's basis: no evaluation rather than a wrong one
+        return None
+    (entry_price, stop_loss, target_1, target_2, target_3), _ = rebase_levels(
+        (entry_price, stop_loss, target_1, target_2, target_3), row['entry_price'], basis['Close'].iloc[-1])
     df = df[dates > scan_date]
     if df.empty:
         return None

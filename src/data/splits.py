@@ -8,6 +8,13 @@ import math
 
 import pandas as pd
 
+# Only splits of at least 5-for-4 (or 1-for-1.25) are checked. Yahoo also lists stock dividends and
+# spin-off adjustments as "splits" of ratio 1.007-1.05: their unadjusted move (-0.7% to -5%) is the
+# size of an ordinary day, so the move test cannot tell them apart (the 2026-10-22 sweep flagged
+# SCCO, GAB, JRI and the harness truncated BDX from 2022 on them); an unadjusted one is a basis
+# error no larger than a dividend's.
+MIN_SPLIT_LOG_RATIO = math.log(1.25)
+
 
 def unadjusted_split(closes: pd.Series, split_date, ratio: float) -> bool:
     """
@@ -19,7 +26,7 @@ def unadjusted_split(closes: pd.Series, split_date, ratio: float) -> bool:
         ratio = float(ratio)
     except (TypeError, ValueError):
         return False
-    if not (ratio > 0) or abs(ratio - 1.0) < 1e-9:
+    if not (ratio > 0) or abs(math.log(ratio)) < MIN_SPLIT_LOG_RATIO - 1e-12:
         return False
     c = closes.dropna()
     c = c[c > 0].sort_index()

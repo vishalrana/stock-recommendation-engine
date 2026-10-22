@@ -553,3 +553,54 @@ Changes to data handling and display made after the forward test started. No rul
 - No difference changes an outcome. The only ones at 65 or more are TREX, rejected by the earnings rule, and MTN, blocked by the entry gate.
 - Every price-history cause is what the refetch (#29, #39) prevents from now on. The validated rebuild replaces what the live cache had accumulated.
 - IGR is a provider error that no refetch can repair.
+
+### 2026-10-22 follow-up (PRs #41–#49)
+
+Data handling, tooling and display only; no strategy, scoring or threshold change.
+
+- **#41, parity replay can fail:** before, every difference got a generic cause and the replay always exited 0. It now exits 1 when the issued sets differ, or when a candidate scoring 65 or more on either side has a different stage. The summary and the difference table go to the job summary. Under this rule the 2026-10-20 replay fails: TREX (68.9) and MTN (65.3) are candidates in the harness only.
+- **#42, actions listed late:** before storing the overlap bars, each ticker's downloaded closes are compared with its cached closes on the overlap sessions before the last cached one. A difference above 0.05% refetches the ticker in full. This also catches re-adjustments that come with no event.
+- **#43, tickers new to the cache:** a ticker with no cached bar before the overlap window is refetched in full, once (the attempt is recorded). Open and pending ideas' tickers are always downloaded; the nightly saves them with the cache for the rebuild. A bar without a close is never stored (newer pandas kept close-less rows).
+- **#44, short refetches:** a refetch shorter than the cache is accepted when the next night's refetch repeats its first date and bar count.
+- **#45 and #49, unadjusted splits** (`src/data/splits.py`, live and harness):
+  - **Live:** a split whose close-to-close move matches the unadjusted move 1 ÷ ratio flags the ticker. A flagged ticker gets no new idea, no lifecycle step and no Cross-Sectional ranking, and is refetched with actions nightly until Yahoo adjusts it.
+  - **Harness:** a flagged ticker's bars from the split on are dropped.
+  - **#49 (deviation from the rule as specified):** only splits of at least 5-for-4 are checked. Below that the move test cannot separate a stock dividend listed as a split (SCCO 1.008, GAB 1.01, SNFCA 1.05) from an ordinary day. The first replay under #45 (run 39702117760) truncated 58 harness tickers on such events, BDX from 2022 among them.
+- **#46, fail closed:** an idea without its scan-date bar gets no lifecycle step and no `validate_ranking` evaluation. Such ideas, and pending and flagged tickers, go into `scan_log.error_message`, which the app shows whenever it is not empty.
+- **#47, monthly rebuild:** first Sunday of the month at 12:00 UTC, with a drift report (closes moved > 0.1%, newly 252+ bars, fewer bars, split flags) in the job summary before any swap. Coverage is now measured on the live cache's last session, and history counts closes, not rows.
+- **#48, ranking dumps:** `cross_sectional_ranking` for the replay (harness) and the live cache (any saved cache key).
+
+#### Split sweep and first monthly-style rebuild (run 39701680622, passed, saved as `Linux-data-cache-v2-39701680622`)
+
+- Coverage of 2026-10-20: 99.98%; tickers keeping a year of bars: 99.98%; last bar 2026-10-21; 488.9 s.
+- An earlier attempt (run 39700279150) refused correctly on two bugs in its own checks, which #47 fixed.
+- Drift report:
+
+  | Item | Count | Tickers |
+  |---|---|---|
+  | Closes moved > 0.1% | 3 | AXNX, DKI, EHGO |
+  | Newly at 252+ bars | 2 | AXNX, DKI |
+  | Fewer bars | 3 | AGNT, BURU, ISNR |
+  | Unadjusted split, rule of #45 | 40 | see below |
+
+- Flagged under #45: AIM, BDAI, BRTX, BTLN, BTOC, BURU, CAPS, CPOP, CYCU, DHY, DLXY, FRGT, GAB, GIBO, GMEX, GP, GTBP, HLSQ, HUBC, IGR (2026-09-08), IPDN, IQST, JRI, KNDI, METCB, MTNB, NFE, NXXT, OBAI, OPTT, PFSA, SCCO, SKIN, SNFCA, SOAR, SRTM, UTF, VIVK, WCT, YAAS.
+- Six of them are stock dividends listed as splits and drop out under #49: SCCO, METCB, SNFCA, GAB, JRI, UTF. The nightly recomputes the flags on every refresh.
+
+#### Cross-Sectional ranking on 2026-10-20 (report only)
+
+Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-data-cache-v2-39552049144`, run 39704947240), and the harness ranking from a replay under the corrected split rule (run 39704943366). Downloaded on 2026-10-22, so dividends since the session move a few harness returns.
+
+| | Live | Harness |
+|---|---|---|
+| Stocks ranked | 5,482 | 5,470 |
+| Cutoff (top 15%) | rank 822, 63-session return 14.30% | rank 820, 13.79% |
+| FFIV | rank 837 (14.00%) | rank 814 (14.00%), inside |
+
+- **Ranked live only, 26 stocks:** APRE, CPOP, DFNS, DFSC, DLXY, FRGT, GIBO, GMEX, HLSQ, HUBC, IPDN, JL, KGEI, KNDI, NFE, NXDR, NXXT, OPTT, PFSA, POCI, PPCB, PRE, QXL, SRXH, TECX, YAAS.
+  - Every one is a split Yahoo left unadjusted, which the harness truncates at the split.
+  - Eleven sat inside the live top 822 on false returns: NFE +1,027% (rank 7), IPDN +772%, CPOP +760%, KNDI +417%, DLXY +340%, OPTT +206%, GIBO +100%, NXXT +52%, YAAS +37%, KGEI +30%, HLSQ +15%. They pushed every real stock 11 ranks down, which is why FFIV, OSCR, RGA and TREX (identical returns on both sides) fell below the live cutoff.
+  - From 2026-10-22 the live ranking leaves flagged tickers out (#45).
+- **Ranked by the harness only, 14 stocks:**
+  - AXNX, DCM, FFR, GCDT, IRLA, LCU, LUMN, POM, RNTZ, SKYD, SRTM and WORX had 0–22 closes in the live cache's last 120 days. They had joined the download list and got only the overlap bars; #43 refetches them.
+  - CIG-C and RDIB had 84 closes but lacked one of the two closes the screen compares (thin trading).
+- WSM and ABBV differ in return as well as rank: dividends re-adjusted their history between the two downloads.

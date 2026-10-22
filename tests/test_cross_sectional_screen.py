@@ -53,6 +53,14 @@ class TestCrossSectionalScreen(unittest.TestCase):
         self.assertIn("NEW", [t for t, _ in top])        # ranked (and first) although it has only 90 bars
         self.assertNotIn("GAP", [t for t, _ in cross_sectional_screen(self.closes)[self.closes.index[-1]]])
 
+    def test_ranking_matches_the_screen(self):
+        from src.pipeline_steps import cross_sectional_ranking
+        d = self.closes.index[-1]
+        ranking = cross_sectional_ranking(self.closes, d)
+        top = cross_sectional_screen(self.closes)[d]
+        self.assertEqual(list(ranking.ticker[: len(top)]), [t for t, _ in top])
+        self.assertEqual(list(ranking["rank"]), list(range(1, len(ranking) + 1)))
+
     def test_ties_by_ticker(self):
         idx = pd.bdate_range("2026-01-02", periods=70)
         c = pd.DataFrame({t: np.r_[np.full(69, 100.0), 120.0] for t in ("ZZ", "AA", "MM")}, index=idx)

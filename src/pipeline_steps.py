@@ -214,6 +214,16 @@ def cross_sectional_screen(closes: pd.DataFrame, top_fraction: float = CROSS_SEC
     return out
 
 
+def cross_sectional_ranking(closes: pd.DataFrame, session, lookback: int = CROSS_SECTIONAL_LOOKBACK) -> pd.DataFrame:
+    """Every stock cross_sectional_screen ranks on `session` (diagnostics: parity replays and the live
+    cache check): ticker, 63-session return %, rank (1 = best), ordered as the screen orders them."""
+    ret = (closes / closes.shift(lookback) - 1.0).loc[pd.Timestamp(session)]
+    ret = ret[np.isfinite(ret.to_numpy(dtype=float))]
+    ordered = sorted(ret.items(), key=lambda kv: (-kv[1], kv[0]))
+    return pd.DataFrame([(t, round(float(r) * 100.0, 4), i + 1) for i, (t, r) in enumerate(ordered)],
+                        columns=["ticker", "ret63_pct", "rank"])
+
+
 def holding_days_for(strategy: Optional[str]) -> Optional[int]:
     """Strategy holding period (trading days) after which an open idea expires."""
     from src.quant_config import STRATEGY_TARGET_CONFIG

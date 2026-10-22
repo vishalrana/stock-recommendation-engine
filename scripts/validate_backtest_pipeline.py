@@ -1020,8 +1020,14 @@ def run(refresh_data: bool = False, workers: int = 4, limit: Optional[int] = Non
     bar_dates = {t: df.dropna(subset=["CLOSE"]).index for t, df in raw.items() if t != "SPY"}
     # Cross-Sectional Momentum screen: the live scan's definition and ranking universe (every stock
     # with closes, including those too short to scan; live ranks them too)
-    cs_screen = cross_sectional_screen(pd.DataFrame(
-        {t: df["CLOSE"] for t, df in raw.items() if t != "SPY" and t not in SECTOR_ETFS}).sort_index())
+    cs_closes = pd.DataFrame({t: df["CLOSE"] for t, df in raw.items() if t != "SPY" and t not in SECTOR_ETFS}).sort_index()
+    cs_screen = cross_sectional_screen(cs_closes)
+    if replay_session and pd.Timestamp(replay_session) in cs_closes.index:   # the screen's full ranking, for the replay
+        from src.pipeline_steps import cross_sectional_ranking
+        os.makedirs(OUTPUTS_DIR, exist_ok=True)
+        cross_sectional_ranking(cs_closes, replay_session).to_csv(
+            os.path.join(OUTPUTS_DIR, f"parity_replay_{replay_session}_screen.csv"), index=False)
+    del cs_closes
     frames = {t: prepare_frame(df) for t, df in raw.items() if t != "SPY" and len(df) > WARMUP_BARS + 5}
     del raw  # the frames hold everything needed from here on (keeps the 5,600-ticker run in memory)
     stock_frames = {t: f for t, f in frames.items() if t not in SECTOR_ETFS}

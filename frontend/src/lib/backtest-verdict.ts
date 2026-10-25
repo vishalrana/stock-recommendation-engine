@@ -4,8 +4,8 @@
 // the random-stock placebo, and survives StepM at 5%. Updated by hand from the run's summary.
 export const BACKTEST_VERDICT = {
   edgeClaimPassed: false,
-  runId: '39451924637',
-  line: 'Backtest (run 39451924637): the book loses to SPY after beta, -0.77% an idea (95% CI -1.37 to -0.23, below zero).',
+  runId: '40205392302',
+  line: 'Backtest (run 40205392302): the book loses to SPY after beta, -0.79% an idea (95% CI -1.39 to -0.22, below zero).',
 } as const;
 
 // A target counts as "rarely reached" below this backtest hit rate (percent).

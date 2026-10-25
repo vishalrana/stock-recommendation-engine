@@ -482,7 +482,7 @@ The production book (the parity configuration with the shared screen) and `allow
 - Funnel: earnings unknown 1,235, SEC unavailable 16 (7 tickers without a CIK mapping), fixed days 1,349, full hold 2,503, stop cap 15,913, event lock 232, entry gate 2,410; issued 1,660, 33.9 a month (median 26).
 - Placebo: percentile 88.5; paired diff vs the per-idea placebo median +0.30 (−0.18 to +0.77). The parity run gave 85.5 and +0.30 (−0.20 to +0.77). The placebo book means are right-skewed: a few extreme draws put their mean (−0.37) above their 95th percentile (−0.46).
 - Verdict: the FULL CI is below zero (NEGATIVE_EDGE); LATE includes zero. No EDGE CLAIM criterion passes.
-- Evidence: the cards' issued-idea figures (`frontend/src/lib/issued-evidence.json`) and the verdict line now come from this run.
+- Evidence: the cards' issued-idea figures (`frontend/src/lib/issued-evidence.json`) and the verdict line now come from this run. *Replaced by run 40205392302 (the same configuration with correct SEC acceptance times; follow-up to the 2026-10-26 report).*
   - The scoring evidence (`config/strategy_performance.json`) stays at run 39384088732 so live scores do not move during the forward test.
   - This run's setup-level aggregates differ slightly: win rate within 0.04 points and expectancy within 0.008%/setup for 5 strategies.
 

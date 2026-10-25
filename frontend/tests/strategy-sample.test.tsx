@@ -23,10 +23,10 @@ test('strategy stats from fewer than 12 signal months are suppressed', () => {
 });
 
 test('adopted issued-idea evidence: small strategies are hidden', () => {
-  assert.strictEqual(ISSUED_RUN_ID, '39451924637');
-  assert.strictEqual(issuedStatsLine('Cross-Sectional Momentum'), 'insufficient sample (n=43)');
+  assert.strictEqual(ISSUED_RUN_ID, '40205392302');
+  assert.strictEqual(issuedStatsLine('Cross-Sectional Momentum'), 'insufficient sample (n=44)');
   assert.strictEqual(issuedStatsLine('Sector Rotation'), 'insufficient sample (n=8)');
-  assert.ok((issuedStatsLine('Trend Following') || '').startsWith('1342 ideas'));
-  assert.strictEqual(issuedStatsLine('Mean Reversion'), '157 ideas in 3 months: too few months to judge');
-  assert.strictEqual(issuedStatsLine('Post-Earnings Drift'), '101 ideas in 10 months: too few months to judge');
+  assert.ok((issuedStatsLine('Trend Following') || '').startsWith('1320 ideas'));
+  assert.strictEqual(issuedStatsLine('Mean Reversion'), '156 ideas in 3 months: too few months to judge');
+  assert.strictEqual(issuedStatsLine('Post-Earnings Drift'), '103 ideas in 10 months: too few months to judge');
 });

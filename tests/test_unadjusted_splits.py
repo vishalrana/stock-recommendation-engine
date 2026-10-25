@@ -1,5 +1,6 @@
 """Splits Yahoo leaves unadjusted (src/data/splits.py): live cache flags, harness truncation, lifecycle."""
 
+import math
 import os
 import sys
 import tempfile
@@ -35,6 +36,49 @@ class TestCheck(unittest.TestCase):
         self.assertFalse(unadjusted_split(_closes(100.0, 95.0), SPLIT, 1.05))
         self.assertTrue(unadjusted_split(_closes(100.0, 80.0), SPLIT, 1.25))      # 5-for-4: checked
         self.assertTrue(unadjusted_split(_closes(10.0, 100.0), SPLIT, 0.1))       # KNDI-like 1-for-10
+
+
+# Yahoo's listed date after the jump: (listed date, ratio, close-to-close log moves around it), from the
+# harness's own call (yf.download period=5y, actions=True) on 2026-10-25, rounded to 0.01
+YAHOO_LATE = {
+    "DHY": ("2026-09-30", 0.1, [("2026-09-24", -0.01), ("2026-09-25", 0.0), ("2026-09-28", -0.01), ("2026-09-29", 2.30),
+                                ("2026-09-30", -0.01), ("2026-10-01", 0.0), ("2026-10-02", 0.0)]),
+    "BTOC": ("2026-10-15", 0.0625, [("2026-10-09", -2.78), ("2026-10-12", -0.08), ("2026-10-13", -0.10), ("2026-10-14", 2.78),
+                                    ("2026-10-15", 0.05), ("2026-10-16", -0.07), ("2026-10-19", -0.01)]),
+    "REVB": ("2026-10-20", 1 / 7, [("2026-10-14", -0.01), ("2026-10-15", 2.00), ("2026-10-16", -2.40), ("2026-10-19", 1.91),
+                                   ("2026-10-20", 0.13), ("2026-10-21", -0.04), ("2026-10-22", 0.02)]),
+    "MBRX": ("2026-10-20", 0.05, [("2026-10-14", -0.06), ("2026-10-15", 2.89), ("2026-10-16", -3.27), ("2026-10-19", 2.94),
+                                  ("2026-10-20", 0.16), ("2026-10-21", 0.02), ("2026-10-22", -0.07)]),
+    "SKIN": ("2026-10-14", 0.05, [("2026-10-08", 2.96), ("2026-10-09", -3.03), ("2026-10-12", 2.95), ("2026-10-13", 0.03),
+                                  ("2026-10-14", 0.07), ("2026-10-15", 0.09), ("2026-10-16", -0.18)]),
+}
+
+
+def _from_moves(moves, start=10.0):
+    days = [pd.Timestamp(d) for d, _ in moves]
+    closes = [start]
+    for _, m in moves:
+        closes.append(closes[-1] * math.exp(m))
+    return pd.Series(closes, index=[days[0] - pd.offsets.BDay(1)] + days)
+
+
+class TestYahooLateDates(unittest.TestCase):
+    def test_a_jump_one_or_two_sessions_before_the_listed_date_is_flagged(self):
+        from src.data.splits import flagged_split_dates, unadjusted_move
+        expect = {"DHY": ("2026-09-29", -1), "BTOC": ("2026-10-14", -1), "REVB": ("2026-10-19", -1),
+                  "MBRX": ("2026-10-19", -1), "SKIN": ("2026-10-12", -2)}
+        for t, (listed, ratio, moves) in YAHOO_LATE.items():
+            m = unadjusted_move(_from_moves(moves), listed, ratio)
+            self.assertIsNotNone(m, t)
+            self.assertEqual((str(m["session"])[:10], m["offset"]), expect[t], t)
+            self.assertLess(abs(m["move"] - m["target"]), 0.25 * abs(m["target"]), t)
+            # the unadjusted prices start where the jump landed, not on Yahoo's date
+            self.assertEqual(flagged_split_dates(_from_moves(moves), [(listed, ratio)]), [expect[t][0]], t)
+
+    def test_an_ordinary_fall_two_sessions_before_a_5_for_4_is_not_a_split(self):
+        self.assertFalse(unadjusted_split(_closes(100.0, 88.0, DAYS[18]), SPLIT, 1.25))   # -12%, two sessions before
+        self.assertTrue(unadjusted_split(_closes(100.0, 80.0, DAYS[18]), SPLIT, 1.25))    # -20%: the unadjusted move
+        self.assertTrue(unadjusted_split(_closes(100.0, 88.0), SPLIT, 1.25))              # on the listed date: today's rule
 
 
 def _yahoo(frames, tickers, start, end, actions):
@@ -96,6 +140,15 @@ class TestHarness(unittest.TestCase):
         self.assertEqual(len(out["OK"]), 31)
         self.assertNotIn("SPLIT", out["OK"].columns)
         self.assertEqual(len(out["OLD"]), 31)                            # stored before split events: unchecked
+
+    def test_truncated_where_an_early_jump_landed(self):
+        from scripts.validate_backtest_pipeline import truncate_unadjusted_splits
+        listed, ratio, moves = YAHOO_LATE["SKIN"]
+        df = pd.DataFrame({"CLOSE": _from_moves(moves), "SPLIT": 0.0})
+        df.loc[pd.Timestamp(listed), "SPLIT"] = ratio
+        out, cut = truncate_unadjusted_splits({"SKIN": df})
+        self.assertEqual(cut, {"SKIN": "2026-10-12"})
+        self.assertEqual(out["SKIN"].index.max(), pd.Timestamp("2026-10-09"))           # the false jump is dropped too
 
     def test_a_split_listed_on_a_day_without_a_bar_is_checked(self):
         # GTBP, IGR, BRTX, BURU, SRTM, WCT on 2026-09-08: Yahoo's split row has no prices; the harness

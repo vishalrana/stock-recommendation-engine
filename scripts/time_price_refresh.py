@@ -22,6 +22,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -79,6 +80,39 @@ def screen(cm, tickers, session: date, wanted) -> dict:
             "wanted": {t: {"rank": int(by.at[t, "rank"]) if t in by.index else None,
                            "ret63_pct": float(by.at[t, "ret63_pct"]) if t in by.index else None,
                            "cached_rows_120d": int(frame[t].notna().sum()) if t in frame else 0} for t in wanted}}
+
+
+def split_sweep(cm) -> dict:
+    """Recorded splits that the widened check (src/data/splits.py) flags and the listed session and the
+    next do not: per event, the session the jump landed on, its move, the unadjusted move (log scale)
+    and the log moves from three sessions before it to two after, to tell a split from an ordinary day."""
+    from src.data.cache_manager import SPLITS_FILE
+    from src.data.splits import unadjusted_move
+    splits = cm._read_json(SPLITS_FILE)
+    closes = cm.cached_closes("0000-00-00", "9999-99-99") if splits else pd.DataFrame()
+    today_rule, new = set(), []
+    for t, events in sorted(splits.items()):
+        if t not in closes.columns:
+            continue
+        c = closes[t].dropna()
+        c = c[c > 0]
+        hits = [(d, r, unadjusted_move(c, d, r)) for d, r in events]
+        if any(m is not None and m["offset"] >= 0 for _, _, m in hits):
+            today_rule.add(t)                     # flagged already: the listed session or the next
+            continue
+        for d, r, m in hits:
+            if m is not None:
+                k = c.index.get_loc(m["session"])
+                around = c.iloc[max(0, k - 4): k + 3]
+                new.append({"ticker": t, "listed": str(d)[:10], "ratio": r, "session": str(m["session"])[:10],
+                            "offset": m["offset"], "move": round(m["move"], 4), "target": round(m["target"], 4),
+                            "miss_pct_of_target": round(100 * abs(m["move"] - m["target"]) / abs(m["target"]), 1),
+                            "log_moves": {str(i)[:10]: round(float(v), 3) for i, v in
+                                          (around.apply(np.log) - around.shift().apply(np.log)).dropna().items()}})
+    stored = cm.split_flagged()
+    return {"tickers_with_splits": len(splits), "flagged_today_rule": len(today_rule),
+            "stored_flags": len(stored), "stored_not_recomputed": sorted(stored - today_rule),
+            "newly_flagged_tickers": sorted({n["ticker"] for n in new}), "newly_flagged": new}
 
 
 DRIFT_TOLERANCE = 0.001   # a close that moved more than 0.1% between the live cache and the rebuild
@@ -172,6 +206,8 @@ def main() -> int:
     ap.add_argument("--sec-events", default="", help="comma-separated tickers: their 8-K item 2.02 events as the "
                     "restored cache holds them (no refetch), for replay diagnosis")
     ap.add_argument("--sec-audit", action="store_true", help="acceptance-time check of every cached SEC document")
+    ap.add_argument("--split-sweep", action="store_true", help="recorded splits the widened check newly flags")
+    ap.add_argument("--report-only", action="store_true", help="only the reports asked for: no timed refresh")
     a = ap.parse_args()
     import jobs.generate_signals as gs
     from jobs.strategies.sector_rotation import SECTOR_ETFS
@@ -214,9 +250,16 @@ def main() -> int:
         if os.path.isdir(backtest_sec):
             out["sec_audit_backtest"] = sec_acceptance_audit(backtest_sec)
 
+    if a.split_sweep:
+        out["split_sweep"] = split_sweep(get_cache_manager())
+
     if a.screen:
         out["screen"] = screen(get_cache_manager(), stocks, date.fromisoformat(a.screen),
                                [t.strip().upper() for t in a.tickers.split(",") if t.strip()])
+
+    if a.report_only:
+        print(json.dumps(out, indent=1))
+        return 0
 
     if a.rebuild:
         fresh = CACHE_DIR + ".rebuild"

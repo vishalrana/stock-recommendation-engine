@@ -27,6 +27,8 @@ class TestParityReplay(unittest.TestCase):
         }
         for reason, stage in cases.items():
             self.assertEqual(live_stage(reason), stage, reason)
+        self.assertEqual(live_stage(float("nan")), "issued")          # pandas 3.1: a missing string is NaN
+        self.assertEqual(live_stage("  "), "issued")
 
     def test_differences_have_causes(self):
         live = pd.DataFrame([
@@ -55,6 +57,19 @@ class TestParityReplay(unittest.TestCase):
         self.assertIn("harness only", by["FFF / Trend Following"]["cause"])
         self.assertEqual(res["unexplained"], [])
 
+
+    def test_load_live_issued_whatever_the_outcome(self):
+        from unittest import mock
+        from scripts.parity_replay import load_live
+        rows = [{"ticker": "OMC", "strategy": "Trend Following", "composite_score": 70.0, "rejection_reason": float("nan"),
+                 "outcome": "stopped", "created_at": "t1"},
+                {"ticker": "XYZ", "strategy": "Trend Following", "composite_score": 50.0,
+                 "rejection_reason": "Composite score 50.0 below Buy threshold (65.0)", "outcome": "rejected", "created_at": "t1"}]
+        client = mock.MagicMock()
+        client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = rows
+        client.table.return_value.select.return_value.in_.return_value.lt.return_value.execute.return_value.data = []
+        live, _ = load_live(client, "2026-10-23")
+        self.assertEqual(dict(zip(live.ticker, live.stage)), {"OMC": "issued", "XYZ": "score_below_65"})
 
     def _main(self, live_rows, harness_rows):
         """Exit code of parity_replay.main() for these decisions, and the step summary it wrote."""

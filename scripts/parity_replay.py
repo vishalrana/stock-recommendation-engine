@@ -33,8 +33,9 @@ MATERIAL_SCORE = 65.0   # the Buy threshold: differences at or above it fail the
 
 
 def live_stage(reason: Optional[str]) -> str:
-    """Stage name for a live rejection reason (None = published)."""
-    r = (reason or "").strip()
+    """Stage name for a live rejection reason (None, NaN or empty = published; pandas 3.1 turns a
+    missing string into NaN)."""
+    r = reason.strip() if isinstance(reason, str) else ""
     if not r:
         return "issued"
     rules = [("Composite score", "score_below_65"), ("Validation failed", "scoring"), ("Scoring error", "scoring"),
@@ -113,7 +114,8 @@ def load_live(client, scan_date: str) -> Tuple[pd.DataFrame, List[str]]:
     if df.empty:
         raise SystemExit(f"No live rows for {scan_date}")
     df = df[df.created_at == df.created_at.max()]
-    df["stage"] = [("issued" if o == "open" and not r else live_stage(r)) for r, o in zip(df.rejection_reason, df.outcome)]
+    # An idea without a rejection reason was issued, whatever its outcome is now (open, stopped, a target)
+    df["stage"] = [live_stage(r) for r in df.rejection_reason]
     opened = (client.table("signals").select("ticker,scan_date,status").in_("status", ["open", "pending"])
               .lt("scan_date", scan_date).execute().data or [])
     return df[["ticker", "strategy", "composite_score", "stage"]], sorted({o["ticker"].upper() for o in opened})

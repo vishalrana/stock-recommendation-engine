@@ -621,7 +621,7 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
 - **Replay of 2026-10-21 (run 40188068848), report only:** the harness would have issued WOR / Trend Following. Candidates: live 2, harness 330.
 - **`scan_log` correction (decision 2):**
   - the row was backed up to `backups/scan_log_20261021_20261025T111714Z/` (local);
-  - the update to `stale_data` with the stale count was blocked by the session's permission rules and waits for the user to run or approve it.
+  - the update to `stale_data` with the stale count was blocked by the session's permission rules and waits for the user to run or approve it. *Done on 2026-10-25* (decision 1 of the 2026-10-26 follow-up).
 - **Fixes:**
   - #52: "cache already covers" is decided per ticker. Tickers without a close on the session download the overlap.
   - #53: more than 1% of tickers skipped as stale makes the run `stale_data`, withholds new ideas, and lets the 04:00 attempt rescan.
@@ -629,7 +629,7 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
 
 #### Saturday replay of 2026-10-23 (run 40107310542): an exception, not the parity rule
 
-- The runner installed pandas 3.1.0, which turns a missing string into NaN. `live_stage` crashed on it in step 5 (`--print-open`, so the harness ran without the open book) and in step 7, the comparison.
+- `live_stage` crashed on a NaN rejection reason in step 5 (`--print-open`, so the harness ran without the open book) and in step 7, the comparison. *Corrected (2026-10-26 follow-up):* the pandas version did not cause it. pandas 3.0.6, used from mid-September, already loads a missing reason as NaN, and `live_stage` crashes the same way on 3.0.6 and 3.1.0. The trigger was the session: only issued ideas have no rejection reason, and 2026-10-23 was the first replayed session with issued ideas (2026-10-19 and 2026-10-20 issued none). The comparison had never run on such a session, and the tests before #51 mocked `load_live`, so none fed it rows as Supabase returns them.
 - #51 fixes it: an idea without a rejection reason is issued, whatever its outcome since.
 - Comparing the run's own harness file with the fixed code, and the clean rerun (run 40187907646, passed, open book OBE, RS, URI), give the same result:
 
@@ -637,10 +637,11 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
   |---|---|---|
   | Issued | NSC, OMC, UNP (Trend Following) | NSC, OMC, UNP |
   | Candidates | 459 | 458 |
-  | Common candidates, stage or score differs | 0 of 456 | |
+  | Common candidates, stage or score differs | 0 of 457 (corrected from 456: 459 = 457 + 2, 458 = 457 + 1) | |
   | One side only (all below 65) | NWSA / Cross-Sectional 63.0, UVE / Cross-Sectional 61.6 | WSBC / Pullback 53.2 |
 
   No difference reaches 65, so nothing needs a class (a), (b) or (c).
+  *Corrected (2026-10-26 follow-up):* there are no other candidates. "456" was an arithmetic error: 457 candidates are common, NWSA and UVE are live only, and WSBC is harness only. The comparison lists those three as one-sided differences and leaves them out of the common count because only one side scored them.
 
 #### Replay proposal (for the user; the replay stays strict)
 
@@ -649,3 +650,115 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
   - **(a) failed closed:** the nightly saves the full lists of pending, split-flagged and stale tickers with the cache (today `scan_log` keeps only 15 of each). A 65+ candidate absent live and on one of those lists is (a).
   - **(b) provider data changed:** the replay restores the nightly's saved cache (cache key from the run) and compares that ticker's closes over the scan window with the harness download. A difference above 0.05% on any bar, or an SEC filing accepted between the nightly and the replay, is (b).
 - Both classes would still be listed in the job summary with their evidence. Anything else stays (c) and fails the run.
+
+### 2026-10-26 follow-up (PRs #56–#64)
+
+#### Decisions
+
+1. **The 2026-10-21 `scan_log` row is corrected** (on 2026-10-25; a user-approved write, the only Supabase write). Its backup is `backups/scan_log_20261021_20261025T111714Z/` (local).
+   - `status`: `success` → `stale_data`.
+   - `error_message`: the stale text, then "; ", then the old split note: "Stale bars: 5148 of 5605 cached tickers had no 2026-10-21 close (cache from rebuild run 39701680622, built at 20:46 ET before Yahoo posted most bars; nothing downloaded); status corrected from success to stale_data on 2026-10-25 (forward-test gap); Price data: 40 with a split Yahoo left unadjusted: AIM, …".
+   - Nothing else changed.
+2. **Replay: capture the data, keep the rule** (user decision).
+   - The nightly saves its full pending, split-flagged and stale lists (#57).
+   - The replay labels a one-sided 65+ candidate on one of those lists as class (a) in the job summary, as information only. Pass/fail is unchanged.
+   - Class (b) waits until a replay fails on it. The user revisits after four Saturday replays.
+3. **The environment is pinned for reproducibility** (user decision; #58).
+   - `requirements.lock` holds 111 exact versions, taken from the evidence runs 39384088732 and 39451924637 and the first forward-test nightly 39377064887. Each run's final install wins: those runs installed peewee and websockets twice.
+   - Every workflow runs on `ubuntu-24.04` with Python 3.11.17 and pip 26.2.1, and installs from the lock.
+   - Nightlies and replays print the installed versions in their job summaries.
+4. **The 5-for-4 minimum in the split guard (#49) is approved** (user decision in the 2026-10-26 follow-up; not a tested result).
+
+#### Corrections
+
+- The pandas version did not cause the 2026-10-23 replay crash, and the common-candidate count is 457. Both are corrected in place above.
+
+#### Fixes
+
+- #56:
+  - replay steps run under `shell: bash` (pipefail);
+  - an unreadable status or open list fails the run;
+  - the Saturday run replays the latest session of the past week whose nightly succeeded, and fails if there is none.
+- #57: class (a) data (decision 2).
+- #58: the pinned environment (decision 3).
+- #59, #60, #61 and #62: diagnostics in the price cache tools: a ticker's cached SEC events, each document's fetch time, and an acceptance-time audit per fetch hour, also of a backtest SEC cache.
+- #63: SEC acceptance times (below).
+- #64: the harness keeps a split Yahoo lists on a day without a bar (MSI, below).
+
+| PR | CI run (success) |
+|---|---|
+| #56 | 40193586305 |
+| #57 | 40193977128 |
+| #58 | 40194569895 |
+| #59 | 40196926035 |
+| #60 | 40198055756 |
+| #61 | 40199384794 |
+| #62 | 40200784442 |
+| #63 | 40202237581 |
+| #64 | 40208729153 |
+
+#### pandas 3.1.0 nights
+
+- Two nightlies installed pandas 3.1.0 (unpinned `requirements.txt`): 39908280498 (session 2026-10-22) and 40066976698 (session 2026-10-23).
+- The evidence runs and nightlies 39377064887, 39552049144 and 39730873219 installed 3.0.6, the version now in the lock.
+- Replays of both sessions on the pinned set:
+  - **2026-10-23** (run 40194768341): passed. NSC, OMC and UNP were issued on both sides, with no difference. The bump changed nothing on this session.
+  - **2026-10-22** (run 40194759794): failed. RS and URI were issued on both sides, with two 65+ differences. Neither came from pandas:
+    - **GTE / Trend Following 67.7:** live `earnings_full_hold` (estimate 2026-10-30), harness `earnings_blackout` (estimate 2026-10-29). Cause: SEC acceptance times (below), an input bug, class (c). Fixed by #63.
+    - **MSI / Cross-Sectional 67.0:** live candidate (stop cap), harness rank 825 of 5,453 with cutoff 817. MSI's own 63-session return is the same on both sides (14.65%). The ranking universes differ:
+      - Live drops its split-flagged tickers from the ranking (`jobs/generate_signals.py`), 31 that night. In the ranking rebuilt from the live cache (run 40197152989), 21 of the 30 named in the log rank above MSI on their unadjusted prices. Without them, MSI moves from 842 (cutoff 824) to 821 (cutoff 819).
+      - The harness drops a ticker from its first unadjusted split on (`truncate_unadjusted_splits`), with the same check (`src/data/splits.py`). On the fix's replay (run 40202451597) it still ranked 12 of the 31, 9 of them above MSI: GTBP +1,604%, SKIN, DHY, BTOC, BURU, BRTX, REVB, MBRX and IGR.
+      - A check of Yahoo with the harness's own call (2026-10-25) shows two causes:
+        - GTBP, IGR, BRTX, BURU, SRTM and WCT have their split on a row with no prices (2026-09-08, a day Yahoo has no bar for them). `load_history` dropped the row with the event, while the live cache keeps every listed event. Fixed by #64.
+        - DHY, BTOC, REVB and MBRX jump one session before Yahoo's listed split date, and SKIN two. The check only reads the listed session and the next one. Live caught them on its own cache's bars.
+      - With #64, the harness drops 4 of the 9 (MSI 822, cutoff 817). Widening the check to the session before would drop 4 more (818, cutoff 816), and to two before, SKIN (817, cutoff 816). Even then, MSI misses the cutoff by one place: the last differences are universe and price data that the nightly does not record (it saves no ranking).
+      - Replay on #64 (run 40208954667, failed on MSI only): the harness truncates 35 tickers (29 before), GTBP, IGR, BRTX and BURU among them. MSI ranks 822 with cutoff 817, as predicted. SKIN, DHY, BTOC, REVB and MBRX still rank above it.
+      - MSI itself did not fail closed, so this is not class (a) as defined. It stays unclassified.
+      - **Open decision (user):** whether the split check should also read the one or two sessions before Yahoo's listed date. That would change the guard live uses too, like the 5-for-4 minimum. A wider window can also flag an ordinary move near a small split, which excludes the ticker (fail closed) rather than issuing a wrong idea.
+
+#### SEC acceptance times: EDGAR now gives true UTC (#63)
+
+- **Finding.** `acceptance_et` assumed the convention checked on 2026-10-11: Eastern time plus twice the UTC offset, labelled `Z`. EDGAR now returns true UTC, so fresh parses were 4–5 h early, and an after-close report read as a same-session reaction.
+
+  Header-verified raw values, read 2026-10-25:
+
+  | Filing | Raw JSON | Header (ET) |
+  |---|---|---|
+  | AAPL 0000320193-26-000018 | 2026-07-30T20:30:28Z | 16:30:28 |
+  | GTE 0001273441-25-000035 | 2025-10-30T21:53:18Z | 17:53:18 |
+  | GTE 0001273441-26-000029 | 2026-08-05T01:05:15Z | 21:05:15 on 2026-08-04 |
+  | TEVA 0001171843-26-000462 | 2026-01-28T12:20:32Z | 07:20:32 |
+
+  All 30 large filers sampled are UTC now, including companies whose last filing was in August.
+- **When.** EDGAR switched document by document. The audits counted cached documents with a filing outside EDGAR's 06:00–22:00 ET weekday hours, a lower bound on wrongly parsed documents: runs 40199601638 and 40199611261 on the live caches, and 40200961833 and 40200974806 on the backtest SEC caches.
+  - Live caches: wrong documents from 2026-10-14. For example, the documents the session 2026-10-23 nightly fetched (run 40066976698, on 2026-10-24) include 66 of 550; documents without a fetch time have 2 of 69, which is the false-positive level.
+  - Backtest SEC cache of 2026-10-20 (`Linux-sec-submissions-39451924637`, also used by 39384088732): **at least 2,104 of 5,067 documents** were parsed early. **Both evidence runs used partly wrong earnings reaction sessions.** That affects the earnings gate, PEAD and the Pullback earnings estimate. The rerun below measures the effect.
+- **Fix (#63).**
+  - Each provider reads the convention once from a canary (AAPL's 8-K of 2026-07-30, 16:30:28 ET). If neither convention matches, it fetches nothing (fail closed).
+  - A response whose own times clearly fit the other convention better is not used.
+  - `CACHE_FORMAT` `v3-tz` refetches every earlier cache file once.
+  - The same functions serve live and backtest. It is an input fix, not a rule change.
+- **Forward test.** The nightlies from about 2026-10-14 read a mix of correct and early times. On the fix:
+  - the 2026-10-22 replay (run 40202451597) issues RS and URI on both sides, and GTE is resolved; MSI remains;
+  - the 2026-10-23 replay (run 40202464506) passes;
+  - the 2026-10-20 replay (run 40203476439) issues nothing on both sides. It fails on MTN 65.3 (entry gate) and TREX 68.9 (earnings full hold), both harness only. Those are the documented dividend-adjustment differences of run 39618808815, with identical scores and stages in both harness files; that run predates the strict rule (ce98da5).
+
+  So no issued forward-test idea (RS, URI, NSC, OMC, UNP) changes. From the next nightly (session 2026-10-26), live reads correct times.
+- **Evidence rerun, report only (not adopted):** run 40205392302 (success), the configuration of 39451924637 (`--variants allow_unknown_earnings`) on the fix.
+  - It restored the evidence run's own price histories and SEC cache (`Linux-backtest-history-39451924637`, `Linux-sec-submissions-39451924637`) and refetched 5,106 SEC documents with the corrected parse.
+  - The universe differs by a few tickers (SEC calendar 5,126 against 5,128 tickers; 2 histories downloaded). The split truncation is a no-op on histories stored before 2026-10-22.
+
+  | | 39451924637 | 40205392302 |
+  |---|---|---|
+  | Issued ideas | 1,660 | 1,640 |
+  | Trades | 1,651 | 1,631 |
+  | Beta-adjusted, all | −0.773% (CI −1.374 to −0.227) | −0.793% (CI −1.393 to −0.224) |
+  | Beta-adjusted, LATE | −0.949% (CI −2.061 to +0.070) | −0.987% (CI −2.108 to +0.027) |
+  | Excess vs SPY, LATE | −1.023% (CI −2.191 to +0.024) | −1.067% (CI −2.216 to −0.043) |
+  | Verdict vs SPY, LATE | `NO_EDGE_DETECTED_CI_INCLUDES_ZERO` | `NEGATIVE_EDGE` |
+  | Placebo percentile | 88.5 | 85.5 |
+  | `allow_unknown_earnings`, beta-adjusted | −0.561% (2,012 trades) | −0.575% (1,992 trades) |
+
+  - 70 of about 1,650 trades differ (45 dropped, 25 added). Most are the same idea one session later, after an earnings report: BRBR 2024-02-05 → 02-06, MCY 07-30 → 07-31, WTS 07-31 → 08-01, EQIX 10-30 → 10-31, and BANR, UMBF and FR. An after-close report now gives the next session as the reaction, so the earnings rules move by a day.
+  - Per-strategy evidence (`strategy_performance_production_universe.json`, every setup) moves by at most 0.002 percentage points per setup: Pullback 24,781 → 24,703 setups, PEAD 8,402 → 8,401, Cross-Sectional 23,113 → 23,105; Trend Following, Mean Reversion and Sector Rotation unchanged. The adopted file (run 39384088732) read the same SEC cache contents.
+  - So the conclusions stand: the book loses to SPY after beta, and the LATE period now also loses to SPY. Whether to adopt the rerun is the user's decision.

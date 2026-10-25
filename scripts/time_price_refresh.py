@@ -91,6 +91,31 @@ def drift_report(old: pd.DataFrame, new: pd.DataFrame, tickers, session: date) -
     }
 
 
+MIN_SESSION_COVERAGE_PCT = 99.0
+
+
+def trim_partial_last_session(closes: pd.DataFrame, cache_dir: str):
+    """
+    Coverage of the rebuild's last session (the one the saved cache will claim as its last bar),
+    against the tickers with a close on the session before it. Yahoo posts a session's bars over
+    hours, so a rebuild run soon after the close can hold it for a few tickers only; below
+    MIN_SESSION_COVERAGE_PCT that session's daily file is deleted, the cache then claims the session
+    before, and the next nightly downloads the dropped session for every ticker.
+    Returns (coverage %, the dropped session or None).
+    """
+    if len(closes.index) < 2:
+        return None, None
+    last, prev = closes.index[-1], closes.index[-2]
+    base = closes.loc[prev].notna()
+    cov = round(float(100.0 * (closes.loc[last].notna() & base).sum() / max(1, int(base.sum()))), 2)
+    if cov >= MIN_SESSION_COVERAGE_PCT:
+        return cov, None
+    path = os.path.join(cache_dir, f"{last.date().isoformat()}.parquet")
+    if os.path.exists(path):
+        os.remove(path)
+    return cov, last.date().isoformat()
+
+
 def write_summary(r: dict) -> None:
     """Counts and lists in the GitHub job summary (near-zero counts mean the nightly refetch holds)."""
     path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -99,7 +124,9 @@ def write_summary(r: dict) -> None:
     few = lambda xs: ", ".join(xs[:60]) + (f" (+{len(xs) - 60})" if len(xs) > 60 else "") if xs else "none"
     flags = r.get("split_flagged", {})
     lines = [f"### Price cache rebuild: {'PASSED, cache replaced' if r['passed'] else 'FAILED, cache kept'}", "",
-             f"Coverage of {r.get('compared_session')}: {r['session_coverage_pct']}% · tickers keeping a year of bars: "
+             f"Last session {r.get('end_session')}: {r.get('end_coverage_pct')}% of tickers"
+             + (f", below {MIN_SESSION_COVERAGE_PCT:g}%: dropped, the nightly downloads it" if r.get("dropped_session") else "")
+             + f" · coverage of {r.get('compared_session')}: {r['session_coverage_pct']}% · tickers keeping a year of bars: "
              f"{r['history_kept_pct']}% · last bar {r['last_bar']} · {r.get('seconds')} s", "",
              "| Drift report | Count | Tickers |", "|---|---|---|",
              f"| Closes moved > 0.1% on a common session | {len(r['drifted'])} | {few(r['drifted'])} |",
@@ -146,11 +173,18 @@ def main() -> int:
         rebuilt = CacheManager(cache_dir=fresh)
         rebuilt.refresh_cache(tickers, full_start, end.isoformat(), actions=True)   # split events seed the check
         split_flags = rebuilt.update_split_flags()
+        new_closes = rebuilt.cached_closes("0000-00-00", "9999-99-99")
+        end_cov, dropped = trim_partial_last_session(new_closes, fresh)
+        if dropped:
+            new_closes = new_closes.drop(index=pd.Timestamp(dropped))
         report = drift_report(CacheManager(cache_dir=CACHE_DIR).cached_closes("0000-00-00", "9999-99-99"),
-                              rebuilt.cached_closes("0000-00-00", "9999-99-99"), tickers, end)
+                              new_closes, tickers, end)
+        claims = new_closes.index.max().date().isoformat() if len(new_closes) else None
+        # The saved cache claims `end` only when nearly every ticker has it; otherwise the session before
         passed = (report["session_coverage_pct"] >= 99.0 and report["history_kept_pct"] >= 99.0
-                  and report["last_bar"] == end.isoformat())
+                  and claims is not None and (dropped is not None or claims == end.isoformat()))
         out["rebuild"] = dict(report, passed=passed, seconds=round(time.time() - t0, 1), tickers=len(tickers),
+                              end_session=end.isoformat(), end_coverage_pct=end_cov, dropped_session=dropped,
                               split_flagged={t: split_flags[t] for t in sorted(split_flags)})
         write_summary(out["rebuild"])
         if passed:

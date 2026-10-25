@@ -98,6 +98,15 @@ jobs:
 
           echo "✅ Signal generation completed in ${DURATION}s"
 
+      - name: Save the session's exclusions (pending, split-flagged, stale) for the parity replay
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-exclusions
+          path: outputs/nightly_exclusions.json
+          retention-days: 90
+          if-no-files-found: ignore
+
       - name: Log Summary
         if: always()
         run: |

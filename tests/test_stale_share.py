@@ -4,6 +4,7 @@ no new ideas, the count in error_message, and the 04:00 attempt rescans."""
 import argparse
 import os
 import sys
+import tempfile
 import unittest
 from datetime import date
 from unittest.mock import MagicMock, patch
@@ -29,7 +30,7 @@ def _history(last):
     return pd.DataFrame({"OPEN": close, "HIGH": close, "LOW": close, "CLOSE": close, "VOLUME": 5_000_000.0}, index=idx)
 
 
-def _scan(n_tickers, n_stale):
+def _scan(n_tickers, n_stale, exclusions_path=None):
     tickers = [f"T{i:03d}" for i in range(n_tickers)]
     stale = set(tickers[:n_stale])
     tables = {}
@@ -57,6 +58,8 @@ def _scan(n_tickers, n_stale):
             patch("jobs.generate_signals._sec_run_status", return_value=(None, False)), \
             patch("jobs.generate_signals.STRATEGIES", [NoSignal()]), \
             patch("jobs.generate_signals.reconcile_recommendation_lifecycle"), \
+            patch("jobs.generate_signals.EXCLUSIONS_PATH",
+                  exclusions_path or os.path.join(tempfile.gettempdir(), "nightly_exclusions_test.json")), \
             patch("argparse.ArgumentParser.parse_args",
                   return_value=argparse.Namespace(dry_run=False, force_refresh=False, verbose=False, cache_mode="local")):
         from jobs.generate_signals import main
@@ -70,6 +73,15 @@ class TestStaleShare(unittest.TestCase):
         self.assertEqual(row["status"], "stale_data")
         self.assertIn("Stale bars: 19 of 20 tickers (95.0%) have no 2026-10-21 bar", row["error_message"])
         self.assertEqual(row["signals_recommended"], 0)
+
+    def test_the_full_exclusion_lists_are_saved(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nightly_exclusions.json")
+            _scan(20, 19, path)
+            doc = json.load(open(path, encoding="utf-8"))
+        self.assertEqual(doc["session"], "2026-10-21")
+        self.assertEqual(len(doc["stale"]), 19)                         # all of them, not 15 as in scan_log
 
     def test_a_normal_night_stays_success(self):
         row = _scan(200, 1)                      # 0.5%, as the 1-3 of ~5,500 on normal nights

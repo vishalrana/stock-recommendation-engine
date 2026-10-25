@@ -20,7 +20,7 @@ import os
 import shutil
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -30,9 +30,10 @@ CACHE_DIR = os.path.join("data", "cache", "by_date")
 
 
 def sec_acceptance_audit(cache_dir: str) -> dict:
-    """Per fetch hour (UTC) of the cached SEC documents: 'recent' filings and the share accepted
-    before 06:00 ET. EDGAR accepts filings from 06:00 ET, so a large share means that hour's
-    documents were parsed with the wrong acceptanceDateTime convention (times 4-5 h early)."""
+    """Per fetch hour (UTC) of the cached SEC documents: 'recent' filings, the share accepted before
+    06:00 ET, and the documents with any filing outside EDGAR's hours (06:00-22:00 ET, weekdays),
+    which were parsed with the wrong acceptanceDateTime convention (times 4-5 h early). A wrongly
+    parsed document without pre-market filings is not detected, so 'wrong_documents' is a lower bound."""
     out: dict = {}
     for path in glob.glob(os.path.join(cache_dir, "CIK*.json")):
         try:
@@ -40,11 +41,15 @@ def sec_acceptance_audit(cache_dir: str) -> dict:
             hour = time.strftime("%Y-%m-%dT%H", time.gmtime(float(doc["fetched_at"])))
         except Exception:
             continue
-        b = out.setdefault(hour, {"documents": 0, "filings": 0, "before_06_et": 0})
+        b = out.setdefault(hour, {"documents": 0, "wrong_documents": 0, "filings": 0, "before_06_et": 0})
         b["documents"] += 1
+        wrong = False
         for r in doc.get("recent_rows", []):
+            t = datetime.fromisoformat(r[1])
             b["filings"] += 1
-            b["before_06_et"] += int(r[1][11:13]) < 6
+            b["before_06_et"] += t.hour < 6
+            wrong |= t.hour < 6 or t.strftime("%H:%M:%S") > "22:00:00" or t.weekday() >= 5
+        b["wrong_documents"] += wrong
     for b in out.values():
         b["share_before_06_et"] = round(b["before_06_et"] / b["filings"], 3) if b["filings"] else None
     return dict(sorted(out.items()))
@@ -205,6 +210,9 @@ def main() -> int:
     if a.sec_audit:
         from src.providers.context.sec_filings import LIVE_CACHE_DIR
         out["sec_audit"] = sec_acceptance_audit(LIVE_CACHE_DIR)
+        backtest_sec = os.path.join("data", "backtest_history", "sec", "submissions")
+        if os.path.isdir(backtest_sec):
+            out["sec_audit_backtest"] = sec_acceptance_audit(backtest_sec)
 
     if a.screen:
         out["screen"] = screen(get_cache_manager(), stocks, date.fromisoformat(a.screen),

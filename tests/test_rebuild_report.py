@@ -79,6 +79,8 @@ class TestSecAudit(unittest.TestCase):
             audit = sec_acceptance_audit(d)
         self.assertEqual(audit["2026-10-23T05"]["share_before_06_et"], 0.0)
         self.assertEqual(audit["2026-10-25T13"]["share_before_06_et"], 0.5)
+        self.assertEqual(audit["2026-10-23T05"]["wrong_documents"], 0)
+        self.assertEqual(audit["2026-10-25T13"]["wrong_documents"], 1)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,10 @@ on:
         description: 'true: acceptance-time check of every cached SEC document, per fetch hour'
         required: false
         default: 'false'
+      sec_cache_key:
+        description: 'With sec_audit: also restore and audit this backtest SEC cache (e.g. Linux-sec-submissions-<run id>)'
+        required: false
+        default: ''
       cache_key:
         description: 'time/screen only: restore this exact nightly cache (e.g. Linux-data-cache-v2-<run id>); empty = the newest'
         required: false
@@ -80,6 +84,12 @@ jobs:
           key: ${{ (env.MODE != 'rebuild' && inputs.cache_key) || format('{0}-data-cache-v2-none', runner.os) }}
           restore-keys: |
             ${{ (env.MODE != 'rebuild' && inputs.cache_key) || format('{0}-data-cache-v2-', runner.os) }}
+      - uses: actions/cache/restore@v4
+        if: steps.when.outputs.skip != 'true' && inputs.sec_cache_key != ''
+        with:
+          path: data/backtest_history/sec/submissions
+          key: ${{ inputs.sec_cache_key }}
+          fail-on-cache-miss: true
       - if: steps.when.outputs.skip != 'true'
         run: |
           python -m pip install pip==26.2.1

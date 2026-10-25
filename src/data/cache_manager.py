@@ -294,6 +294,19 @@ class CacheManager:
             time.sleep(REFRESH_CHUNK_PAUSE_S)
 
     # Corporate actions: keep adjusted history consistent, as the swing job does (src/swing/live.py)
+    def tickers_without_close(self, tickers: List[str], day) -> List[str]:
+        """The tickers with no cached close on `day` (its daily file holds only the tickers Yahoo had
+        posted when it was downloaded, e.g. a rebuild run before most bars were out)."""
+        path = self._get_cache_path(pd.Timestamp(day).strftime("%Y-%m-%d"))
+        present: Set[str] = set()
+        if os.path.exists(path):
+            try:
+                df = pd.read_parquet(path, columns=["CLOSE"])
+                present = set(df.index.get_level_values("Ticker")[df["CLOSE"].notna().to_numpy()])
+            except Exception:
+                present = set()
+        return [t for t in tickers if str(t).upper() not in present]
+
     def pending_refetch(self) -> Set[str]:
         """Tickers whose full refetch after a dividend or split failed. Their cached history mixes two
         adjustments, so the scan keeps them out of new ideas and lifecycle until a refetch succeeds."""

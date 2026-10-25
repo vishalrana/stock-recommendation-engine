@@ -1183,9 +1183,18 @@ def run_scan(
 
     elif cache_mode == "incremental":
         last_cached = cache_manager.get_last_cached_date()
+        incremental_tickers = all_download_tickers
         if last_cached and last_cached >= end_date_dt:
-            start_date_dt = end_date_dt + timedelta(days=1)  # already current: nothing to download
-            logger.info(f"INCREMENTAL: Cache already covers {end_date_dt}.")
+            # The newest daily file can hold the session for a few tickers only (a rebuild run before
+            # Yahoo posted most bars): decide per ticker, never on that file's date alone.
+            incremental_tickers = cache_manager.tickers_without_close(all_download_tickers, end_date_dt)
+            if incremental_tickers:
+                start_date_dt = end_date_dt - timedelta(days=INCREMENTAL_OVERLAP_DAYS)
+                logger.info("INCREMENTAL: %d of %d tickers have no %s close; downloading %s to %s for them.",
+                            len(incremental_tickers), len(all_download_tickers), end_date_dt, start_date_dt, end_date_dt)
+            else:
+                start_date_dt = end_date_dt + timedelta(days=1)  # every ticker has the session: nothing to download
+                logger.info(f"INCREMENTAL: Cache already covers {end_date_dt} for every ticker.")
         elif last_cached:
             start_date_dt = last_cached - timedelta(days=INCREMENTAL_OVERLAP_DAYS)
             logger.info(f"INCREMENTAL: Downloading from {start_date_dt} to {end_date_dt} (last cached: {last_cached}, {INCREMENTAL_OVERLAP_DAYS}-day overlap)")
@@ -1195,7 +1204,7 @@ def run_scan(
         full_start = (end_date_dt - timedelta(days=500)).isoformat()
         if not dry_run and start_date_dt <= end_date_dt:
             if last_cached:   # new bars, plus a full refetch of tickers with a new dividend or split
-                cache_manager.refresh_with_actions(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat(),
+                cache_manager.refresh_with_actions(incremental_tickers, start_date_dt.isoformat(), end_date_dt.isoformat(),
                                                    full_start=full_start, since=last_cached)
             else:
                 cache_manager.refresh_cache(all_download_tickers, start_date_dt.isoformat(), end_date_dt.isoformat())

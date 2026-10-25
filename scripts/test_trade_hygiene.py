@@ -52,8 +52,52 @@ class TestSecTimes(unittest.TestCase):
             "2015-01-28T02:31:00.000Z": datetime(2015, 1, 27, 16, 31, 0),    # older submissions page
         }
         for raw, expected in cases.items():
-            self.assertEqual(acceptance_et(raw), expected, raw)
-        self.assertIsNone(acceptance_et("not a date"))
+            self.assertEqual(acceptance_et(raw, "shifted"), expected, raw)
+        self.assertIsNone(acceptance_et("not a date", "shifted"))
+
+    def test_true_utc_convention_matches_edgar_headers(self):
+        # EDGAR returned true UTC by 2026-10-25; pairs checked against the -index-headers that day
+        cases = {
+            "2026-07-30T20:30:28.000Z": datetime(2026, 7, 30, 16, 30, 28),   # AAPL 0000320193-26-000018
+            "2025-10-30T21:53:18.000Z": datetime(2025, 10, 30, 17, 53, 18),  # GTE 0001273441-25-000035
+            "2026-08-05T01:05:15.000Z": datetime(2026, 8, 4, 21, 5, 15),     # GTE 0001273441-26-000029, after 20:00 ET
+            "2026-01-28T12:20:32.000Z": datetime(2026, 1, 28, 7, 20, 32),    # TEVA, standard time
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(acceptance_et(raw, "utc"), expected, raw)
+
+    def test_the_canary_tells_the_convention(self):
+        from src.providers.context.sec_filings import detect_convention
+        def block(raw):
+            return {"form": ["4", "8-K"], "filingDate": ["2026-07-30", "2026-07-30"],
+                    "acceptanceDateTime": ["2026-07-30T22:00:00.000Z", raw], "items": ["", "2.02,9.01"]}
+        self.assertEqual(detect_convention(block("2026-07-30T20:30:28.000Z")), "utc")
+        self.assertEqual(detect_convention(block("2026-07-31T00:30:28.000Z")), "shifted")
+        self.assertIsNone(detect_convention(block("2026-07-30T16:30:28.000Z")))     # neither: fetch nothing
+        self.assertIsNone(detect_convention({}))
+
+    def test_a_response_in_the_other_convention_is_not_used(self):
+        from src.providers.context.sec_filings import contradicts
+        pre_market_utc = ["2026-07-1%dT11:00:00.000Z" % d for d in range(3, 8)]   # 07:00 ET, Mon-Fri
+        self.assertTrue(contradicts(pre_market_utc, "shifted"))                  # would read 03:00 ET
+        self.assertFalse(contradicts(pre_market_utc, "utc"))
+        self.assertFalse(contradicts(["2026-07-14T19:00:00.000Z"], "shifted"))   # fits both: no verdict
+
+    def test_earlier_cache_files_are_refetched(self):
+        import json, tempfile
+        from unittest import mock
+        from src.providers.context import sec_filings as sf
+        sec = mock.MagicMock(available=True)
+        sec.cik_for.return_value = 1
+        sec._get_json.return_value = None                                       # any fetch fails
+        row = [["8-K", "2026-07-30T16:30:28", "2.02"]]
+        with tempfile.TemporaryDirectory() as d:
+            prov = sf.SecFilingsProvider(cache_dir=d, ttl_hours=None, sec=sec)
+            for fmt, expect in (("v2-6k", None), (sf.CACHE_FORMAT, 1)):    # v2: refetch, which fails here
+                json.dump({"fetched_at": 1792731600, "since": "2021-01-01", "format": fmt,
+                           "recent_rows": row, "pages": {}}, open(prov._path(1), "w"))
+                got = prov.filings("X")
+                self.assertEqual(None if got is None else len(got), expect, fmt)
 
     def test_reaction_session(self):
         self.assertEqual(reaction_session(datetime(2026, 7, 30, 16, 30)), date(2026, 7, 31))   # Thu after close
@@ -72,7 +116,7 @@ class TestEarningsEvents(unittest.TestCase):
                                    "2026-05-01T00:30:41.000Z", "2026-06-01T20:00:00.000Z", "2026-06-10T20:00:00.000Z"],
             "items": ["2.02,9.01", "2.02", "", "2.02,9.01", "", "8.01"],
         }
-        filings = parse_filings(block, since=date(2026, 1, 1))
+        filings = parse_filings(block, "shifted", since=date(2026, 1, 1))
         self.assertEqual({f.form for f in filings}, {"8-K", "DEFM14A"})       # Form 4 dropped, /A folded
         ev = earnings_events(filings)
         self.assertEqual([e.reaction for e in ev], [date(2026, 5, 1), date(2026, 7, 31)])  # amendment deduplicated

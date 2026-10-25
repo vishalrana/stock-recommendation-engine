@@ -15,8 +15,15 @@ Earnings dates
 
 acceptanceDateTime
   Checked against the EDGAR filing headers on 2026-10-11 (AAPL, JPM, TEVA, 2015 to 2026): the JSON
-  value is the Eastern acceptance time shifted forward by twice the Eastern UTC offset (+8 h under
-  daylight time, +10 h otherwise) and labelled "Z". acceptance_et() undoes that.
+  value was the Eastern acceptance time shifted forward by twice the Eastern UTC offset (+8 h under
+  daylight time, +10 h otherwise) and labelled "Z" ("shifted"). By 2026-10-25 EDGAR returned true
+  UTC instead ("utc"; GTE, AAPL, JPM, TEVA headers). Each provider reads the convention once from a
+  canary with a header-verified time (AAPL's 8-K of 2026-07-30, 16:30:28 ET) and fetches nothing
+  when neither convention matches it. A response whose own acceptance times clearly fit the other
+  convention better (fewer times outside EDGAR's 06:00-22:00 ET weekday hours) is not used.
+  EDGAR switched document by document: caches fetched from about 2026-10-14 hold both kinds (the
+  backtest cache of 2026-10-20: at least 2,104 of 5,067 documents parsed 4-5 h early), so every
+  earlier cache file is refetched (CACHE_FORMAT). Cached rows hold Eastern times.
 
 Event lock (corporate actions that break a technical setup)
   Locked from a deal filing: 425, PREM14A, DEFM14A, S-4, SC TO-T, SC TO-I, SC 14D9, SC 13E3 (and
@@ -39,7 +46,7 @@ import os
 import time
 from functools import lru_cache
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
@@ -69,7 +76,9 @@ PIN_WINDOW_SESSIONS = 30
 
 # 6-K (foreign private issuers' current reports) is kept for the swing catalyst-gap sleeve.
 _KEEP_FORMS = DEAL_FORMS | UNLOCK_FORMS | {"8-K", "6-K"}
-CACHE_FORMAT = "v2-6k"   # bump when _KEEP_FORMS changes, so older cache files are refetched
+CACHE_FORMAT = "v3-tz"   # bump when _KEEP_FORMS or the parsing changes, so older cache files are refetched
+CANARY_CIK, CANARY_FILED, CANARY_ET = 320193, "2026-07-30", datetime(2026, 7, 30, 16, 30, 28)
+CONVENTIONS = ("utc", "shifted")
 DECISION_CUTOFF_HOUR = 20  # a filing accepted after 20:00 ET belongs to the next session
 
 
@@ -78,14 +87,36 @@ def base_form(form: str) -> str:
     return f[:-2] if f.endswith("/A") else f
 
 
-def acceptance_et(raw: str) -> Optional[datetime]:
+def acceptance_et(raw: str, convention: str) -> Optional[datetime]:
     """Naive Eastern acceptance time from the submissions JSON acceptanceDateTime (see module notes)."""
     try:
-        shifted = datetime.strptime(str(raw)[:19], "%Y-%m-%dT%H:%M:%S")
+        t = datetime.strptime(str(raw)[:19], "%Y-%m-%dT%H:%M:%S")
     except (TypeError, ValueError):
         return None
-    offset = -NY.utcoffset(shifted - timedelta(hours=8))   # 4 h (EDT) or 5 h (EST)
-    return shifted - 2 * offset
+    if convention == "utc":
+        return t.replace(tzinfo=timezone.utc).astimezone(NY).replace(tzinfo=None)
+    offset = -NY.utcoffset(t - timedelta(hours=8))   # 4 h (EDT) or 5 h (EST)
+    return t - 2 * offset
+
+
+def _outside_edgar_hours(t: datetime) -> bool:
+    return t.weekday() >= 5 or t.hour < 6 or t.strftime("%H:%M:%S") > "22:00:00"
+
+
+def contradicts(raws: Sequence[Any], convention: str) -> bool:
+    """The other convention fits these acceptance times clearly better (3x fewer outside EDGAR hours, by 3+)."""
+    bad = {c: sum(_outside_edgar_hours(t) for t in (acceptance_et(r, c) for r in raws) if t) for c in CONVENTIONS}
+    other = next(c for c in CONVENTIONS if c != convention)
+    return bad[convention] >= 3 * bad[other] + 3
+
+
+def detect_convention(recent: Dict[str, Sequence[Any]]) -> Optional[str]:
+    """The acceptanceDateTime convention under which the canary 8-K reads its header time, or None."""
+    for form, filed, raw, items in zip(recent.get("form") or [], recent.get("filingDate") or [],
+                                       recent.get("acceptanceDateTime") or [], recent.get("items") or []):
+        if base_form(form) == "8-K" and filed == CANARY_FILED and EARNINGS_ITEM in str(items):
+            return next((c for c in CONVENTIONS if acceptance_et(raw, c) == CANARY_ET), None)
+    return None
 
 
 def reaction_session(accepted: datetime) -> date:
@@ -115,7 +146,7 @@ class EarningsEvent:
     accepted: datetime
 
 
-def parse_filings(columns: Dict[str, Sequence[Any]], since: Optional[date] = None) -> List[Filing]:
+def parse_filings(columns: Dict[str, Sequence[Any]], convention: str, since: Optional[date] = None) -> List[Filing]:
     """Filings of the forms this module uses, from a submissions 'recent' block or an older page."""
     out: List[Filing] = []
     forms = columns.get("form") or []
@@ -125,7 +156,7 @@ def parse_filings(columns: Dict[str, Sequence[Any]], since: Optional[date] = Non
         bf = base_form(f)
         if bf not in _KEEP_FORMS:
             continue
-        ts = acceptance_et(a)
+        ts = acceptance_et(a, convention)
         if ts is None or (since is not None and ts.date() < since):
             continue
         out.append(Filing(bf, ts, tuple(x.strip() for x in str(it or "").split(",") if x.strip())))
@@ -279,6 +310,19 @@ class SecFilingsProvider:
         self.ttl_hours = ttl_hours
         self.since = since
         self.stats = {"fetched": 0, "cache_hits": 0, "no_cik": 0, "failed": 0}
+        self._convention: Optional[str] = None
+
+    def convention(self) -> Optional[str]:
+        """EDGAR's acceptanceDateTime convention, read once from the canary (None: unknown, fetch nothing)."""
+        if self._convention is None:
+            data = self.sec._get_json(SUBMISSIONS_URL.format(cik=CANARY_CIK))
+            self._convention = detect_convention((data or {}).get("filings", {}).get("recent", {}))
+            if self._convention is None:
+                logger.error("[SEC] acceptanceDateTime convention unknown (canary %s not matched): no filings fetched",
+                             CANARY_FILED)
+            else:
+                logger.info("[SEC] acceptanceDateTime convention: %s", self._convention)
+        return self._convention
 
     @property
     def available(self) -> bool:
@@ -314,11 +358,19 @@ class SecFilingsProvider:
             return filings_from_rows(doc.get("recent_rows", []) + [r for rows in doc.get("pages", {}).values() for r in rows])
         if not self.available:
             return None
+        convention = self.convention()
+        if convention is None:
+            self.stats["failed"] += 1
+            return None
         data = self.sec._get_json(SUBMISSIONS_URL.format(cik=cik))
         if not data:
             self.stats["failed"] += 1
             return None
-        recent = parse_filings(data.get("filings", {}).get("recent", {}), self.since)
+        if contradicts(data.get("filings", {}).get("recent", {}).get("acceptanceDateTime") or [], convention):
+            logger.warning("[SEC] CIK %s: acceptance times do not fit the %s convention; not used", cik, convention)
+            self.stats["failed"] += 1
+            return None
+        recent = parse_filings(data.get("filings", {}).get("recent", {}), convention, self.since)
         pages: Dict[str, List[List[Any]]] = {}
         old_pages = doc.get("pages", {})
         for page in data.get("filings", {}).get("files", []) or []:
@@ -329,10 +381,10 @@ class SecFilingsProvider:
                 pages[name] = old_pages[name]
                 continue
             older = self.sec._get_json(SUBMISSIONS_PAGE_URL.format(name=name))
-            if older is None:
+            if older is None or contradicts(older.get("acceptanceDateTime") or [], convention):
                 self.stats["failed"] += 1
                 return None  # incomplete history: unavailable rather than silently partial
-            pages[name] = compact_rows(parse_filings(older, self.since))
+            pages[name] = compact_rows(parse_filings(older, convention, self.since))
         self.stats["fetched"] += 1
         new_doc = {"fetched_at": time.time(), "since": self.since.isoformat(), "format": CACHE_FORMAT, "name": data.get("name"),
                    "sic": data.get("sicDescription"), "recent_rows": compact_rows(recent), "pages": pages}

@@ -115,6 +115,53 @@ def split_sweep(cm) -> dict:
             "newly_flagged_tickers": sorted({n["ticker"] for n in new}), "newly_flagged": new}
 
 
+def split_exposure(run_dir: str, history_dir: str = os.path.join("data", "backtest_history")) -> dict:
+    """A backtest's ideas whose ticker had a split Yahoo left unadjusted (the widened check,
+    src/data/splits.py) in the stored history the run used: from the first such split on, the split
+    guard would have dropped the bars, so an idea filled on or after it would not exist ("before
+    entry") and one open across it would have ended censored ("during the hold"). Split events are
+    read fresh from Yahoo, and only those within the stored history's span count."""
+    import yfinance as yf
+    from src.data.cache_manager import CacheManager
+    from src.data.splits import flagged_split_dates
+    trades = pd.read_csv(os.path.join(run_dir, "production_backtest_trades_production_universe.csv"))
+    tickers = sorted(trades.ticker.unique())
+    events = {}
+    for i in range(0, len(tickers), 100):
+        events.update(CacheManager.extract_splits(yf.download(tickers[i:i + 100], period="5y", group_by="ticker",
+                                                              auto_adjust=True, actions=True, progress=False, threads=True)))
+    first, checked = {}, 0
+    for t in tickers:
+        path = os.path.join(history_dir, f"{t}.parquet")
+        if t not in events or not os.path.exists(path):
+            continue
+        c = pd.read_parquet(path, columns=["CLOSE"])["CLOSE"]
+        c.index = pd.to_datetime(c.index)
+        dates = flagged_split_dates(c, [(d, r) for d, r in events[t] if pd.Timestamp(d) <= c.index.max()])
+        checked += 1
+        if dates:
+            first[t] = dates[0]
+    hit = []
+    for r in trades.itertuples(index=False):
+        d = first.get(r.ticker)
+        when = None if d is None else "before_entry" if d <= str(r.fill_date)[:10] else             "during_hold" if d <= str(r.exit_date)[:10] else None
+        if when:
+            hit.append({"ticker": r.ticker, "strategy": r.strategy, "signal_date": str(r.signal_date)[:10],
+                        "fill_date": str(r.fill_date)[:10], "exit_date": str(r.exit_date)[:10], "first_unadjusted": d,
+                        "when": when, "outcome": r.outcome, "net_return_pct": round(float(r.net_return_pct), 3),
+                        "beta_adjusted_pct": None if pd.isna(r.beta_adjusted_pct) else round(float(r.beta_adjusted_pct), 3)})
+    affected = {(h["ticker"], h["strategy"], h["signal_date"]) for h in hit}
+    rest = trades[[(t, s, str(d)[:10]) not in affected for t, s, d in zip(trades.ticker, trades.strategy, trades.signal_date)]]
+    mean = lambda s: None if not len(s.dropna()) else round(float(s.dropna().mean()), 3)
+    return {"trades": int(len(trades)), "tickers": len(tickers), "tickers_with_split_events": len(events),
+            "tickers_checked": checked, "tickers_with_unadjusted_split": len(first),
+            "before_entry": sum(h["when"] == "before_entry" for h in hit),
+            "during_hold": sum(h["when"] == "during_hold" for h in hit),
+            "mean_beta_adjusted_pct": {"all": mean(trades.beta_adjusted_pct), "without_affected": mean(rest.beta_adjusted_pct),
+                                       "affected": mean(pd.Series([h["beta_adjusted_pct"] for h in hit], dtype=float))},
+            "affected": hit}
+
+
 DRIFT_TOLERANCE = 0.001   # a close that moved more than 0.1% between the live cache and the rebuild
 LONG_BARS = 252            # a year of bars: what the scan needs
 
@@ -208,6 +255,8 @@ def main() -> int:
     ap.add_argument("--sec-audit", action="store_true", help="acceptance-time check of every cached SEC document")
     ap.add_argument("--split-sweep", action="store_true", help="recorded splits the widened check newly flags")
     ap.add_argument("--report-only", action="store_true", help="only the reports asked for: no timed refresh")
+    ap.add_argument("--split-exposure", default=None, metavar="RUN_DIR",
+                    help="a backtest artifact's ideas with an unadjusted split in data/backtest_history")
     a = ap.parse_args()
     import jobs.generate_signals as gs
     from jobs.strategies.sector_rotation import SECTOR_ETFS
@@ -252,6 +301,9 @@ def main() -> int:
 
     if a.split_sweep:
         out["split_sweep"] = split_sweep(get_cache_manager())
+
+    if a.split_exposure:
+        out["split_exposure"] = split_exposure(a.split_exposure)
 
     if a.screen:
         out["screen"] = screen(get_cache_manager(), stocks, date.fromisoformat(a.screen),

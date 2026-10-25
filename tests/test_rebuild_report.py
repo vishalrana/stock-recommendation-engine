@@ -101,5 +101,36 @@ class TestSplitSweep(unittest.TestCase):
         self.assertEqual((out["flagged_today_rule"], out["stored_not_recomputed"]), (1, []))
 
 
+class TestSplitExposure(unittest.TestCase):
+    def test_ideas_from_an_unadjusted_split_on_are_counted(self):
+        import tempfile
+        from unittest import mock
+        from scripts.time_price_refresh import split_exposure
+        idx = pd.bdate_range("2026-01-05", periods=60)
+        with tempfile.TemporaryDirectory() as d:
+            hist = os.path.join(d, "hist")
+            os.makedirs(hist)
+            # the stored history the run used: BAD's 1-for-10 on idx[30] left unadjusted, OK has no split
+            pd.DataFrame({"CLOSE": [1.0] * 30 + [10.0] * 30}, index=idx).to_parquet(os.path.join(hist, "BAD.parquet"))
+            pd.DataFrame({"CLOSE": [5.0] * 60}, index=idx).to_parquet(os.path.join(hist, "OK.parquet"))
+            trades = pd.DataFrame([("BAD", idx[35], idx[36], idx[45], -5.5),      # filled after the split
+                                   ("BAD", idx[20], idx[21], idx[32], 3.5),       # open across it
+                                   ("BAD", idx[5], idx[6], idx[15], 0.5),         # before it
+                                   ("OK", idx[35], idx[36], idx[45], 1.0)],
+                                  columns=["ticker", "signal_date", "fill_date", "exit_date", "beta_adjusted_pct"])
+            trades = trades.assign(strategy="Trend Following", outcome="expired", net_return_pct=trades.beta_adjusted_pct)
+            for c in ("signal_date", "fill_date", "exit_date"):
+                trades[c] = trades[c].dt.date.astype(str)
+            trades.to_csv(os.path.join(d, "production_backtest_trades_production_universe.csv"), index=False)
+            yahoo = pd.concat({t: pd.DataFrame({"Close": 1.0, "Stock Splits": 0.0}, index=idx) for t in ("BAD", "OK")}, axis=1)
+            yahoo.loc[idx[30], ("BAD", "Stock Splits")] = 0.1
+            with mock.patch("yfinance.download", return_value=yahoo):
+                out = split_exposure(d, hist)
+        self.assertEqual((out["tickers_with_unadjusted_split"], out["before_entry"], out["during_hold"]), (1, 1, 1))
+        self.assertEqual({h["fill_date"]: h["when"] for h in out["affected"]},
+                         {str(idx[36].date()): "before_entry", str(idx[21].date()): "during_hold"})
+        self.assertEqual(out["mean_beta_adjusted_pct"], {"all": -0.125, "without_affected": 0.75, "affected": -1.0})
+
+
 if __name__ == "__main__":
     unittest.main()

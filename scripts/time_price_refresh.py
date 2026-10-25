@@ -169,6 +169,13 @@ def main() -> int:
         out["sec_events"] = {}
         for t in [x.strip().upper() for x in a.sec_events.split(",") if x.strip()]:
             f = cached.filings(t)
+            cik = cached.sec.cik_for(t)
+            try:
+                doc = json.load(open(cached._path(int(cik)), encoding="utf-8")) if cik else {}
+            except Exception:
+                doc = {}
+            out.setdefault("sec_fetched_at", {})[t] = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(doc["fetched_at"]))
+                                                      if doc.get("fetched_at") else doc.get("fetched_at"))
             out["sec_events"][t] = None if f is None else [
                 {"announced": e.announced.isoformat(), "reaction": e.reaction.isoformat(), "accepted": e.accepted.isoformat()}
                 for e in earnings_events(f)][-8:]

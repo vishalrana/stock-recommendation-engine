@@ -97,6 +97,19 @@ class TestHarness(unittest.TestCase):
         self.assertNotIn("SPLIT", out["OK"].columns)
         self.assertEqual(len(out["OLD"]), 31)                            # stored before split events: unchecked
 
+    def test_a_split_listed_on_a_day_without_a_bar_is_checked(self):
+        # GTBP, IGR, BRTX, BURU, SRTM, WCT on 2026-09-08: Yahoo's split row has no prices; the harness
+        # dropped it with the event, so it ranked them on false gains while live excluded them
+        import scripts.validate_backtest_pipeline as vb
+        df = _frame(_closes(4.2, 12.6), SPLIT)
+        df.loc[SPLIT, ["Open", "High", "Low", "Close", "Volume"]] = np.nan
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(vb, "BACKTEST_DATA_DIR", d),                 mock.patch("yfinance.download", return_value=pd.concat({"GTBP": df}, axis=1)):
+            raw = vb.load_history(["GTBP"], refresh=True)
+        self.assertNotIn(SPLIT, raw["GTBP"].index)
+        self.assertEqual(raw["GTBP"].at[DAYS[21], "SPLIT"], 1 / 3)       # kept on the next bar
+        _, cut = vb.truncate_unadjusted_splits(raw)
+        self.assertEqual(cut, {"GTBP": DAYS[21].date().isoformat()})
+
 
 class TestLifecycle(unittest.TestCase):
     def test_flagged_ticker_gets_no_lifecycle_step(self):

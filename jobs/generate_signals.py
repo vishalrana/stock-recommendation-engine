@@ -760,6 +760,22 @@ def _display_fundamentals(ticker: str, price: Optional[float] = None) -> Dict[st
 LIFECYCLE_SKIPPED_NO_BASIS: List[str] = []   # open ideas whose scan-date bar is not cached, this run
 
 
+EXCLUSIONS_PATH = os.path.join(PROJECT_ROOT, "outputs", "nightly_exclusions.json")
+
+
+def write_exclusions(session, pending, flagged, stale) -> None:
+    """The session's full lists of tickers the scan left out on purpose (pending refetch, split Yahoo
+    left unadjusted, stale bar); the nightly uploads it as an artifact for the parity replay's class (a)
+    labels. scan_log.error_message keeps only 15 of each."""
+    try:
+        os.makedirs(os.path.dirname(EXCLUSIONS_PATH), exist_ok=True)
+        with open(EXCLUSIONS_PATH, "w", encoding="utf-8") as f:
+            json.dump({"session": str(session)[:10], "pending": sorted(pending), "split_flagged": sorted(flagged),
+                       "stale": sorted(stale)}, f, indent=1)
+    except Exception as e:
+        logger.warning("Could not write the exclusions file: %s", e)
+
+
 def data_note(pending, flagged) -> Optional[str]:
     """Price-data items for scan_log.error_message: tickers awaiting a refetch, splits Yahoo left
     unadjusted, and open ideas skipped by the lifecycle for want of their scan-date bar."""
@@ -2249,6 +2265,8 @@ def run_scan(
     if status == "success" and data_is_stale:
         status = "stale_data"
         error_msg = error_msg or stale_detail or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
+    if not is_targeted:
+        write_exclusions(signal_date, cache_manager.pending_refetch(), cache_manager.split_flagged(), stale_bar_tickers)
     note = data_note(cache_manager.pending_refetch(), cache_manager.split_flagged())
     if note:
         logger.warning("[CACHE SYNC] %s", note)

@@ -51,7 +51,15 @@ def live_stage(reason: Optional[str]) -> str:
     return "other: " + r[:60]
 
 
-def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str]) -> Dict:
+def failed_closed(ticker: str, exclusions: Optional[Dict]) -> Optional[str]:
+    """Class (a): the nightly left the ticker out on purpose (outputs/nightly_exclusions.json)."""
+    if not exclusions:
+        return None
+    lists = [name for name in ("pending", "split_flagged", "stale") if ticker in set(exclusions.get(name) or [])]
+    return f"(a) failed closed live: {', '.join(lists)}" if lists else None
+
+
+def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str], exclusions: Optional[Dict] = None) -> Dict:
     """live: ticker, strategy, composite_score, stage. harness: ticker, strategy, composite_score, stage."""
     key = ["ticker", "strategy"]
     m = live.merge(harness, on=key, how="outer", suffixes=("_live", "_bt"), indicator="side")
@@ -87,6 +95,9 @@ def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str]) -> 
     # A difference fails the replay when the candidate scores at least 65 on either side: there the
     # stage decides whether an idea is issued. Below 65 both sides reject it before any rule.
     material = [d for d in diffs if max(d["score_live"] or 0, d["score_harness"] or 0) >= MATERIAL_SCORE]
+    # Information only (user decision 2026-10-26): pass/fail does not change with the class
+    for d in material:
+        d["class"] = (failed_closed(d["candidate"].split(" / ")[0], exclusions) if d["live"] is None else None) or "unclassified"
     return {"issued_live": issued_live, "issued_harness": issued_bt, "issued_sets_equal": issued_live == issued_bt,
             "candidates_live": int(len(live)), "candidates_harness": int(len(harness)), "differences": diffs,
             "material_differences": material, "unexplained": [d for d in diffs if not d.get("cause")],
@@ -100,9 +111,12 @@ def summary_markdown(res: Dict) -> str:
              f"Candidates live {res['candidates_live']} | harness {res['candidates_harness']} | differences "
              f"{len(res['differences'])} ({len(res['material_differences'])} at {MATERIAL_SCORE:g}+).", ""]
     if res["differences"]:
-        lines += ["| Candidate | Live | Harness | Score live | Score harness | Cause |", "|---|---|---|---|---|---|"]
-        lines += [f"| {d['candidate']} | {d['live']} | {d['harness']} | {d['score_live']} | {d['score_harness']} | {d['cause']} |"
-                  for d in res["differences"]]
+        lines += ["| Candidate | Live | Harness | Score live | Score harness | Class (65+, information only) | Cause |",
+                  "|---|---|---|---|---|---|---|"]
+        lines += [f"| {d['candidate']} | {d['live']} | {d['harness']} | {d['score_live']} | {d['score_harness']} | "
+                  f"{d.get('class', '')} | {d['cause']} |" for d in res["differences"]]
+        if res.get("exclusions_source"):
+            lines += ["", f"Class (a) lists: {res['exclusions_source']}"]
     return "\n".join(lines) + "\n"
 
 
@@ -142,6 +156,7 @@ def main(argv=None) -> int:
     ap.add_argument("--latest-success", type=int, metavar="DAYS",
                     help="print the latest session of the past DAYS days whose nightly succeeded; exit 1 if none")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--exclusions", default=None, help="the session's nightly_exclusions.json (class (a) labels)")
     args = ap.parse_args(argv)
     from dotenv import load_dotenv
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
@@ -165,8 +180,15 @@ def main(argv=None) -> int:
         print(",".join(live_open))
         return 0
     harness = pd.read_csv(args.harness_csv)
-    res = compare(live, harness, live_open)
-    res.update({"date": args.date, "live_open_at_session": live_open})
+    exclusions, source = None, "not available"
+    if args.exclusions and os.path.exists(args.exclusions):
+        doc = json.load(open(args.exclusions, encoding="utf-8"))
+        if doc.get("session") == args.date:
+            exclusions, source = doc, f"nightly_exclusions.json of session {args.date}"
+        else:
+            source = f"exclusions file is for {doc.get('session')}, not {args.date}: not used"
+    res = compare(live, harness, live_open, exclusions)
+    res.update({"date": args.date, "live_open_at_session": live_open, "exclusions_source": source})
     out = args.out or os.path.join(PROJECT_ROOT, "outputs", f"parity_replay_{args.date}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:

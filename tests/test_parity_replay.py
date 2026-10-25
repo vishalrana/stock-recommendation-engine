@@ -94,6 +94,19 @@ class TestParityReplay(unittest.TestCase):
                 self.assertEqual(step.get("shell"), "bash", step.get("name"))
                 self.assertNotIn("if", step, step.get("name"))          # no silent skip of the replay
 
+    def test_class_a_label_is_information_only(self):
+        live = pd.DataFrame([("AAA", "Trend Following", 70.0, "issued")], columns=["ticker", "strategy", "composite_score", "stage"])
+        harness = pd.DataFrame([("AAA", "Trend Following", 70.0, "issued"),
+                                ("PEND", "Trend Following", 68.0, "rr_floor_stop_cap"),
+                                ("OTHER", "Trend Following", 66.0, "rr_floor_stop_cap")],
+                               columns=["ticker", "strategy", "composite_score", "stage"])
+        ex = {"session": "2026-10-26", "pending": ["PEND"], "split_flagged": [], "stale": []}
+        res = compare(live, harness, [], ex)
+        by = {d["candidate"]: d for d in res["material_differences"]}
+        self.assertEqual(by["PEND / Trend Following"]["class"], "(a) failed closed live: pending")
+        self.assertEqual(by["OTHER / Trend Following"]["class"], "unclassified")
+        self.assertFalse(res["passed"])                                  # pass/fail unchanged by the class
+
     def _main(self, live_rows, harness_rows):
         """Exit code of parity_replay.main() for these decisions, and the step summary it wrote."""
         import tempfile

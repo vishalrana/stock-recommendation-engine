@@ -77,6 +77,8 @@ PIN_WINDOW_SESSIONS = 30
 # 6-K (foreign private issuers' current reports) is kept for the swing catalyst-gap sleeve.
 _KEEP_FORMS = DEAL_FORMS | UNLOCK_FORMS | {"8-K", "6-K"}
 CACHE_FORMAT = "v3-tz"   # bump when _KEEP_FORMS or the parsing changes, so older cache files are refetched
+# shortcut: the canary must stay in AAPL's 'recent' block (its last ~1,000 filings, about 4 years); move it to a
+# newer header-verified 8-K before then. An aged-out canary fails closed: no SEC data, every new idea rejected.
 CANARY_CIK, CANARY_FILED, CANARY_ET = 320193, "2026-07-30", datetime(2026, 7, 30, 16, 30, 28)
 CONVENTIONS = ("utc", "shifted")
 DECISION_CUTOFF_HOUR = 20  # a filing accepted after 20:00 ET belongs to the next session
@@ -313,16 +315,19 @@ class SecFilingsProvider:
         self._convention: Optional[str] = None
 
     def convention(self) -> Optional[str]:
-        """EDGAR's acceptanceDateTime convention, read once from the canary (None: unknown, fetch nothing)."""
+        """EDGAR's acceptanceDateTime convention, read once from the canary (None: unknown, fetch nothing).
+        A failed canary request is retried on the next call; a canary that matches neither convention is final."""
         if self._convention is None:
             data = self.sec._get_json(SUBMISSIONS_URL.format(cik=CANARY_CIK))
-            self._convention = detect_convention((data or {}).get("filings", {}).get("recent", {}))
-            if self._convention is None:
+            if data is None:
+                return None
+            self._convention = detect_convention(data.get("filings", {}).get("recent", {})) or ""
+            if self._convention:
+                logger.info("[SEC] acceptanceDateTime convention: %s", self._convention)
+            else:
                 logger.error("[SEC] acceptanceDateTime convention unknown (canary %s not matched): no filings fetched",
                              CANARY_FILED)
-            else:
-                logger.info("[SEC] acceptanceDateTime convention: %s", self._convention)
-        return self._convention
+        return self._convention or None
 
     @property
     def available(self) -> bool:

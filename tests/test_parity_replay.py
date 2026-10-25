@@ -107,6 +107,33 @@ class TestParityReplay(unittest.TestCase):
         self.assertEqual(by["OTHER / Trend Following"]["class"], "unclassified")
         self.assertFalse(res["passed"])                                  # pass/fail unchanged by the class
 
+    def test_one_sided_cross_sectional_candidate_gets_a_ranking_comparison(self):
+        from scripts.parity_replay import summary_markdown
+        cols = ["ticker", "strategy", "composite_score", "stage"]
+        live = pd.DataFrame([("AAA", "Trend Following", 70.0, "issued"),
+                             ("MSI", "Cross-Sectional Momentum", 67.0, "rr_floor_stop_cap")], columns=cols)
+        harness = pd.DataFrame([("AAA", "Trend Following", 70.0, "issued")], columns=cols)
+        # MSI-like: live excluded X (split flagged) from its ranking; B's return differs between the sides
+        rest = [[f"Z{i}", -1.0 - i] for i in range(10)]
+        live_rows = [[t, r, k + 1] for k, (t, r) in enumerate([["A", 50.0], ["MSI", 14.65], ["B", 10.0]] + rest)]
+        h_rows = [(t, r, k + 1) for k, (t, r) in enumerate([("X", 1600.0), ("A", 50.0), ("B", 20.0), ("MSI", 14.65)]
+                                                          + [tuple(x) for x in rest])]
+        ex = {"session": "2026-10-22", "pending": [], "split_flagged": ["X"], "stale": [],
+              "cs_ranking": {"session": "2026-10-22", "ranked": len(live_rows), "cutoff": 2, "rows": live_rows}}
+        res = compare(live, harness, [], ex, pd.DataFrame(h_rows, columns=["ticker", "ret63_pct", "rank"]))
+        r = {d["candidate"]: d for d in res["differences"]}["MSI / Cross-Sectional Momentum"]["ranking"]
+        self.assertEqual(r["live"], {"rank": 2, "ret63_pct": 14.65, "cutoff": 2, "ranked": 13})
+        self.assertEqual((r["harness"]["rank"], r["harness"]["cutoff"], r["harness"]["ranked"]), (4, 2, 14))
+        self.assertEqual((r["live_only_above"], r["harness_only_above"], r["crossing"]), ([], ["X"], ["B"]))
+        self.assertFalse(r["own_return_differs"])
+        text = summary_markdown(res)
+        self.assertIn("harness only 1 (X)", text)
+        self.assertIn("own 63-session return same", text)
+        self.assertFalse(res["passed"])                                   # information only: pass/fail unchanged
+        res = compare(live, harness, [], None, None)                      # a session without a saved ranking
+        self.assertIsNone({d["candidate"]: d for d in res["differences"]}["MSI / Cross-Sectional Momentum"]["ranking"])
+        self.assertIn("no ranking to compare", summary_markdown(res))
+
     def _main(self, live_rows, harness_rows):
         """Exit code of parity_replay.main() for these decisions, and the step summary it wrote."""
         import tempfile

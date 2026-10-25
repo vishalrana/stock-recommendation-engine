@@ -97,6 +97,26 @@ class TestSecTimes(unittest.TestCase):
         self.assertFalse(contradicts(pre_market_utc, "utc"))
         self.assertFalse(contradicts(["2026-07-14T19:00:00.000Z"], "shifted"))   # fits both: no verdict
 
+    def test_refusals_are_counted_and_reported(self):
+        import tempfile
+        from unittest import mock
+        import jobs.generate_signals as gs
+        from src.providers.context import sec_filings as sf
+        canary = {"filings": {"recent": {"form": ["8-K"], "filingDate": ["2026-07-30"],
+                                         "acceptanceDateTime": ["2026-07-30T20:30:28.000Z"], "items": ["2.02,9.01"]}}}
+        # a response in the old convention: 19:00 ET on Mon-Fri, which true UTC would read as 23:00 ET
+        shifted = {"filings": {"recent": {"form": ["8-K"] * 5, "items": [""] * 5,
+                                          "acceptanceDateTime": ["2026-07-1%dT03:00:00.000Z" % d for d in range(4, 9)]}}}
+        sec = mock.MagicMock(available=True)
+        sec._get_json.side_effect = lambda url: canary if "0000320193" in url else shifted
+        with tempfile.TemporaryDirectory() as d:
+            prov = sf.SecFilingsProvider(cache_dir=d, sec=sec)
+            self.assertIsNone(prov.filings_for_cik(1))
+        self.assertEqual((prov.stats["refused"], prov.stats["failed"]), (1, 1))
+        with mock.patch.object(gs, "_SEC_FILINGS", prov), mock.patch.dict(gs.PROVIDER_HEALTH, {}, clear=True):
+            line = gs.report_provider_health()
+        self.assertIn("sec_filings: fetched=0 cache_hits=0 no_cik=0 failed=1 refused=1 convention=utc", line)
+
     def test_earlier_cache_files_are_refetched(self):
         import json, tempfile
         from unittest import mock

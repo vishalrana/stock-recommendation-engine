@@ -76,6 +76,20 @@ class TestSecTimes(unittest.TestCase):
         self.assertIsNone(detect_convention(block("2026-07-30T16:30:28.000Z")))     # neither: fetch nothing
         self.assertIsNone(detect_convention({}))
 
+    def test_the_canary_is_read_once_unless_its_request_failed(self):
+        from unittest import mock
+        from src.providers.context import sec_filings as sf
+        sec = mock.MagicMock(available=True)
+        sec._get_json.return_value = None                                       # request failed: retried
+        prov = sf.SecFilingsProvider(cache_dir="unused", sec=sec)
+        self.assertIsNone(prov.convention())
+        self.assertIsNone(prov.convention())
+        self.assertEqual(sec._get_json.call_count, 2)
+        sec._get_json.return_value = {"filings": {"recent": {}}}                # read, no match: final
+        self.assertIsNone(prov.convention())
+        self.assertIsNone(prov.convention())
+        self.assertEqual(sec._get_json.call_count, 3)
+
     def test_a_response_in_the_other_convention_is_not_used(self):
         from src.providers.context.sec_filings import contradicts
         pre_market_utc = ["2026-07-1%dT11:00:00.000Z" % d for d in range(3, 8)]   # 07:00 ET, Mon-Fri

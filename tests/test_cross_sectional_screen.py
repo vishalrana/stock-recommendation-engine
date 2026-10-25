@@ -61,6 +61,24 @@ class TestCrossSectionalScreen(unittest.TestCase):
         self.assertEqual(list(ranking.ticker[: len(top)]), [t for t, _ in top])
         self.assertEqual(list(ranking["rank"]), list(range(1, len(ranking) + 1)))
 
+    def test_the_nightly_saves_the_ranking_its_screen_used(self):
+        import json
+        import tempfile
+        from unittest import mock
+        import jobs.generate_signals as gs
+        d = self.closes.index[-1]
+        ranking = {}
+        top = run_cross_sectional_screen(list(self.closes.columns), _Cache(self.closes), as_of_date=d.date().isoformat(),
+                                         ranking=ranking)
+        self.assertEqual((ranking["session"], ranking["cutoff"]), (d.date().isoformat(), len(top)))
+        self.assertEqual(ranking["ranked"], len(ranking["rows"]))
+        self.assertEqual([r[0] for r in ranking["rows"][: len(top)]], [t for t, _ in top])   # the screen's own order
+        self.assertNotIn("GAP", [r[0] for r in ranking["rows"]])                             # no 63-session return
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(gs, "EXCLUSIONS_PATH", os.path.join(tmp, "x.json")):
+            gs.write_exclusions(d, [], [], [], ranking)
+            doc = json.load(open(gs.EXCLUSIONS_PATH, encoding="utf-8"))
+        self.assertEqual(doc["cs_ranking"]["rows"][0], ranking["rows"][0])
+
     def test_ties_by_ticker(self):
         idx = pd.bdate_range("2026-01-02", periods=70)
         c = pd.DataFrame({t: np.r_[np.full(69, 100.0), 120.0] for t in ("ZZ", "AA", "MM")}, index=idx)

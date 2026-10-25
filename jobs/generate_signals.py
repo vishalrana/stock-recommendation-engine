@@ -274,11 +274,14 @@ def load_etf_universe() -> list[str]:
     return list(SECTOR_ETFS.keys())
 
 
-def run_cross_sectional_screen(universe: list[str], cache_manager, as_of_date: Optional[str] = None) -> list[tuple]:
+def run_cross_sectional_screen(universe: list[str], cache_manager, as_of_date: Optional[str] = None,
+                               ranking: Optional[dict] = None) -> list[tuple]:
     """
     Cross-Sectional Momentum pre-screen for the scan session: the backtest's definition
     (src/pipeline_steps.cross_sectional_screen) on the cached closes of the last 120 days, so both
-    rank the same stocks the same way. Returns [(ticker, 63-session return %), ...].
+    rank the same stocks the same way. Returns [(ticker, 63-session return %), ...]. A `ranking` dict
+    is filled with the session's full ranking (session, ranked, cutoff, rows of ticker, 63-session
+    return %, rank), which the nightly saves for the parity replay.
     """
     from src.pipeline_steps import cross_sectional_screen
     ref_dt = datetime.fromisoformat(as_of_date).date() if as_of_date else datetime.now().date()
@@ -302,6 +305,10 @@ def run_cross_sectional_screen(universe: list[str], cache_manager, as_of_date: O
     top = cross_sectional_screen(frame).get(frame.index[-1], [])
     logger.info("[CROSS-SECTIONAL] %s: top 15%% of 63-session returns selects %d candidates.",
                 frame.index[-1].date(), len(top))
+    if ranking is not None:
+        from src.pipeline_steps import cross_sectional_ranking
+        r = cross_sectional_ranking(frame, frame.index[-1])
+        ranking.update(session=frame.index[-1].date().isoformat(), ranked=len(r), cutoff=len(top), rows=r.values.tolist())
     return top
 
 
@@ -763,15 +770,16 @@ LIFECYCLE_SKIPPED_NO_BASIS: List[str] = []   # open ideas whose scan-date bar is
 EXCLUSIONS_PATH = os.path.join(PROJECT_ROOT, "outputs", "nightly_exclusions.json")
 
 
-def write_exclusions(session, pending, flagged, stale) -> None:
+def write_exclusions(session, pending, flagged, stale, cs_ranking: Optional[dict] = None) -> None:
     """The session's full lists of tickers the scan left out on purpose (pending refetch, split Yahoo
-    left unadjusted, stale bar); the nightly uploads it as an artifact for the parity replay's class (a)
-    labels. scan_log.error_message keeps only 15 of each."""
+    left unadjusted, stale bar) and the Cross-Sectional ranking its screen used; the nightly uploads it
+    as an artifact for the parity replay (class (a) labels, ranking comparison). scan_log.error_message
+    keeps only 15 of each list."""
     try:
         os.makedirs(os.path.dirname(EXCLUSIONS_PATH), exist_ok=True)
         with open(EXCLUSIONS_PATH, "w", encoding="utf-8") as f:
             json.dump({"session": str(session)[:10], "pending": sorted(pending), "split_flagged": sorted(flagged),
-                       "stale": sorted(stale)}, f, indent=1)
+                       "stale": sorted(stale), "cs_ranking": cs_ranking or None}, f, indent=1)
     except Exception as e:
         logger.warning("Could not write the exclusions file: %s", e)
 
@@ -1382,6 +1390,7 @@ def run_scan(
     data_ready_tickers: Set[str] = set()
 
     _prepare_sec_earnings(scan_date_dt)   # PEAD, Pullback and the earnings gate read SEC filings
+    cs_ranking: Dict[str, Any] = {}   # filled by the Cross-Sectional screen, saved with the exclusion lists
     for strategy in STRATEGIES:
         if hasattr(strategy, "set_earnings_calendar"):
             strategy.set_earnings_calendar(earnings_calendar_cache, supabase=supabase)
@@ -1413,7 +1422,7 @@ def run_scan(
                 current_universe = tickers
             else:
                 screened_info = run_cross_sectional_screen([t for t in tickers if t not in split_flagged], cache_manager,
-                                                           as_of_date=market_data_date)
+                                                           as_of_date=market_data_date, ranking=cs_ranking)
                 current_universe = [x[0] for x in screened_info]
         else:
             current_universe = tickers
@@ -2266,7 +2275,8 @@ def run_scan(
         status = "stale_data"
         error_msg = error_msg or stale_detail or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
     if not is_targeted:
-        write_exclusions(signal_date, cache_manager.pending_refetch(), cache_manager.split_flagged(), stale_bar_tickers)
+        write_exclusions(signal_date, cache_manager.pending_refetch(), cache_manager.split_flagged(), stale_bar_tickers,
+                         cs_ranking)
     note = data_note(cache_manager.pending_refetch(), cache_manager.split_flagged())
     if note:
         logger.warning("[CACHE SYNC] %s", note)

@@ -30,6 +30,8 @@ SCORE_TOLERANCE = 0.05   # composite points; below this the scores are the same
 
 
 MATERIAL_SCORE = 65.0   # the Buy threshold: differences at or above it fail the replay
+RETURN_TOLERANCE = 0.001   # 63-session return, percentage points: both rankings round it to 4 decimals
+CROSS_SECTIONAL = "Cross-Sectional Momentum"
 
 
 def live_stage(reason: Optional[str]) -> str:
@@ -59,8 +61,53 @@ def failed_closed(ticker: str, exclusions: Optional[Dict]) -> Optional[str]:
     return f"(a) failed closed live: {', '.join(lists)}" if lists else None
 
 
-def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str], exclusions: Optional[Dict] = None) -> Dict:
-    """live: ticker, strategy, composite_score, stage. harness: ticker, strategy, composite_score, stage."""
+def ranking_comparison(ticker: str, live: Dict, harness: pd.DataFrame) -> Dict:
+    """Where a one-sided Cross-Sectional candidate sits in the live ranking (the nightly's saved
+    cs_ranking) and in the harness's: rank, 63-session return and cutoff on each side; the tickers
+    ranked above it on one side only; the tickers both sides rank but above it on one side only (their
+    returns differ); and whether its own return differs."""
+    from src.pipeline_steps import CROSS_SECTIONAL_TOP_FRACTION
+    lv = pd.DataFrame(live["rows"], columns=["ticker", "ret63_pct", "rank"]).set_index("ticker")
+    hv = harness.set_index("ticker")
+
+    def place(df, cutoff):
+        ranked = ticker in df.index
+        return {"rank": int(df.at[ticker, "rank"]) if ranked else None,
+                "ret63_pct": float(df.at[ticker, "ret63_pct"]) if ranked else None, "cutoff": cutoff, "ranked": int(len(df))}
+
+    lp = place(lv, int(live["cutoff"]))
+    hp = place(hv, max(1, int(len(hv) * CROSS_SECTIONAL_TOP_FRACTION)))
+    above_l = set(lv.index[lv["rank"] < lp["rank"]]) if lp["rank"] else None
+    above_h = set(hv.index[hv["rank"] < hp["rank"]]) if hp["rank"] else None
+    both = set(lv.index) & set(hv.index)
+    return {"live": lp, "harness": hp,
+            "live_only_above": None if above_l is None else sorted(above_l - set(hv.index), key=lambda t: lv.at[t, "rank"]),
+            "harness_only_above": None if above_h is None else sorted(above_h - set(lv.index), key=lambda t: hv.at[t, "rank"]),
+            "crossing": None if above_l is None or above_h is None else sorted((above_l ^ above_h) & both),
+            "own_return_differs": None if lp["rank"] is None or hp["rank"] is None
+            else abs(lp["ret63_pct"] - hp["ret63_pct"]) > RETURN_TOLERANCE}
+
+
+def ranking_line(ticker: str, r: Dict) -> str:
+    """One summary line for ranking_comparison."""
+    def side(p):
+        return "not ranked" if p["rank"] is None else f"rank {p['rank']} of {p['ranked']} (cutoff {p['cutoff']})"
+
+    def few(xs):
+        return "n/a" if xs is None else (f"{len(xs)}" + (f" ({', '.join(xs[:15])}{f' +{len(xs) - 15}' if len(xs) > 15 else ''})" if xs else ""))
+
+    own = ("not comparable" if r["own_return_differs"] is None else
+           f"{'differs' if r['own_return_differs'] else 'same'} ({r['live']['ret63_pct']}% live, {r['harness']['ret63_pct']}% harness)")
+    return (f"{ticker}: live {side(r['live'])}, harness {side(r['harness'])}; own 63-session return {own}; "
+            f"ranked above it live only {few(r['live_only_above'])}, harness only {few(r['harness_only_above'])}; "
+            f"ranked on both, above it on one side only {few(r['crossing'])}")
+
+
+def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str], exclusions: Optional[Dict] = None,
+            harness_ranking: Optional[pd.DataFrame] = None) -> Dict:
+    """live: ticker, strategy, composite_score, stage. harness: ticker, strategy, composite_score, stage.
+    With the nightly's cs_ranking (in exclusions) and the harness's ranking, each one-sided
+    Cross-Sectional candidate gets a ranking comparison (information only)."""
     key = ["ticker", "strategy"]
     m = live.merge(harness, on=key, how="outer", suffixes=("_live", "_bt"), indicator="side")
     diffs = []
@@ -98,6 +145,12 @@ def compare(live: pd.DataFrame, harness: pd.DataFrame, live_open: List[str], exc
     # Information only (user decision 2026-10-26): pass/fail does not change with the class
     for d in material:
         d["class"] = (failed_closed(d["candidate"].split(" / ")[0], exclusions) if d["live"] is None else None) or "unclassified"
+    live_ranking = (exclusions or {}).get("cs_ranking")
+    for d in diffs:
+        t, strat = d["candidate"].split(" / ", 1)
+        if strat == CROSS_SECTIONAL and (d["live"] is None or d["harness"] is None):
+            d["ranking"] = (ranking_comparison(t, live_ranking, harness_ranking)
+                            if live_ranking and harness_ranking is not None else None)
     return {"issued_live": issued_live, "issued_harness": issued_bt, "issued_sets_equal": issued_live == issued_bt,
             "candidates_live": int(len(live)), "candidates_harness": int(len(harness)), "differences": diffs,
             "material_differences": material, "unexplained": [d for d in diffs if not d.get("cause")],
@@ -117,6 +170,12 @@ def summary_markdown(res: Dict) -> str:
                   f"{d.get('class', '')} | {d['cause']} |" for d in res["differences"]]
         if res.get("exclusions_source"):
             lines += ["", f"Class (a) lists: {res['exclusions_source']}"]
+        one_sided_cs = [d for d in res["differences"] if "ranking" in d]
+        if one_sided_cs:
+            lines += ["", "Cross-Sectional rankings, one-sided candidates (information only):", ""]
+            lines += [f"- {ranking_line(d['candidate'].split(' / ')[0], d['ranking'])}" if d["ranking"] else
+                      f"- {d['candidate']}: no ranking to compare (the nightly saved none for this session, or the "
+                      "harness wrote none)" for d in one_sided_cs]
     return "\n".join(lines) + "\n"
 
 
@@ -157,6 +216,7 @@ def main(argv=None) -> int:
                     help="print the latest session of the past DAYS days whose nightly succeeded; exit 1 if none")
     ap.add_argument("--out", default=None)
     ap.add_argument("--exclusions", default=None, help="the session's nightly_exclusions.json (class (a) labels)")
+    ap.add_argument("--harness-ranking", default=None, help="the harness's Cross-Sectional ranking of the session")
     args = ap.parse_args(argv)
     from dotenv import load_dotenv
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
@@ -187,7 +247,9 @@ def main(argv=None) -> int:
             exclusions, source = doc, f"nightly_exclusions.json of session {args.date}"
         else:
             source = f"exclusions file is for {doc.get('session')}, not {args.date}: not used"
-    res = compare(live, harness, live_open, exclusions)
+    harness_ranking = (pd.read_csv(args.harness_ranking)
+                       if args.harness_ranking and os.path.exists(args.harness_ranking) else None)
+    res = compare(live, harness, live_open, exclusions, harness_ranking)
     res.update({"date": args.date, "live_open_at_session": live_open, "exclusions_source": source})
     out = args.out or os.path.join(PROJECT_ROOT, "outputs", f"parity_replay_{args.date}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)

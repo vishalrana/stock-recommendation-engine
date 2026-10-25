@@ -54,6 +54,7 @@ def _scan(n_tickers, n_stale):
             patch("jobs.generate_signals.fetch_earnings_calendar", return_value={}), \
             patch("jobs.generate_signals.load_cached_metrics", return_value={}), \
             patch("jobs.generate_signals._prepare_sec_earnings"), \
+            patch("jobs.generate_signals._sec_run_status", return_value=(None, False)), \
             patch("jobs.generate_signals.STRATEGIES", [NoSignal()]), \
             patch("jobs.generate_signals.reconcile_recommendation_lifecycle"), \
             patch("argparse.ArgumentParser.parse_args",

@@ -528,7 +528,13 @@ def load_history(tickers: List[str], refresh: bool = False) -> Dict[str, pd.Data
                 if df.empty:
                     continue
                 df.columns = [str(c).upper() for c in df.columns]
+                splits = df["STOCK SPLITS"].fillna(0) if "STOCK SPLITS" in df.columns else pd.Series(dtype=float)
+                lost = splits[(splits > 0) & df["CLOSE"].isna()]
                 df = df.dropna(subset=["CLOSE"])
+                for d, r in lost.items():   # listed on a day Yahoo has no bar for (GTBP, IGR 2026-09-08): next bar,
+                    later = df.index[df.index > d]   # where the live cache's check finds it too
+                    if len(later):
+                        df.loc[later[0], "STOCK SPLITS"] = r
                 # Split events kept for the unadjusted-split check (src/data/splits.py), as the live cache does
                 df = df[["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"] + (["STOCK SPLITS"] if "STOCK SPLITS" in df.columns else [])]
                 df = df.rename(columns={"STOCK SPLITS": "SPLIT"})

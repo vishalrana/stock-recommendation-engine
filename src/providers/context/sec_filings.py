@@ -311,7 +311,7 @@ class SecFilingsProvider:
         self.cache_dir = cache_dir
         self.ttl_hours = ttl_hours
         self.since = since
-        self.stats = {"fetched": 0, "cache_hits": 0, "no_cik": 0, "failed": 0}
+        self.stats = {"fetched": 0, "cache_hits": 0, "no_cik": 0, "failed": 0, "refused": 0}   # refused: within failed
         self._convention: Optional[str] = None
 
     def convention(self) -> Optional[str]:
@@ -374,6 +374,7 @@ class SecFilingsProvider:
         if contradicts(data.get("filings", {}).get("recent", {}).get("acceptanceDateTime") or [], convention):
             logger.warning("[SEC] CIK %s: acceptance times do not fit the %s convention; not used", cik, convention)
             self.stats["failed"] += 1
+            self.stats["refused"] += 1
             return None
         recent = parse_filings(data.get("filings", {}).get("recent", {}), convention, self.since)
         pages: Dict[str, List[List[Any]]] = {}
@@ -388,6 +389,10 @@ class SecFilingsProvider:
             older = self.sec._get_json(SUBMISSIONS_PAGE_URL.format(name=name))
             if older is None or contradicts(older.get("acceptanceDateTime") or [], convention):
                 self.stats["failed"] += 1
+                if older is not None:
+                    self.stats["refused"] += 1
+                    logger.warning("[SEC] CIK %s page %s: acceptance times do not fit the %s convention; not used",
+                                   cik, name, convention)
                 return None  # incomplete history: unavailable rather than silently partial
             pages[name] = compact_rows(parse_filings(older, convention, self.since))
         self.stats["fetched"] += 1

@@ -540,6 +540,8 @@ def report_provider_health() -> str:
              f"failed={sec.stats['failed']} cache={sec.stats['cache_hits']} no_cik={sec.stats['no_cik']}"]
     if _DISPLAY_METADATA is not None:
         PROVIDER_HEALTH["open_ideas_metadata"] = dict(_DISPLAY_METADATA.stats)
+    if _SEC_FILINGS is not None:   # earnings dates: refused = responses in the other acceptanceDateTime convention
+        PROVIDER_HEALTH["sec_filings"] = dict(_SEC_FILINGS.stats, convention=_SEC_FILINGS._convention)
     for name, stats in PROVIDER_HEALTH.items():
         parts.append(f"{name}: " + " ".join(f"{k}={v}" for k, v in stats.items()))
     line = " | ".join(parts)

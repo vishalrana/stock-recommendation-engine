@@ -132,6 +132,7 @@ BLACKLIST = {"XYZ", "TEST", "PLACEHOLDER"}
 # range in one request, so the overlap costs no extra requests and refills any bars a failed
 # chunk missed on an earlier run.
 INCREMENTAL_OVERLAP_DAYS = 7
+MAX_STALE_TICKER_SHARE = 0.01   # more tickers than this without the session's bar: the scan is stale_data
 TOP_N = 3
 
 logging.basicConfig(
@@ -1527,6 +1528,15 @@ def run_scan(
             "[FRESHNESS] Skipped %d tickers whose latest bar is older than %s: %s",
             len(stale_bar_tickers), scan_date_dt, ", ".join(sorted(stale_bar_tickers)[:20]),
         )
+    # A mostly stale scan is stale data: the Cross-Sectional ranking needs the whole cross-section,
+    # so no new ideas, status stale_data (the 04:00 attempt rescans). 1-3 of ~5,500 on normal nights.
+    stale_detail = None
+    stale_share = len(stale_bar_tickers) / max(1, len(all_download_tickers))
+    if not is_targeted and stale_share > MAX_STALE_TICKER_SHARE:
+        stale_detail = (f"Stale bars: {len(stale_bar_tickers)} of {len(all_download_tickers)} tickers "
+                        f"({100 * stale_share:.1f}%) have no {scan_date_dt} bar")
+        logger.error("[STALE DATA] %s; no new recommendations are published.", stale_detail)
+        data_is_stale = True
 
     ranked_signals: list[dict] = []
     error_msg = None
@@ -1866,7 +1876,8 @@ def run_scan(
         )
 
         if data_is_stale and qualified_recommendations:
-            stale_reason = f"Price data stale (latest session {last_cached_after_refresh} < market date {scan_date_dt}); not published"
+            stale_reason = (f"Price data stale ({stale_detail}); not published" if stale_detail else
+                            f"Price data stale (latest session {last_cached_after_refresh} < market date {scan_date_dt}); not published")
             for s in qualified_recommendations:
                 s["status"] = "rejected"
                 s["rejection_reason"] = stale_reason
@@ -2237,7 +2248,7 @@ def run_scan(
         status = "degraded_universe"
     if status == "success" and data_is_stale:
         status = "stale_data"
-        error_msg = error_msg or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
+        error_msg = error_msg or stale_detail or f"Latest cached session {last_cached_after_refresh} < market date {scan_date_dt}"
     note = data_note(cache_manager.pending_refetch(), cache_manager.split_flagged())
     if note:
         logger.warning("[CACHE SYNC] %s", note)

@@ -76,6 +76,7 @@ TEST_SUITES = [
     "tests/test_verify_head.py",
     "tests/test_unadjusted_splits.py",
     "tests/test_rebuild_report.py",
+    "tests/test_partial_session_cache.py",
 ]
 
 

@@ -78,6 +78,7 @@ TEST_SUITES = [
     "tests/test_rebuild_report.py",
     "tests/test_partial_session_cache.py",
     "tests/test_stale_share.py",
+    "tests/test_pinned_environment.py",
 ]
 
 

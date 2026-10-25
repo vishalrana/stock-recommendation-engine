@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   replay:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       PYTHONPATH: .
@@ -32,11 +32,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
       - run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r jobs/requirements.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
+      - name: Installed versions (job summary)
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Environment"; echo; echo '```'; python --version; pip freeze; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # Only a session whose nightly finished with status success is replayed. Scheduled: the latest
       # such session of the past week (a stale Friday must not mean no check); none fails the run.
       # shell: bash adds pipefail, so a crash inside $(... | tail -1) fails the step.

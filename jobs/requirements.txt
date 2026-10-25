@@ -1,3 +1,4 @@
+# Loose ranges only. Workflows install requirements.lock (exact versions; regenerate it deliberately).
 supabase>=2.0
 python-dotenv>=1.0
 apprise>=2.0

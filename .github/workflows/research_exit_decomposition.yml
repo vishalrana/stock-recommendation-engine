@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   decompose:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     env:
       PYTHONPATH: .
@@ -29,11 +29,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
       - run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r jobs/requirements.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
       - name: Restore price history (same cache as the backtest)
         uses: actions/cache/restore@v4
         with:

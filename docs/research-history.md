@@ -604,3 +604,48 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
   - AXNX, DCM, FFR, GCDT, IRLA, LCU, LUMN, POM, RNTZ, SKYD, SRTM and WORX had 0–22 closes in the live cache's last 120 days. They had joined the download list and got only the overlap bars; #43 refetches them.
   - CIG-C and RDIB had 84 closes but lacked one of the two closes the screen compares (thin trading).
 - WSM and ABBV differ in return as well as rank: dividends re-adjusted their history between the two downloads.
+
+### 2026-10-25 follow-up (PRs #51–#54)
+
+#### 2026-10-21 is a forward-test gap (user decision)
+
+- **Nightly run 39730873219** (started 05:56 UTC on 2026-10-22).
+  - It restored `Linux-data-cache-v2-39701680622`, saved by the split sweep and rebuild that started at 00:46 UTC, i.e. 20:46 ET on 2026-10-21. Yahoo had then posted the 2026-10-21 bar for only some tickers.
+  - The newest cache file was dated 2026-10-21, so the log says "INCREMENTAL: Cache already covers 2026-10-21" and "Skipping network download".
+  - `[FRESHNESS]` skipped 5,148 of the 5,605 cached tickers, which leaves about 457 with a 2026-10-21 close.
+  - The Cross-Sectional screen selected 60 candidates from that fraction of the cross-section. Overall 153 tickers were scanned, 2 qualified, none issued.
+  - `data_is_stale` used the same newest-date test, so `scan_log` said `success` (error_message: the split note). The 04:00 attempt (run 39754284001) therefore exited in 34 s.
+  - The lifecycle safeguard skipped reconciliation ("48 < 50 tickers scanned").
+- **Lifecycle:** OBE (scan 2026-10-16, filled 2026-10-19) was the only idea open on 2026-10-21. The 2026-10-22 nightly (run 39908280498) downloaded the overlap from 2026-10-14, which filled 2026-10-21 for every ticker. It replayed OBE's whole path: open, day 4 of 15, stop 11.04. No stop or target day was missed or misdated.
+- **Nothing was issued on 2026-10-21.** The session is left out of forward-test counts, with no backfill.
+- **Replay of 2026-10-21 (run 40188068848), report only:** the harness would have issued WOR / Trend Following. Candidates: live 2, harness 330.
+- **`scan_log` correction (decision 2):**
+  - the row was backed up to `backups/scan_log_20261021_20261025T111714Z/` (local);
+  - the update to `stale_data` with the stale count was blocked by the session's permission rules and waits for the user to run or approve it.
+- **Fixes:**
+  - #52: "cache already covers" is decided per ticker. Tickers without a close on the session download the overlap.
+  - #53: more than 1% of tickers skipped as stale makes the run `stale_data`, withholds new ideas, and lets the 04:00 attempt rescan.
+  - #54: the rebuild measures coverage on the session the saved cache claims, and drops it below 99%.
+
+#### Saturday replay of 2026-10-23 (run 40107310542): an exception, not the parity rule
+
+- The runner installed pandas 3.1.0, which turns a missing string into NaN. `live_stage` crashed on it in step 5 (`--print-open`, so the harness ran without the open book) and in step 7, the comparison.
+- #51 fixes it: an idea without a rejection reason is issued, whatever its outcome since.
+- Comparing the run's own harness file with the fixed code, and the clean rerun (run 40187907646, passed, open book OBE, RS, URI), give the same result:
+
+  | | Live | Harness |
+  |---|---|---|
+  | Issued | NSC, OMC, UNP (Trend Following) | NSC, OMC, UNP |
+  | Candidates | 459 | 458 |
+  | Common candidates, stage or score differs | 0 of 456 | |
+  | One side only (all below 65) | NWSA / Cross-Sectional 63.0, UVE / Cross-Sectional 61.6 | WSBC / Pullback 53.2 |
+
+  No difference reaches 65, so nothing needs a class (a), (b) or (c).
+
+#### Replay proposal (for the user; the replay stays strict)
+
+- Keep failing on any issued-set difference and on any 65+ difference with no known cause, class (c).
+- Report, without failing, a 65+ difference only when its cause is recorded by the system itself:
+  - **(a) failed closed:** the nightly saves the full lists of pending, split-flagged and stale tickers with the cache (today `scan_log` keeps only 15 of each). A 65+ candidate absent live and on one of those lists is (a).
+  - **(b) provider data changed:** the replay restores the nightly's saved cache (cache key from the run) and compares that ticker's closes over the scan window with the harness download. A difference above 0.05% on any bar, or an SEC filing accepted between the nightly and the replay, is (b).
+- Both classes would still be listed in the job summary with their evidence. Anything else stays (c) and fails the run.

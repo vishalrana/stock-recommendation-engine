@@ -121,18 +121,41 @@ def load_live(client, scan_date: str) -> Tuple[pd.DataFrame, List[str]]:
     return df[["ticker", "strategy", "composite_score", "stage"]], sorted({o["ticker"].upper() for o in opened})
 
 
+def latest_successful_session(client, days: int, today=None) -> Optional[str]:
+    """The latest scan date of the past `days` days (up to the latest completed session) whose nightly
+    logged status success, or None. The weekly replay uses it, so a stale Friday never means no check."""
+    from datetime import timedelta
+    from src.utils.market_date import latest_completed_session
+    last = today or latest_completed_session()
+    rows = (client.table("scan_log").select("scan_date,status").gte("scan_date", (last - timedelta(days=days)).isoformat())
+            .lte("scan_date", last.isoformat()).execute().data or [])
+    ok = sorted(str(r["scan_date"])[:10] for r in rows if r.get("status") == "success")
+    return ok[-1] if ok else None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", required=True)
+    ap.add_argument("--date")
     ap.add_argument("--harness-csv")
     ap.add_argument("--print-open", action="store_true", help="print the tickers open before the session and exit")
     ap.add_argument("--print-status", action="store_true", help="print the session's scan_log status and exit")
+    ap.add_argument("--latest-success", type=int, metavar="DAYS",
+                    help="print the latest session of the past DAYS days whose nightly succeeded; exit 1 if none")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
     from dotenv import load_dotenv
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
     from jobs.supabase_client import get_client
     client = get_client()
+    if args.latest_success is not None:
+        session = latest_successful_session(client, args.latest_success)
+        if session is None:
+            print(f"No session of the past {args.latest_success} days has a successful nightly", file=sys.stderr)
+            return 1
+        print(session)
+        return 0
+    if not args.date:
+        ap.error("--date is required")
     if args.print_status:
         rows = client.table("scan_log").select("status").eq("scan_date", args.date).execute().data or []
         print(rows[0]["status"] if rows else "missing")

@@ -83,5 +83,23 @@ class TestSecAudit(unittest.TestCase):
         self.assertEqual(audit["2026-10-25T13"]["wrong_documents"], 1)
 
 
+class TestSplitSweep(unittest.TestCase):
+    def test_lists_only_what_the_wider_check_adds(self):
+        from unittest import mock
+        from scripts.time_price_refresh import split_sweep
+        idx = pd.bdate_range("2026-09-21", periods=10)
+        jump = pd.Series([10.0] * 6 + [100.0] * 4, index=idx)          # 1-for-10 left unadjusted, jump on idx[6]
+        cm = mock.MagicMock()
+        cm._read_json.return_value = {"LATE": [[str(idx[7].date()), 0.1]],      # Yahoo lists it a session late
+                                      "ONDATE": [[str(idx[6].date()), 0.1]]}    # on the jump: today's rule
+        cm.cached_closes.return_value = pd.DataFrame({"LATE": jump, "ONDATE": jump})
+        cm.split_flagged.return_value = {"ONDATE"}
+        out = split_sweep(cm)
+        self.assertEqual(out["newly_flagged_tickers"], ["LATE"])
+        n = out["newly_flagged"][0]
+        self.assertEqual((n["session"], n["offset"], n["miss_pct_of_target"]), (str(idx[6].date()), -1, 0.0))
+        self.assertEqual((out["flagged_today_rule"], out["stored_not_recomputed"]), (1, []))
+
+
 if __name__ == "__main__":
     unittest.main()

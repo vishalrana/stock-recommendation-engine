@@ -3,6 +3,7 @@ name: Price cache tools
 # Runs scripts/time_price_refresh.py on a copy of the nightly's restored price cache. No Supabase
 # access. Modes:
 #   time     time the nightly refresh with corporate-action refetch (the cache is not saved back)
+#   report   only the reports asked for (screen, SEC events and audit, split sweep), no refresh
 #   rebuild  full adjusted history into a fresh directory; only if it passes the coverage,
 #            history-length and last-bar checks is it saved as the newest nightly cache
 # Run outside the nightly window (01:00-10:00 UTC), so no nightly saves an older cache after it.
@@ -15,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'time or rebuild'
+        description: 'time, report or rebuild'
         required: true
         default: 'time'
       actions_since:
@@ -42,6 +43,10 @@ on:
         description: 'With sec_audit: also restore and audit this backtest SEC cache (e.g. Linux-sec-submissions-<run id>)'
         required: false
         default: ''
+      split_sweep:
+        description: 'true: recorded splits the widened split check newly flags (src/data/splits.py)'
+        required: false
+        default: 'false'
       cache_key:
         description: 'time/screen only: restore this exact nightly cache (e.g. Linux-data-cache-v2-<run id>); empty = the newest'
         required: false
@@ -103,6 +108,8 @@ jobs:
           ${{ inputs.screen && format('--screen {0} --tickers "{1}"', inputs.screen, inputs.tickers) || '' }}
           ${{ inputs.sec_events && format('--sec-events "{0}"', inputs.sec_events) || '' }}
           ${{ inputs.sec_audit == 'true' && '--sec-audit' || '' }}
+          ${{ inputs.split_sweep == 'true' && '--split-sweep' || '' }}
+          ${{ env.MODE == 'report' && '--report-only' || '' }}
       - name: Save the rebuilt cache (only when the checks passed)
         if: success() && env.MODE == 'rebuild' && steps.when.outputs.skip != 'true'
         uses: actions/cache/save@v4

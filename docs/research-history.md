@@ -763,4 +763,64 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
 
   - 70 of about 1,650 trades differ (45 dropped, 25 added). Most are the same idea one session later, after an earnings report: BRBR 2024-02-05 → 02-06, MCY 07-30 → 07-31, WTS 07-31 → 08-01, EQIX 10-30 → 10-31, and BANR, UMBF and FR. An after-close report now gives the next session as the reaction, so the earnings rules move by a day.
   - Per-strategy evidence (`strategy_performance_production_universe.json`, every setup) moves by at most 0.002 percentage points per setup: Pullback 24,781 → 24,703 setups, PEAD 8,402 → 8,401, Cross-Sectional 23,113 → 23,105; Trend Following, Mean Reversion and Sector Rotation unchanged. The adopted file (run 39384088732) read the same SEC cache contents.
-  - So the conclusions stand: the book loses to SPY after beta, and the LATE period now also loses to SPY. Whether to adopt the rerun is the user's decision.
+  - So the conclusions stand: the book loses to SPY after beta, and the LATE period now also loses to SPY. Whether to adopt the rerun is the user's decision. *Adopted for the cards: see the follow-up to the 2026-10-26 report.*
+
+### Follow-up to the 2026-10-26 report (PRs #68–#72)
+
+#### Decisions (user)
+
+1. **Run 40205392302 replaces run 39451924637 for what the cards show** (#70).
+   - Why: at least 2,104 of 5,067 SEC documents behind the old figures were parsed 4–5 h early, so a filing accepted after the 20:00 ET cutoff could read as known a session early (GTE's of 2026-08-04, 21:05 ET, read as 17:05). From session 2026-10-26 the live scan reads correct times, so the rerun is the evidence for the system as it now runs. It is a successful, non-smoke run with its trials in the registry (commit 357e909).
+   - `frontend/src/lib/issued-evidence.json` is regenerated with `scripts/adopt_strategy_evidence.py --issued-only --run-id 40205392302`. Its 108 setup-level fields reproduce exactly, and the same tool reproduces the old file byte for byte from 39451924637's artifact.
+   - Verdict line: "Backtest (run 40205392302): the book loses to SPY after beta, -0.79% an idea (95% CI -1.39 to -0.22, below zero)."
+   - Shown on the cards: Trend Following 1,320 ideas in 41 months, −1.030%/idea beta-adjusted (CI −1.662 to −0.347); it was 1,342 and −1.022%. Still hidden: Cross-Sectional 44 and Sector Rotation 8 (too few ideas), Mean Reversion 156 in 3 months and PEAD 103 in 10 (too few months).
+   - Issuance: 1,640 ideas, 33.5 a month (median 25); 0.78, 0.67 and 0.74 a session in March, April and October. It was 33.9 (median 26) and 0.77, 0.69, 0.78.
+   - CI 40214894688; main 40215106194; Vercel production deployment 7316378649 `success` for `ca9d457`.
+2. **The scoring evidence stays frozen** for the forward test: `config/strategy_performance.json`, run 39384088732, which feeds the live score.
+   - **Known, bounded defect:** it was built on the same partly wrong SEC times (backtest SEC cache of 2026-10-20). The fix moves the per-strategy evidence by at most 0.002 pp per setup (rerun 40205392302 against 39451924637).
+3. **The split check is widened, live and harness alike** (#68). It also reads the two sessions before Yahoo's listed date, where it flags only when |move − target| < 0.25 × |target| on a log scale. Today's rule stays on the listed date and the next session. An early jump is dated on the session it landed on, so the harness truncates from there.
+4. **The nightly saves its Cross-Sectional ranking**, and the replay compares it with the harness's (#69).
+
+#### Fixes
+
+| PR | What | CI |
+|---|---|---|
+| #68 | Split check widened (decision 3); `--split-sweep` and mode `report` in the cache tools | 40213921343 |
+| #69 | Ranking saved in `nightly_exclusions.json` (rows, number ranked, cutoff); replay ranking comparison | 40214153653 |
+| #70 | Cards from run 40205392302 (decision 1) | 40214894688 |
+| #71 | SEC refusals counted (`stats["refused"]`, within `failed`), refused pages logged, filings stats and convention in the nightly's Provider health line | 40215544489 |
+| #72 | `--split-exposure` in the cache tools (report item 1) | 40215898543 |
+
+- **Split-check tests** (`tests/test_unadjusted_splits.py`): DHY, BTOC, REVB and MBRX (one session early) and SKIN (two) are flagged, with Yahoo's own moves of 2026-10-25. An ordinary −12% day two sessions before a 5-for-4 is not; today's rule would take any fall of 10.6% or more there.
+- **Live-cache sweep** (run 40213495199, `Linux-data-cache-v2-40079354903`): 626 tickers have recorded splits, and today's rule flags 26, the same as the 26 stored flags. The widened check newly flags 8:
+
+  | Ticker | Split | Jump | Move (log) | Unadjusted | Miss |
+  |---|---|---|---|---|---|
+  | DHY | 1-for-10 | 1 session before the listed date | +2.303 | +2.303 | 0.0% |
+  | BTOC | 1-for-16 | 1 before | +2.778 | +2.773 | 0.2% |
+  | IZM | 1-for-5 | 1 before | +1.632 | +1.609 | 1.4% |
+  | SKIN | 1-for-20 | 2 before | +2.949 | +2.996 | 1.6% |
+  | REVB | 1-for-7 | 1 before | +1.912 | +1.946 | 1.7% |
+  | MBRX | 1-for-20 | 1 before | +2.941 | +2.996 | 1.8% |
+  | OPAD | 1-for-10 | 2 before | +2.121 | +2.303 | 7.9% |
+  | AXNX | 1-for-2.5 | 2 before | +0.783 | +0.916 | 14.5% |
+
+  - None looks like an ordinary move: each multiplies the price 2.2× to 19× in one session, and six of the eight land within 2% of the unadjusted move.
+  - AXNX misses the most. Its bars also swing +0.77 and −1.00 a few sessions earlier, Yahoo's mixed adjustment as in SKIN, MBRX and REVB.
+  - No small split is newly flagged, and none of the 8 is an open idea.
+
+#### Report only
+
+1. **The evidence never applied the split guard**: its stored histories predate split events. The exposure of rerun 40205392302 (run 40215842662, its stored histories `Linux-backtest-history-40205392302`) was checked against fresh Yahoo split events:
+   - 1,631 trades in 1,015 tickers; 83 of those tickers have split events in five years.
+   - None has a split left unadjusted in the stored closes by the widened check. No download failed.
+   - So **no idea** had one before its entry or during its hold, and the book's −0.793%/idea is unchanged. No rerun on fresh histories is needed for the guard.
+2. **SEC refusals by #63:**
+   - 0 in the rerun (40205392302, 5,106 documents fetched) and 0 in the four replays on the fix (40202451597, 40202464506, 40203476439 and 40208954667, 5,105 each). Every process read `utc`.
+   - Counted from the refusal warnings and the `failed` count, which bounds refused pages.
+   - Limit: the check sees only times that become impossible. An old-convention response is caught by its evening filings (19:00 ET read as 23:00), and a UTC one read the old way by its pre-market filings. A response with daytime filings only fits both, and follows the canary.
+
+#### Pending
+
+- **Tuesday's nightly** (session 2026-10-26, cron 01:00 UTC on 2026-10-27): the first with #52, #53, #63, #66, #68, #69 and #71. It also makes a one-time SEC refetch (cache format `v3-tz`).
+- **Saturday's replay** (2026-10-31), the first with a saved live ranking.

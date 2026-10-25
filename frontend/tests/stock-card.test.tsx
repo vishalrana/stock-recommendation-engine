@@ -33,7 +33,7 @@ test('card: all-setup stats and issued ideas are labelled apart', () => {
   assert.ok(html.includes('52% of 23,107 setups · -0.14%/setup'));
   assert.ok(html.includes('-1.05%/setup vs SPY after beta'));
   assert.ok(html.includes('Issued ideas (backtest, live filters)'));
-  assert.ok(html.includes('insufficient sample (n=43)'), 'issued Cross-Sectional ideas (n=43) stay suppressed');
+  assert.ok(html.includes('insufficient sample (n=44)'), 'issued Cross-Sectional ideas (n=44) stay suppressed');
   assert.ok(html.includes('all targets &lt;1%'), 'a 0.03% hit share is not shown as 0%');
 });
 

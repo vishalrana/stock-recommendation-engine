@@ -71,6 +71,29 @@ class TestParityReplay(unittest.TestCase):
         live, _ = load_live(client, "2026-10-23")
         self.assertEqual(dict(zip(live.ticker, live.stage)), {"OMC": "issued", "XYZ": "score_below_65"})
 
+    def test_weekly_replay_picks_the_latest_successful_session(self):
+        from datetime import date
+        from unittest import mock
+        from scripts.parity_replay import latest_successful_session
+        def client_with(rows):
+            c = mock.MagicMock()
+            c.table.return_value.select.return_value.gte.return_value.lte.return_value.execute.return_value.data = rows
+            return c
+        week = [{"scan_date": "2026-10-19", "status": "success"}, {"scan_date": "2026-10-21", "status": "stale_data"},
+                {"scan_date": "2026-10-22", "status": "success"}, {"scan_date": "2026-10-23", "status": "stale_data"}]
+        self.assertEqual(latest_successful_session(client_with(week), 7, today=date(2026, 10, 23)), "2026-10-22")
+        self.assertIsNone(latest_successful_session(client_with(week[1::2]), 7, today=date(2026, 10, 23)))
+
+    def test_workflow_steps_fail_on_a_crash_inside_a_pipe(self):
+        import yaml
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        wf = yaml.safe_load(open(os.path.join(root, ".github", "workflows", "parity_replay.yml"), encoding="utf-8"))
+        for step in wf["jobs"]["replay"]["steps"]:
+            if "parity_replay.py" in (step.get("run") or ""):
+                # GitHub's default (bash -e) has no pipefail: $(crash | tail -1) would succeed with ""
+                self.assertEqual(step.get("shell"), "bash", step.get("name"))
+                self.assertNotIn("if", step, step.get("name"))          # no silent skip of the replay
+
     def _main(self, live_rows, harness_rows):
         """Exit code of parity_replay.main() for these decisions, and the step summary it wrote."""
         import tempfile

@@ -6,11 +6,11 @@ name: Parity Replay
 
 on:
   schedule:
-    - cron: '0 12 * * 6'   # Saturday: Friday's session, after both nightly attempts (01:00 and 04:00 UTC)
+    - cron: '0 12 * * 6'   # Saturday: the latest successful session of the week (Friday's when it succeeded)
   workflow_dispatch:
     inputs:
       session:
-        description: 'Live scan date to replay (YYYY-MM-DD; empty = the latest completed session)'
+        description: 'Live scan date to replay (YYYY-MM-DD; empty = the latest successful session of the past week)'
         required: false
         default: ''
 
@@ -36,30 +36,37 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r jobs/requirements.txt
-      # Only a session whose nightly finished with status success is replayed
+      # Only a session whose nightly finished with status success is replayed. Scheduled: the latest
+      # such session of the past week (a stale Friday must not mean no check); none fails the run.
+      # shell: bash adds pipefail, so a crash inside $(... | tail -1) fails the step.
       - name: Session to replay
         id: s
+        shell: bash
         run: |
-          S="${{ inputs.session }}"
-          if [ -z "$S" ]; then S=$(python -c "from src.utils.market_date import latest_completed_session as l; print(l())"); fi
-          STATUS=$(python scripts/parity_replay.py --date "$S" --print-status | tail -1)
-          echo "Session $S: nightly status $STATUS"
-          echo "session=$S" >> "$GITHUB_OUTPUT"
-          if [ "$STATUS" != "success" ]; then
-            echo "::warning::Not replayed: the nightly for $S has status $STATUS, not success"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.session }}" ]; then
+            S="${{ inputs.session }}"
+            STATUS=$(python scripts/parity_replay.py --date "$S" --print-status | tail -1)
+            if [ -z "$STATUS" ]; then echo "::error::Could not read the nightly status of $S"; exit 1; fi
+            if [ "$STATUS" != "success" ]; then
+              echo "::error::Not replayed: the nightly for $S has status $STATUS, not success"; exit 1
+            fi
+          else
+            S=$(python scripts/parity_replay.py --latest-success 7 | tail -1)
           fi
+          if [ -z "$S" ]; then echo "::error::No session to replay"; exit 1; fi
+          echo "Replaying session $S"
+          echo "session=$S" >> "$GITHUB_OUTPUT"
       # Prices are re-downloaded (--refresh-data) so the session's bars exist; SEC filings are
       # fetched fresh and cut at the session's 20:00 ET cutoff by the shared point-in-time code.
       - name: Harness decisions for the session
-        if: steps.s.outputs.skip != 'true'
+        shell: bash
         run: |
           OPEN=$(python scripts/parity_replay.py --date "${{ steps.s.outputs.session }}" --print-open | tail -1)
-          echo "Ideas open before the session: $OPEN"
+          echo "Ideas open before the session: ${OPEN:-none}"
           python scripts/validate_backtest_pipeline.py --universe production --workers 4 \
             --replay-session "${{ steps.s.outputs.session }}" --replay-active "$OPEN" --refresh-data
       - name: Compare with the live scan
-        if: steps.s.outputs.skip != 'true'
+        shell: bash
         run: python scripts/parity_replay.py --date "${{ steps.s.outputs.session }}" --harness-csv "outputs/parity_replay_${{ steps.s.outputs.session }}_harness.csv"
       - uses: actions/upload-artifact@v4
         if: always()

@@ -65,5 +65,21 @@ class TestPartialLastSession(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "2026-10-21.parquet")))
 
 
+class TestSecAudit(unittest.TestCase):
+    def test_wrongly_parsed_documents_stand_out(self):
+        import json
+        import tempfile
+        from scripts.time_price_refresh import sec_acceptance_audit
+        with tempfile.TemporaryDirectory() as d:
+            # 2026-10-23 05:00Z: header-correct times; 2026-10-25 13:00Z: 4 h early (07:00 -> 03:00)
+            for name, ts, times in (("CIK0000000001", 1792731600, ["17:53:18", "08:00:00"]),
+                                    ("CIK0000000002", 1792933200, ["03:00:00", "12:30:00"])):
+                rows = [["8-K", f"2026-07-29T{t}", "2.02"] for t in times]
+                json.dump({"fetched_at": ts, "recent_rows": rows, "pages": {}}, open(os.path.join(d, name + ".json"), "w"))
+            audit = sec_acceptance_audit(d)
+        self.assertEqual(audit["2026-10-23T05"]["share_before_06_et"], 0.0)
+        self.assertEqual(audit["2026-10-25T13"]["share_before_06_et"], 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

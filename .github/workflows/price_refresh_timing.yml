@@ -34,6 +34,10 @@ on:
         description: 'Comma-separated tickers: print their SEC 8-K item 2.02 events from the restored cache'
         required: false
         default: ''
+      sec_audit:
+        description: 'true: acceptance-time check of every cached SEC document, per fetch hour'
+        required: false
+        default: 'false'
       cache_key:
         description: 'time/screen only: restore this exact nightly cache (e.g. Linux-data-cache-v2-<run id>); empty = the newest'
         required: false
@@ -88,6 +92,7 @@ jobs:
           ${{ inputs.actions_since && format('--actions-since {0}', inputs.actions_since) || '' }}
           ${{ inputs.screen && format('--screen {0} --tickers "{1}"', inputs.screen, inputs.tickers) || '' }}
           ${{ inputs.sec_events && format('--sec-events "{0}"', inputs.sec_events) || '' }}
+          ${{ inputs.sec_audit == 'true' && '--sec-audit' || '' }}
       - name: Save the rebuilt cache (only when the checks passed)
         if: success() && env.MODE == 'rebuild' && steps.when.outputs.skip != 'true'
         uses: actions/cache/save@v4

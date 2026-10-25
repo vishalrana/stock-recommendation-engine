@@ -29,6 +29,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CACHE_DIR = os.path.join("data", "cache", "by_date")
 
 
+def sec_acceptance_audit(cache_dir: str) -> dict:
+    """Per fetch hour (UTC) of the cached SEC documents: 'recent' filings and the share accepted
+    before 06:00 ET. EDGAR accepts filings from 06:00 ET, so a large share means that hour's
+    documents were parsed with the wrong acceptanceDateTime convention (times 4-5 h early)."""
+    out: dict = {}
+    for path in glob.glob(os.path.join(cache_dir, "CIK*.json")):
+        try:
+            doc = json.load(open(path, encoding="utf-8"))
+            hour = time.strftime("%Y-%m-%dT%H", time.gmtime(float(doc["fetched_at"])))
+        except Exception:
+            continue
+        b = out.setdefault(hour, {"documents": 0, "filings": 0, "before_06_et": 0})
+        b["documents"] += 1
+        for r in doc.get("recent_rows", []):
+            b["filings"] += 1
+            b["before_06_et"] += int(r[1][11:13]) < 6
+    for b in out.values():
+        b["share_before_06_et"] = round(b["before_06_et"] / b["filings"], 3) if b["filings"] else None
+    return dict(sorted(out.items()))
+
+
 def screen(cm, tickers, session: date, wanted) -> dict:
     """The live Cross-Sectional screen on `session` from the cache: counts, the cutoff, the ranks of
     `wanted`, and the full ranking written to outputs/screen_<session>.csv (uploaded by the workflow)."""
@@ -145,6 +166,7 @@ def main() -> int:
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--sec-events", default="", help="comma-separated tickers: their 8-K item 2.02 events as the "
                     "restored cache holds them (no refetch), for replay diagnosis")
+    ap.add_argument("--sec-audit", action="store_true", help="acceptance-time check of every cached SEC document")
     a = ap.parse_args()
     import jobs.generate_signals as gs
     from jobs.strategies.sector_rotation import SECTOR_ETFS
@@ -179,6 +201,10 @@ def main() -> int:
             out["sec_events"][t] = None if f is None else [
                 {"announced": e.announced.isoformat(), "reaction": e.reaction.isoformat(), "accepted": e.accepted.isoformat()}
                 for e in earnings_events(f)][-8:]
+
+    if a.sec_audit:
+        from src.providers.context.sec_filings import LIVE_CACHE_DIR
+        out["sec_audit"] = sec_acceptance_audit(LIVE_CACHE_DIR)
 
     if a.screen:
         out["screen"] = screen(get_cache_manager(), stocks, date.fromisoformat(a.screen),

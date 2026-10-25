@@ -30,6 +30,10 @@ on:
         description: 'With screen: comma-separated tickers to report ranks for'
         required: false
         default: ''
+      sec_events:
+        description: 'Comma-separated tickers: print their SEC 8-K item 2.02 events from the restored cache'
+        required: false
+        default: ''
       cache_key:
         description: 'time/screen only: restore this exact nightly cache (e.g. Linux-data-cache-v2-<run id>); empty = the newest'
         required: false
@@ -83,6 +87,7 @@ jobs:
           ${{ env.MODE == 'rebuild' && '--rebuild' || '' }}
           ${{ inputs.actions_since && format('--actions-since {0}', inputs.actions_since) || '' }}
           ${{ inputs.screen && format('--screen {0} --tickers "{1}"', inputs.screen, inputs.tickers) || '' }}
+          ${{ inputs.sec_events && format('--sec-events "{0}"', inputs.sec_events) || '' }}
       - name: Save the rebuilt cache (only when the checks passed)
         if: success() && env.MODE == 'rebuild' && steps.when.outputs.skip != 'true'
         uses: actions/cache/save@v4

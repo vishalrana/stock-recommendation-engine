@@ -651,7 +651,7 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
   - **(b) provider data changed:** the replay restores the nightly's saved cache (cache key from the run) and compares that ticker's closes over the scan window with the harness download. A difference above 0.05% on any bar, or an SEC filing accepted between the nightly and the replay, is (b).
 - Both classes would still be listed in the job summary with their evidence. Anything else stays (c) and fails the run.
 
-### 2026-10-26 follow-up (PRs #56–#64)
+### 2026-10-26 follow-up (PRs #56–#66)
 
 #### Decisions
 
@@ -684,6 +684,7 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
 - #59, #60, #61 and #62: diagnostics in the price cache tools: a ticker's cached SEC events, each document's fetch time, and an acceptance-time audit per fetch hour, also of a backtest SEC cache.
 - #63: SEC acceptance times (below).
 - #64: the harness keeps a split Yahoo lists on a day without a bar (MSI, below).
+- #66: follow-up to #63. A canary that matched neither convention left the provider unset, so each fetch downloaded AAPL's file again. That verdict is now final for the provider, and only a failed request is retried.
 
 | PR | CI run (success) |
 |---|---|
@@ -696,6 +697,7 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
 | #62 | 40200784442 |
 | #63 | 40202237581 |
 | #64 | 40208729153 |
+| #66 | 40211271120 |
 
 #### pandas 3.1.0 nights
 

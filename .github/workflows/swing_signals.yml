@@ -25,7 +25,7 @@ concurrency:
 jobs:
   scan-and-reconcile:
     name: Scan & Reconcile Swing Signals
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
       PYTHONPATH: .
@@ -39,14 +39,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
 
       - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r jobs/requirements.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
 
       # Own incremental cache: daily bars, SEC submissions, EDGAR daily indexes, Form 4s, insider data sets
       - name: Restore swing live cache

@@ -44,7 +44,7 @@ concurrency:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       PYTHONPATH: .
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/setup-python@v5
         if: steps.when.outputs.skip != 'true'
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
       - uses: actions/cache/restore@v4
         if: steps.when.outputs.skip != 'true'
@@ -74,8 +74,8 @@ jobs:
             ${{ (env.MODE != 'rebuild' && inputs.cache_key) || format('{0}-data-cache-v2-', runner.os) }}
       - if: steps.when.outputs.skip != 'true'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r jobs/requirements.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
       - name: Run
         if: steps.when.outputs.skip != 'true'
         run: >

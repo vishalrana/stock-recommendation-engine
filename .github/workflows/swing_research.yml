@@ -30,18 +30,18 @@ env:
 jobs:
   data:
     name: Build data (prices 2004+, SEC 2006+, insider data sets)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r jobs/requirements.txt -r requirements-research.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
       - name: Restore research data
         uses: actions/cache/restore@v4
         with:
@@ -70,15 +70,15 @@ jobs:
 
   replication:
     needs: data
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
-      - run: pip install -r requirements.txt -r jobs/requirements.txt -r requirements-research.txt
+      - run: pip install -r requirements.lock
       - uses: actions/cache/restore@v4
         with:
           path: |
@@ -100,7 +100,7 @@ jobs:
 
   sleeve:
     needs: data
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -110,9 +110,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
-      - run: pip install -r requirements.txt -r jobs/requirements.txt -r requirements-research.txt
+      - run: pip install -r requirements.lock
       - uses: actions/cache/restore@v4
         with:
           path: |
@@ -134,7 +134,7 @@ jobs:
   decide:
     needs: [replication, sleeve]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write   # the trials registry is pushed to main
     timeout-minutes: 30
@@ -142,9 +142,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
-      - run: pip install -r requirements.txt -r jobs/requirements.txt
+      - run: pip install -r requirements.lock
       - uses: actions/download-artifact@v4
         with:
           path: artifacts

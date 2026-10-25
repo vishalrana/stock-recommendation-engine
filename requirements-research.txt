@@ -1,3 +1,4 @@
+# Loose ranges only. Workflows install requirements.lock (exact versions; regenerate it deliberately).
 # Research-only dependencies for the profitability program (CLAUDE.md). The nightly scan and the
 # Vercel app never import these; requirements.txt stays the production set.
 arch>=7.0              # StepM (Romano-Wolf) multiple testing, stationary bootstrap

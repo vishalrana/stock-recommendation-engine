@@ -17,7 +17,7 @@ concurrency:
 jobs:
   nightly-scan:
     name: Generate Signals
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
       skipped: ${{ steps.scan.outputs.skipped }}
@@ -44,7 +44,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
 
       - name: Cache Data Files
@@ -58,9 +58,13 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r jobs/requirements.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
+      - name: Installed versions (job summary)
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Environment"; echo; echo '```'; python --version; pip freeze; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "✅ Dependencies installed."
 
       - name: Validate Ticker List
@@ -121,7 +125,7 @@ jobs:
 
   validate-outcomes:
     name: Validate 20-day-old signals
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: nightly-scan   # runs only after main scan succeeds
     if: needs.nightly-scan.outputs.skipped != 'true'
     steps:
@@ -136,13 +140,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.17'
           cache: 'pip'
       - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r jobs/requirements.txt
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
           echo "✅ Dependencies installed."
       - name: Run outcome validation
         env:

@@ -143,6 +143,8 @@ def main() -> int:
     ap.add_argument("--screen", default=None)
     ap.add_argument("--tickers", default="")
     ap.add_argument("--rebuild", action="store_true")
+    ap.add_argument("--sec-events", default="", help="comma-separated tickers: their 8-K item 2.02 events as the "
+                    "restored cache holds them (no refetch), for replay diagnosis")
     a = ap.parse_args()
     import jobs.generate_signals as gs
     from jobs.strategies.sector_rotation import SECTOR_ETFS
@@ -161,6 +163,15 @@ def main() -> int:
     end = latest_completed_session()
     full_start = (end - timedelta(days=500)).isoformat()
     out = {}
+    if a.sec_events:
+        from src.providers.context.sec_filings import LIVE_CACHE_DIR, SecFilingsProvider, earnings_events
+        cached = SecFilingsProvider(cache_dir=LIVE_CACHE_DIR, ttl_hours=None)   # cached rows only, as the nightly read them
+        out["sec_events"] = {}
+        for t in [x.strip().upper() for x in a.sec_events.split(",") if x.strip()]:
+            f = cached.filings(t)
+            out["sec_events"][t] = None if f is None else [
+                {"announced": e.announced.isoformat(), "reaction": e.reaction.isoformat(), "accepted": e.accepted.isoformat()}
+                for e in earnings_events(f)][-8:]
 
     if a.screen:
         out["screen"] = screen(get_cache_manager(), stocks, date.fromisoformat(a.screen),

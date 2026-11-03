@@ -1,0 +1,6 @@
+{"timestamp": "2026-11-03T08:22:41.379182+00:00", "session_date": "2026-10-30", "action": "SELL", "ticker": "BSAC", "sleeve": "T", "price": 29.55, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
+{"timestamp": "2026-11-03T08:22:42.675298+00:00", "session_date": "2026-10-30", "action": "SELL", "ticker": "MCS", "sleeve": "T", "price": 26.5455, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
+{"timestamp": "2026-11-03T08:23:05.970917+00:00", "session_date": "2026-10-30", "action": "SELL", "ticker": "MCK", "sleeve": "P", "price": 1006.29, "units": 1.0, "details": {"exit_reason": "sma5_exit", "mode": "SHADOW"}}
+{"timestamp": "2026-11-03T08:23:14.706211+00:00", "session_date": "2026-10-30", "action": "SELL", "ticker": "COST", "sleeve": "P", "price": 1012.05, "units": 1.0, "details": {"exit_reason": "sma5_exit", "mode": "SHADOW"}}
+{"timestamp": "2026-11-03T08:23:15.244619+00:00", "session_date": "2026-10-30", "action": "SELL", "ticker": "HUM", "sleeve": "P", "price": 415.66, "units": 1.0, "details": {"exit_reason": "sma5_exit", "mode": "SHADOW"}}
+{"timestamp": "2026-11-03T08:23:21.593209+00:00", "session_date": "2026-10-30", "action": "SELL", "ticker": "HPQ", "sleeve": "P", "price": 27.3, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

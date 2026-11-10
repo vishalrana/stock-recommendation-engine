@@ -137,3 +137,4 @@
 {"timestamp": "2026-11-06T08:26:27.117880+00:00", "session_date": "2026-11-05", "action": "BUY", "ticker": "TRIN", "sleeve": "T", "price": 17.74, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 16.546499252319336, "target": 20.12700080871582}}
 {"timestamp": "2026-11-06T08:26:27.117921+00:00", "session_date": "2026-11-05", "action": "BUY", "ticker": "TRMD", "sleeve": "T", "price": 34.31, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 28.756000518798828, "target": 45.417999267578125}}
 {"timestamp": "2026-11-06T08:26:27.117967+00:00", "session_date": "2026-11-05", "action": "BUY", "ticker": "UBSI", "sleeve": "T", "price": 48.39, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 45.13970184326172, "target": 54.890499114990234}}
+{"timestamp": "2026-11-10T08:52:55.575976+00:00", "session_date": "2026-11-05", "action": "SELL", "ticker": "CARE", "sleeve": "T", "price": 28.217, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

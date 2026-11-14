@@ -30,3 +30,4 @@
 {"timestamp": "2026-10-20T06:34:18.392299+00:00", "session_date": "2026-10-19", "action": "BUY", "ticker": "TEN", "sleeve": "T", "price": 50.05, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 42.898101806640625, "target": 64.35379791259766}}
 {"timestamp": "2026-10-20T06:34:18.392367+00:00", "session_date": "2026-10-19", "action": "BUY", "ticker": "TNK", "sleeve": "T", "price": 94.8, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 82.37870025634766, "target": 119.6426010131836}}
 {"timestamp": "2026-10-20T06:34:18.392438+00:00", "session_date": "2026-10-19", "action": "BUY", "ticker": "TRMK", "sleeve": "T", "price": 44.51, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 42.02399826049805, "target": 49.48210144042969}}
+{"timestamp": "2026-11-14T08:11:23.198135+00:00", "session_date": "2026-10-19", "action": "SELL", "ticker": "PSTL", "sleeve": "T", "price": 21.095, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

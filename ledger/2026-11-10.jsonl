@@ -46,3 +46,4 @@
 {"timestamp": "2026-11-11T08:16:48.874934+00:00", "session_date": "2026-11-10", "action": "BUY", "ticker": "TEN", "sleeve": "T", "price": 45.16, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 38.27370071411133, "target": 58.932498931884766}}
 {"timestamp": "2026-11-11T08:16:48.875003+00:00", "session_date": "2026-11-10", "action": "BUY", "ticker": "TRIN", "sleeve": "T", "price": 18.03, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 16.87529945373535, "target": 20.33930015563965}}
 {"timestamp": "2026-11-11T08:16:48.875069+00:00", "session_date": "2026-11-10", "action": "BUY", "ticker": "WCCB", "sleeve": "T", "price": 63.41, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 60.32099914550781, "target": 69.58799743652344}}
+{"timestamp": "2026-11-17T09:40:40.270920+00:00", "session_date": "2026-11-10", "action": "SELL", "ticker": "COP", "sleeve": "T", "price": 131.0321, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

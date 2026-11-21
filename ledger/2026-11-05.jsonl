@@ -139,3 +139,5 @@
 {"timestamp": "2026-11-06T08:26:27.117967+00:00", "session_date": "2026-11-05", "action": "BUY", "ticker": "UBSI", "sleeve": "T", "price": 48.39, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 45.13970184326172, "target": 54.890499114990234}}
 {"timestamp": "2026-11-10T08:52:55.575976+00:00", "session_date": "2026-11-05", "action": "SELL", "ticker": "CARE", "sleeve": "T", "price": 28.217, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
 {"timestamp": "2026-11-20T09:00:25.445243+00:00", "session_date": "2026-11-05", "action": "SELL", "ticker": "LFUS", "sleeve": "T", "price": 347.0269, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
+{"timestamp": "2026-11-21T08:49:01.734404+00:00", "session_date": "2026-11-05", "action": "SELL", "ticker": "GSL", "sleeve": "T", "price": 38.3584, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
+{"timestamp": "2026-11-21T08:49:07.849671+00:00", "session_date": "2026-11-05", "action": "SELL", "ticker": "ECO", "sleeve": "T", "price": 75.4306, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

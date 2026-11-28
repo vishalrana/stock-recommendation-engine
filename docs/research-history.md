@@ -824,3 +824,128 @@ Sources: the live ranking from the cache the 2026-10-20 nightly saved (`Linux-da
 
 - **Tuesday's nightly** (session 2026-10-26, cron 01:00 UTC on 2026-10-27): the first with #52, #53, #63, #66, #68, #69 and #71. It also makes a one-time SEC refetch (cache format `v3-tz`).
 - **Saturday's replay** (2026-10-31), the first with a saved live ranking.
+
+## Operations: stopped schedules and swing ledger integrity (2026-11-28)
+
+The user's operations prompt of 2026-11-28 listed eight findings from a read-only review (public Actions pages and the `signals-ledger` branch) and decisions D1–D6. Each finding was checked against the Actions API, Supabase and the run logs. Nothing here changes a strategy rule, threshold, scoring input or evidence file: `config/strategy_performance.json` stays at run 39384088732, and the cards' issued evidence stays at run 40205392302. No forward-test return (Ideas or swing) was computed, printed or summarised. Only counts and integrity checks are reported.
+
+### Pre-registration (finding 7)
+
+- `docs/forward-test-reviews.md` holds the populations, measures, review dates R1–R4 and decision rules, with a pointer in CLAUDE.md's rules. It was merged first, in PR #74: merge commit `8e6400362a9b`, 2026-11-28 12:20:56 UTC, CI 46143999733. It never changes after results exist.
+- The same PR replaced fixed dates in `scripts/test_earnings_infrastructure.py` that had expired and turned main's CI red.
+
+### Finding 1, stopped schedules: refuted
+
+- All 11 workflows were `active`, and every cron slot since 2026-10-15 produced exactly one run: nightly 33/33 and 28/28, swing 33/33, parity replay 5/5, price cache tools 5/5, earnings refresh 6/6. None of the 286 runs was stuck, queued or a startup failure.
+- `nightly_scan.yml` has 49 scheduled runs after 40079354903 (#132 40459265711 to #180 46127475496). `scan_log` has a `success` row for each of the 24 sessions from 2026-10-26 to 2026-11-27.
+- `parity_replay.yml` ran successfully on every Saturday after the failed run of 2026-10-24. The latest is 44937332331 (2026-11-21).
+- `price_refresh_timing.yml` ran on each Sunday from 2026-10-25. Four of the five runs skip at "Monthly only" in 5–7 s. The first-Sunday run, 41333457607 (2026-11-01), rebuilt and saved the cache.
+- The run ids in the finding are the latest as of 2026-10-25/26, the date CLAUDE.md's state still showed, so they most likely came from a stale snapshot.
+- Consequences:
+  - The forward test has no gap after 2026-10-21. REPLAY is empty (`data/forward_test/replay_ideas.jsonl`), so COMBINED equals LIVE.
+  - No backfill ran (step 6). No `scan_log` gap rows were written (D3), and no workflow needed re-enabling (D1).
+  - The replay-validation STOP rule never applied.
+- A real risk found along the way: `refresh_earnings.yml` saved `data/cache` under the nightly cache prefix outside the `nightly-scan` concurrency group, on the same Sunday 12:00 UTC cron as the monthly rebuild. It now joins that group (#75), and `tests/test_cache_writers.py` keeps all three cache writers in it.
+
+### Findings 2–5, swing ledger: causes (PR #77)
+
+- **Finding 3, re-entry while a signal is open** (from 2026-11-02). Step 5 of `jobs/generate_swing_signals.py` set `busy = date.max` for open signals. The `recent_closed` loop then overwrote it with an expired cooldown date, and `run_book` treats only `date.max` as open. Effects:
+  - 422 signals were issued while the pair's previous signal was open (T 397, P 25). The finding counted 325 T and 22 P BUYs in the jsonl.
+  - 83 pairs held more than one open signal.
+  - 100 more signals were issued inside a cooldown, because the loop kept the last row rather than the latest exit.
+- **Finding 2, the Thanksgiving re-run.** There was no processed-session guard, so run 45975807493 re-scanned session 2026-11-25.
+  - Its 45 duplicate BUYs (42 T, 3 P) came from the same re-entry bug. The jsonl and `swing_ledger` appended them a second time; `swing_signals` didn't, because its upsert is keyed by signal.
+  - The 5 sleeve I BUYs (COHR, FISI, NPCE, SNDA, SNEX) are valid but late: run 45792796653 skipped sleeve I after an EDGAR timeout.
+  - Point-in-time check: all 12 Form 4s behind them were accepted between 2026-11-03 and 2026-11-24 18:49 ET, before the 2026-11-25 20:00 ET cutoff. No look-ahead.
+- **Finding 4, back-dated stops.** After a dividend, `update_live_prices` refetches the full history and Yahoo re-adjusts it downward. Reconcile then replayed each open signal against its stored, unrebased stop. 11 stop SELLs were logged 2–18 sessions late, and in 10 of them the raw low on the exit session was above the stop. The finding listed GSL twice; the second is DHT's signal of 2026-11-04.
+
+  | Sleeve | Ticker | Signal | Exit session | Logged | Sessions late | Stored stop | Rebased stop | Ex-dividend | Raw low (exit) | Stop real | Correction |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | T | PSTL | 10-13 | 10-19 | 11-14 | 18 | 21.0950 | 20.8669 | 11-13 | 21.170 | no | reopened |
+  | T | CARE | 10-13 | 11-05 | 11-10 | 2 | 28.2170 | 28.1186 | 11-09 | 28.270 | no | exit moved to a stop on 11-25 |
+  | T | ECO | 10-19 | 11-05 | 11-21 | 10 | 75.4306 | 69.0705 | 11-20 | 80.965 | no | void (cooldown) |
+  | T | GSL | 10-15 | 11-05 | 11-21 | 10 | 38.3584 | 37.7071 | 11-20 | 38.520 | no | void (cooldown) |
+  | T | LFUS | 10-29 | 11-05 | 11-20 | 10 | 347.0269 | 346.3090 | 11-19 | 347.690 | no | exit moved to a stop on 11-25 |
+  | T | COP | 10-13 | 11-10 | 11-17 | 4 | 131.0321 | 130.1756 | 11-16 | 131.120 | no | reopened |
+  | T | DHT | 10-15 | 11-10 | 11-24 | 9 | 20.1950 | 18.8381 | 11-23 | 19.250 | yes | void (cooldown) |
+  | T | DHT | 11-04 | 11-10 | 11-24 | 9 | 18.8107 | 17.5468 | 11-23 | 19.250 | no | void (cooldown) |
+  | E | AVA | 11-05 | 11-19 | 11-25 | 3 | 38.5902 | 38.1163 | 11-24 | 39.060 | no | reopened |
+  | T | FBP | 11-17 | 11-20 | 11-28 | 3 | 23.5375 | 23.2951 | 11-27 | 23.740 | no | void (cooldown) |
+  | T | SB | 11-13 | 11-20 | 11-26 | 2 | 7.3418 | 7.2561 | 11-25 | 7.380 | no | void (re-entry while open) |
+
+  "Stop real" means the raw (unadjusted) low on the exit session reached the stored stop. All dates are in 2026.
+- **Finding 5, ledger gaps.**
+  - Run #23 (41178793179) closed 5 signals in `swing_signals` and then failed, so neither ledger got their SELLs (dated 2026-10-30, logged 2026-11-03).
+  - `swing_ledger` dated a SELL by the run's session, while the jsonl dates it by the exit session.
+  - The push step had no `always()`, and it deduped with `sort -u` over lines that carry timestamps, which removed nothing.
+
+### Fixes
+
+| PR | What | CI |
+|---|---|---|
+| #74 | Pre-registration of the reviews; earnings-test dates made relative | 46143999733 |
+| #75 | `refresh_earnings.yml` joins the `nightly-scan` concurrency group | 46146171999 |
+| #76 | Workflow health check (`workflow_health.yml`, daily 14:07 UTC) | 46155645681 |
+| #77 | Swing integrity: one open signal per pair, a processed-session guard, rebased exits, never-silent reconcile, late labels, idempotent ledgers, a consistency check, correction tooling, Signals tab (IST times, late label, void hidden) | 46155886018 |
+| #78 | Forward-test review workflow, swing review section, app banner | 46158931611 |
+
+- Main CI after #78: 46159190218. Vercel production deployment 8131422929 is `success` for `d9763d1`.
+
+### Swing record corrections (D4)
+
+- The plan was computed on GitHub with plan run 46156151999 (`--plan-corrections`, read only). Supabase was unchanged after the plan read: the latest writes were from the 09:24 UTC swing run.
+- Backup before any write: `backups/swing_20261128T150843Z/` (local, never committed), holding `swing_signals` 1,488 rows, `swing_ledger` 2,186 and `swing_events` 0. Each table was read back before anything was written.
+
+  | | Before | After |
+  |---|---|---|
+  | Open, T | 634 | 272 |
+  | Open, E | 93 | 94 |
+  | Open, I | 47 | 48 |
+  | Open, N | 40 | 40 |
+  | Open, P | 16 | 4 |
+  | Pairs with more than one open signal | 83 | 0 |
+  | Void | 0 | 466 (T 434, P 32) |
+
+- Changes:
+  - 466 voided: duplicates, re-entries while open and cooldown violations, keeping the earliest open signal.
+  - 9 reopened and 16 exits changed, re-simulated on rebased levels: every changed exit is a later stop.
+  - 71 labelled late.
+  - 19 `swing_ledger` SELLs re-dated to their exit session.
+- Ledgers:
+  - The jsonl got 45 duplicate and 5 missing events fixed. It is append-only: 612 CORRECTION and backfill lines in commit `c28bf1f` on `signals-ledger`, 0 lines deleted.
+  - `swing_ledger` got the same 612 rows.
+- Consistency (`scripts/check_swing_ledger.py`): the jsonl and `swing_ledger` are both consistent, with 2,798 entries for 1,488 signals, 466 of them void. Before the correction it found 50 and 87 differences.
+- Verified on GitHub by dispatched swing run 46158671623 (success) for the already-processed session 2026-11-27:
+  - all five sleeves logged "already scanned session 2026-11-27: no new signals", and the run wrote no ledger entries;
+  - its "Ledger consistency" step found both ledgers consistent (2,798 entries);
+  - 87 open signals were replayed on rebased levels, and 1 (MSGS, no price data) was left unchecked with that reason.
+
+### Finding 6, late starts (D6: measured only)
+
+Run `created_at` minus the cron slot, for every scheduled run since 2026-10-14. The nightly's 01:00 and 04:00 slots are combined.
+
+| Week of | Nightly runs | Median h | p90 h | Max h | Swing runs | Median h | p90 h | Max h |
+|---|---|---|---|---|---|---|---|---|
+| 2026-10-12 | 4 | 4.7 | 4.9 | 5.0 | 4 | 4.6 | 4.8 | 4.8 |
+| 2026-10-19 | 9 | 4.9 | 5.3 | 5.3 | 5 | 4.7 | 4.8 | 4.8 |
+| 2026-10-26 | 10 | 5.9 | 6.8 | 6.8 | 5 | 5.7 | 5.8 | 5.8 |
+| 2026-11-02 | 10 | 6.9 | 8.0 | 8.0 | 5 | 6.6 | 6.6 | 6.6 |
+| 2026-11-09 | 10 | 7.3 | 8.4 | 8.4 | 5 | 6.6 | 7.1 | 7.1 |
+| 2026-11-16 | 10 | 8.2 | 8.8 | 8.9 | 5 | 7.2 | 7.7 | 7.9 |
+| 2026-11-23 | 10 | 9.2 | 10.1 | 10.7 | 5 | 8.4 | 9.2 | 9.6 |
+| All | 63 | 6.9 | 8.8 | 10.7 | 34 | 6.4 | 8.1 | 9.6 |
+
+- The delay grows every week. The latest 04:00 retry slot started 10.7 h late, at 14:42 UTC, after the US open; the 01:00 run had already succeeded, so the retry exits at once. The median is over 2 hours, so the setup for an external trigger is written in `docs/operations.md`. None was added (D6).
+
+### Finding 8, GitHub limits
+
+- Inactivity: the merges of 2026-11-28 reset the 60-day clock. The health check also re-enables a workflow that GitHub disabled for inactivity (`disabled_inactivity`), and fails on one disabled by hand.
+- Cache eviction: `Linux-data-cache-v2-40079354903` is gone, but every nightly saves its own cache (the latest is `Linux-data-cache-v2-46146543539`), so no rebuild was needed.
+
+### Monitoring and reviews
+
+- **Health check** (#76, `scripts/workflow_health.py`, 12 tests). First run 46157940140: no failures. It confirmed nightly session 2026-11-27 (run 46127475496) and the swing processed marker for 2026-11-27, and warned on three late starts (7.6–8.8 h). See `docs/operations.md`.
+- **Review workflow** (#78, `forward_test_review.yml`, Saturdays 13:17 UTC). The first review is R1 on 2027-01-16.
+  - The dry run on fixtures, 46159215427, ran only the fixture step: no live outcomes, no commit.
+  - `tests/test_forward_test_review.py` checks that M1 on run 40205392302's 1,631 issued ideas reproduces its recorded −0.79%/idea (CI −1.39 to −0.22). Those ideas are copied to `data/forward_test/` because the run's artifact expires around 2027-01-23.
+  - LIVE through 2026-11-27: 61 ideas from 27 successful sessions (counts only).

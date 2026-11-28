@@ -914,7 +914,11 @@ The user's operations prompt of 2026-11-28 listed eight findings from a read-onl
 - Ledgers:
   - The jsonl got 45 duplicate and 5 missing events fixed. It is append-only: 612 CORRECTION and backfill lines in commit `c28bf1f` on `signals-ledger`, 0 lines deleted.
   - `swing_ledger` got the same 612 rows.
-- Consistency (`scripts/check_swing_ledger.py`, local): the jsonl and `swing_ledger` are both consistent, with 2,798 entries for 1,488 signals, 466 of them void. Before the correction it found 50 and 87 differences.
+- Consistency (`scripts/check_swing_ledger.py`): the jsonl and `swing_ledger` are both consistent, with 2,798 entries for 1,488 signals, 466 of them void. Before the correction it found 50 and 87 differences.
+- Verified on GitHub by dispatched swing run 46158671623 (success) for the already-processed session 2026-11-27:
+  - all five sleeves logged "already scanned session 2026-11-27: no new signals", and the run wrote no ledger entries;
+  - its "Ledger consistency" step found both ledgers consistent (2,798 entries);
+  - 87 open signals were replayed on rebased levels, and 1 (MSGS, no price data) was left unchecked with that reason.
 
 ### Finding 6, late starts (D6: measured only)
 

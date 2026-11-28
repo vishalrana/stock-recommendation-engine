@@ -441,6 +441,14 @@ def build_signal(ctx: SwingContext, sleeve: str, t: str, ts: pd.Timestamp, extra
     return None
 
 
+def g0_book_state(busy: Dict[str, date], sleeve: str, t: str, d: date):
+    """G0's open-signal and cooldown inputs for (sleeve, t) at session d from run_book's busy map
+    (ticker -> first session a new signal is allowed; date.max while a signal is open)."""
+    open_keys = {(sleeve, t)} if t in busy and d < busy[t] and busy[t] == date.max else set()
+    cooldowns = {(sleeve, t): busy[t]} if t in busy else {}
+    return open_keys, cooldowns
+
+
 def run_book(ctx: SwingContext, sleeve: str, start: date, end: date, overlay_x1: bool = False,
              open_until: Optional[Dict[str, date]] = None, close_checked_stops: bool = False,
              veto: Optional[Callable[[str, date], bool]] = None) -> Dict[str, Any]:
@@ -487,8 +495,7 @@ def run_book(ctx: SwingContext, sleeve: str, start: date, end: date, overlay_x1:
             funnel["clusters"] += 1
         reactions, unknown = earnings_reactions(ctx, t, d)
         is_liquid = bool(ctx.members[t].iat[si] and ctx.liquid[t].iat[si])
-        open_keys = {(sleeve, t)} if t in busy and d < busy[t] and busy[t] == date.max else set()
-        cooldowns = {(sleeve, t): busy[t]} if t in busy else {}
+        open_keys, cooldowns = g0_book_state(busy, sleeve, t, d)
         ok, why = check_g0(t, sleeve, d, is_liquid, a.locked(i), open_keys, cooldowns, reactions, ctx.cal)
         if not ok:
             funnel[f"g0_{why.split(' ')[0].lower()}"] += 1

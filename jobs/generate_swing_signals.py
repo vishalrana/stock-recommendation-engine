@@ -40,6 +40,7 @@ from src.swing.engine import build_context, run_book  # noqa: E402
 from src.swing.exits import max_holding_sessions_for_sleeve, simulate_swing_trade  # noqa: E402
 from src.swing.ledger import native, record_ledger_entry  # noqa: E402
 from src.swing.rules import SLEEVE_PRIORITY  # noqa: E402
+from src.outcome.outcome_calculator import rebase_levels  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("generate_swing_signals")
@@ -52,6 +53,75 @@ SLEEVE_NAMES = {"T": "Trend", "E": "Earnings reaction", "N": "Catalyst gap", "P"
                 "I": "Insider cluster buying"}
 LIVE_MODES = ("LIVE", "LIVE-SP500")
 PANEL_SESSIONS = 800
+CATCH_UP_SESSIONS = 5   # a sleeve skipped for incomplete data catches up at most this many sessions
+
+
+def sessions_after(a: date, b: date, cal) -> int:
+    """Sessions from session a to session b (0 when b <= a)."""
+    n = 0
+    while a < b and n < 400:
+        a, n = cal.shift(a, 1), n + 1
+    return n
+
+
+def blocked_until(open_keys, recent_closed, cal) -> Dict[str, Dict[str, date]]:
+    """Per sleeve, ticker -> first session a new signal is allowed (run_book's open_until): date.max while a
+    signal is open, else 11 sessions after the latest recent exit (the 10-session cooldown). A cooldown never
+    overrides an open signal, and the latest exit wins (both broke on 2026-11-02: re-entries while open)."""
+    busy: Dict[str, Dict[str, date]] = defaultdict(dict)
+    for sl, t in open_keys:
+        busy[sl][t] = date.max
+    for r in recent_closed:
+        sl, t = r["sleeve"], r["ticker"]
+        if busy[sl].get(t) != date.max:
+            busy[sl][t] = max(busy[sl].get(t, date.min), cal.shift(date.fromisoformat(r["exit_date"]), 11))
+    return busy
+
+
+def processed_sessions(status_rows: Dict[str, Dict[str, Any]]) -> Tuple[Optional[date], Dict[str, Optional[date]]]:
+    """(the job's last processed session, each sleeve's last session with a BUY scan), from
+    swing_sleeve_status.details: last_session (stale runs excluded) and processed_session. A row written
+    before processed_session existed falls back to the job's session."""
+    details = {sl: (r.get("details") or {}) for sl, r in status_rows.items()}
+    job = [date.fromisoformat(d["last_session"]) for d in details.values() if d.get("last_session") and not d.get("stale")]
+    job_last = max(job) if job else None
+    own = {sl: (date.fromisoformat(details[sl]["processed_session"]) if details.get(sl, {}).get("processed_session")
+                else job_last) for sl in SLEEVES}
+    return job_last, own
+
+
+def scan_window(own: Optional[date], job_last: Optional[date], last_bar: date, cal) -> Optional[Tuple[date, bool]]:
+    """(first session to scan, re-run) for one sleeve, or None when it already scanned last_bar (no BUYs
+    twice for a session). A sleeve that missed sessions the job processed (skipped for incomplete data, as I
+    without insider data) catches up from the session after its own, at most CATCH_UP_SESSIONS back."""
+    if own is not None and own >= last_bar:
+        return None
+    first = last_bar
+    if own is not None and job_last is not None and own < job_last:
+        first = max(cal.shift(own, 1), cal.shift(last_bar, -CATCH_UP_SESSIONS))
+    return first, job_last is not None and job_last >= last_bar
+
+
+def simulate_row(r: Dict[str, Any], a, ctx):
+    """(trade, rebase ratio) for an issued signal on tonight's bars. Levels are in actual prices on the signal
+    date; a refetch after a dividend or split re-adjusts the bars (false stops logged days late, 2026-10/11),
+    so they are replayed on the bars' basis, as the Ideas lifecycle does (rebase_levels)."""
+    sd = date.fromisoformat(r["signal_date"])
+    i = a.pos(sd)
+    (stop, target), ratio = rebase_levels([float(r["stop_loss"]), float(r["target"]) if r.get("target") else None],
+                                          r.get("entry_signal_close"), float(a.c[i]))
+    lk = a.locked_array()
+    locked = [a.index[k].date() for k in range(i + 1, len(a.c)) if lk[k]]
+    tr = simulate_swing_trade(r["ticker"], r["sleeve"], sd, stop, target, a.bars(), (ctx.spy_open, ctx.spy_close),
+                              next_reaction_sessions=a.reactions, event_locked_sessions=locked, beta=r.get("beta"))
+    return tr, ratio
+
+
+def ledger_key(session_date, action, sleeve, ticker, signal_date=None) -> Tuple:
+    """One BUY and one SELL per signal: (session, action, sleeve, ticker, signal date). A BUY's session is its
+    signal date; SELLs logged before 2026-11-28 carry no signal date."""
+    sd = signal_date or (session_date if action == "BUY" else None)
+    return (str(session_date)[:10], action, sleeve, ticker, None if sd is None else str(sd)[:10])
 
 
 def load_config() -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
@@ -131,6 +201,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="Smoke test on the first N U1 tickers")
     ap.add_argument("--no-alerts", action="store_true")
     ap.add_argument("--form4-budget", type=int, default=8000)
+    ap.add_argument("--plan-corrections", default=None, metavar="PATH",
+                    help="write the swing-record correction plan (scripts/correct_swing_records.py) and stop: no writes")
     args = ap.parse_args()
 
     from scripts.research_signal_ic import SECTOR_TO_ETF
@@ -147,10 +219,15 @@ def main() -> int:
     session = live.latest_completed_session()
     logger.info("Latest completed NYSE session: %s; sleeve modes %s (research run %s)", session,
                 {s: c["status"] for s, c in cfg.items()}, prov.get("github_run_id"))
-    client = None if args.dry_run else client_or_none()
-    open_rows = fetch_rows(client, "swing_signals", status="open")
-    recent_closed = [r for r in fetch_rows(client, "swing_signals", status="closed")
-                     if r.get("exit_date") and r["exit_date"] >= (session - timedelta(days=30)).isoformat()]
+    client = None if (args.dry_run and not args.plan_corrections) else client_or_none()   # a plan reads, never writes
+    all_rows = fetch_rows(client, "swing_signals")
+    open_rows = [r for r in all_rows if r["status"] == "open"]
+    recent_closed = [r for r in all_rows if r["status"] == "closed"
+                     and r.get("exit_date") and r["exit_date"] >= (session - timedelta(days=30)).isoformat()]
+    issued_keys = {(r["sleeve"], r["ticker"], r["signal_date"]) for r in all_rows}
+    status_rows = {r["sleeve"]: r for r in fetch_rows(client, "swing_sleeve_status")}
+    ledger_keys = {ledger_key(r["session_date"], r["action"], r["sleeve"], r["ticker"], (r.get("details") or {}).get("signal_date"))
+                   for r in fetch_rows(client, "swing_ledger") if r["action"] in ("BUY", "SELL")}
 
     # 1. Prices
     u1, _ = production_universe()
@@ -234,72 +311,119 @@ def main() -> int:
                                window=(first, last_bar.isoformat()), with_c6=True, insider=ctx.insider, tick=ctx.tickers)
         ctx_sp.earnings_known = ctx.earnings_known
 
+    if args.plan_corrections:
+        from scripts.check_swing_ledger import jsonl_events
+        from scripts.correct_swing_records import plan, trade_fields
+        resim = {}
+        for r in all_rows:
+            a = ctx.tickers.get(r["ticker"])
+            if r["status"] != "void" and a is not None and a.pos(date.fromisoformat(r["signal_date"])) is not None:
+                resim[r["id"]] = trade_fields(*simulate_row(r, a, ctx))
+        doc = plan(all_rows, resim, ctx.cal, jsonl_events("origin/signals-ledger"), fetch_rows(client, "swing_ledger"),
+                   os.environ.get("GITHUB_RUN_ID"))
+        os.makedirs(os.path.dirname(os.path.abspath(args.plan_corrections)), exist_ok=True)
+        with open(args.plan_corrections, "w", encoding="utf-8") as f:
+            json.dump(native(doc), f, indent=1, default=str)
+        logger.info("Correction plan (counts only): %s", json.dumps(doc["counts"]))
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+                f.write("### Swing correction plan (counts only)\n\n```\n" + json.dumps(doc["counts"], indent=1) + "\n```\n")
+        return 0
+
     # 4. Reconcile open signals
     sells, warns = [], []
+    unreconciled: Dict[str, int] = defaultdict(int)
     now = datetime.now(timezone.utc).isoformat()
     for r in open_rows:
         t, sl = r["ticker"], r["sleeve"]
         a = ctx.tickers.get(t)
         if a is None:
             warns.append({"ticker": t, "warning": "no price data tonight: exits not checked"})
+            unreconciled["no price data tonight"] += 1
+            logger.warning("[RECONCILE] %s/%s (signal %s): no price data tonight, exits not checked.", sl, t, r["signal_date"])
             continue
         sd = date.fromisoformat(r["signal_date"])
         i = a.pos(sd)
         if i is None:
+            unreconciled["signal session not in the bars"] += 1
+            logger.warning("[RECONCILE] %s/%s (signal %s): the signal session is not in its bars, exits not checked.",
+                           sl, t, r["signal_date"])
             continue
-        lk = a.locked_array()
-        locked = [a.index[k].date() for k in range(i + 1, len(a.c)) if lk[k]]
-        tr = simulate_swing_trade(t, sl, sd, float(r["stop_loss"]), float(r["target"]) if r.get("target") else None,
-                                  a.bars(), (ctx.spy_open, ctx.spy_close), next_reaction_sessions=a.reactions,
-                                  event_locked_sessions=locked, beta=r.get("beta"))
+        tr, ratio = simulate_row(r, a, ctx)
+        if ratio != 1.0:
+            health["rebased"] = health.get("rebased", 0) + 1
+            logger.info("[REBASE] %s/%s (signal %s): bars re-adjusted since the signal (x%.4f); stop and target rescaled.",
+                        sl, t, r["signal_date"], ratio)
         upd: Dict[str, Any] = {"updated_at": now}
         if tr is not None:
             upd.update({"fill_date": tr.fill_date.isoformat(), "entry_fill_price": tr.fill_price,
                         "holding_sessions": tr.holding_sessions})
         if tr is not None and tr.exit_date is not None:
+            # A SELL for an earlier session than tonight's (a failed or missed run) is late, never silent
+            delay = sessions_after(tr.exit_date, last_bar, ctx.cal)
+            late = {"late": True, "late_sessions": delay, "logged_at": now} if delay > 0 else {}
             upd.update({"status": "closed", "exit_date": tr.exit_date.isoformat(), "exit_price": tr.exit_price,
                         "exit_reason": tr.exit_reason, "net_return_pct": tr.net_return_pct,
                         "spy_return_pct": tr.spy_return_pct, "excess_pct": tr.excess_pct, "beta_adj_pct": tr.beta_adj_pct})
-            sells.append({"ticker": t, "sleeve": sl, "reason": tr.exit_reason, "fill": tr.exit_price,
+            if late:
+                upd["details"] = dict(r.get("details") or {}, **late)
+                logger.warning("[RECONCILE] %s/%s (signal %s): SELL for %s logged %d session(s) late.",
+                               sl, t, r["signal_date"], tr.exit_date, delay)
+            sells.append({"id": r["id"], "ticker": t, "sleeve": sl, "reason": tr.exit_reason, "fill": tr.exit_price,
                           "net_return_pct": tr.net_return_pct, "holding_sessions": tr.holding_sessions,
-                          "is_live": r.get("mode") in LIVE_MODES})
-            record_ledger_entry(tr.exit_date, "SELL", t, sl, tr.exit_price,
-                                details={"exit_reason": tr.exit_reason, "mode": r.get("mode")})
+                          "is_live": r.get("mode") in LIVE_MODES, "exit_date": tr.exit_date,
+                          "signal_date": r["signal_date"], "late": late})
+            record_ledger_entry(tr.exit_date, "SELL", t, sl, tr.exit_price, signal_date=sd,
+                                details={"exit_reason": tr.exit_reason, "mode": r.get("mode"), **late})
         elif tr is not None and (tr.details or {}).get("pending_exit"):
             upd["details"] = dict(r.get("details") or {}, pending_exit=tr.exit_reason, decided_on=tr.details["decided_on"])
-            sells.append({"ticker": t, "sleeve": sl, "reason": f"{tr.exit_reason} (sell at the next open)", "fill": None,
+            sells.append({"id": r["id"], "ticker": t, "sleeve": sl, "reason": f"{tr.exit_reason} (sell at the next open)", "fill": None,
                           "net_return_pct": None, "holding_sessions": tr.holding_sessions,
                           "is_live": r.get("mode") in LIVE_MODES})
         if client is not None:
             client.table("swing_signals").update(native(upd)).eq("id", r["id"]).execute()
-    health["reconciled_open"] = len(open_rows)
+    health["reconciled_open"] = len(open_rows) - sum(unreconciled.values())
+    health["unreconciled"] = dict(unreconciled)
     health["closed_tonight"] = sum(1 for s in sells if s["fill"] is not None)
 
     # 5. New signals for tonight's session (same run_book as the backtest), unless the data is stale
     new_rows: List[Dict[str, Any]] = []
+    job_last, own = processed_sessions(status_rows)
+    ran: Dict[str, date] = {}
     if not stale:
-        still_open = {(r["sleeve"], r["ticker"]) for r in open_rows} - {(s["sleeve"], s["ticker"]) for s in sells if s["fill"] is not None}
-        busy: Dict[str, Dict[str, date]] = defaultdict(dict)
-        for sl, t in still_open:
-            busy[sl][t] = date.max
-        for r in recent_closed:
-            busy[r["sleeve"]][r["ticker"]] = ctx.cal.shift(date.fromisoformat(r["exit_date"]), 11)
+        closed_now = {s["id"] for s in sells if s["fill"] is not None}
+        still_open = {(r["sleeve"], r["ticker"]) for r in open_rows if r["id"] not in closed_now}
+        closes = recent_closed + [{"sleeve": s["sleeve"], "ticker": s["ticker"], "exit_date": s["exit_date"].isoformat()}
+                                  for s in sells if s["fill"] is not None]          # tonight's exits start a cooldown too
+        busy = blocked_until(still_open, closes, ctx.cal)
         by_sleeve = {}
         for sl in SLEEVES:
             mode = cfg[sl]["status"]
             if sl == "I" and not health.get("insider_complete"):
                 logger.warning("Sleeve I: insider data incomplete, no signals tonight.")
                 continue
+            win = scan_window(own[sl], job_last, last_bar, ctx.cal)
+            if win is None:
+                logger.info("Sleeve %s already scanned session %s: no new signals.", sl, last_bar)
+                health[f"sleeve_{sl}"] = {"mode": mode, "already_processed": last_bar.isoformat()}
+                continue
+            first, rerun = win
             c = ctx_sp if mode == "LIVE-SP500" else ctx
-            res = run_book(c, sl, last_bar, last_bar, open_until=busy[sl])
-            by_sleeve[sl] = (mode, res["signals"], res["funnel"])
-            health[f"sleeve_{sl}"] = {"mode": mode, "signals": len(res["signals"]), "funnel": res["funnel"]}
+            res = run_book(c, sl, first, last_bar, open_until=busy[sl])
+            ran[sl] = last_bar
+            by_sleeve[sl] = (mode, res["signals"], res["funnel"], rerun)
+            health[f"sleeve_{sl}"] = {"mode": mode, "signals": len(res["signals"]), "funnel": res["funnel"],
+                                      **({"from": first.isoformat()} if first < last_bar else {}), **({"rerun": True} if rerun else {})}
         live_tickers = {r["ticker"] for r in open_rows if r.get("mode") in LIVE_MODES}
         for sl in SLEEVE_PRIORITY:                            # combined live book: E > I > N > P > T
             if sl not in by_sleeve:
                 continue
-            mode, sigs, _ = by_sleeve[sl]
+            mode, sigs, _, rerun = by_sleeve[sl]
             for s in sigs:
+                if (sl, s.ticker, s.signal_date.isoformat()) in issued_keys:     # never issue a signal twice
+                    continue
+                # issued after the run that processed its session (a catch-up or a holiday re-run): late
+                late = {"late": True, "logged_at": now} if (rerun or s.signal_date < last_bar) else {}
                 if mode in LIVE_MODES:
                     if s.ticker in live_tickers:
                         continue
@@ -313,23 +437,36 @@ def main() -> int:
                     "atr14": round(float(s.atr14), 4), "c6_pct": s.c6_pct, "ear_pct": s.ear_pct, "avol_pct": s.avol_pct,
                     "cluster_value": s.cluster_value, "gap_pct": s.gap_pct, "rsi2": s.rsi2, "beta": s.beta,
                     "earnings_unknown": bool(s.earnings_unknown), "earnings_date": fut[0].isoformat() if fut else None,
-                    "details": native({k: v for k, v in (s.details or {}).items()
-                                     if isinstance(v, (int, float, str, bool, date, np.generic)) or v is None}),
+                    "details": native(dict({k: v for k, v in (s.details or {}).items()
+                                          if isinstance(v, (int, float, str, bool, date, np.generic)) or v is None},
+                                         **({"late_buy": True, "buy_logged_at": now} if late else {}))),
                     "created_at": now, "updated_at": now,
                 })
-                record_ledger_entry(s.signal_date, "BUY", s.ticker, sl, s.entry_signal_close,
-                                    details={"mode": mode, "stop_loss": s.stop_loss, "target": s.target})
+                issued_keys.add((sl, s.ticker, s.signal_date.isoformat()))
+                record_ledger_entry(s.signal_date, "BUY", s.ticker, sl, s.entry_signal_close, signal_date=s.signal_date,
+                                    details={"mode": mode, "stop_loss": s.stop_loss, "target": s.target, **late})
         for row in new_rows:
             if client is not None:
                 client.table("swing_signals").upsert(native(row), on_conflict="sleeve,ticker,signal_date").execute()
-                client.table("swing_ledger").insert(native({"session_date": row["signal_date"], "action": "BUY", "ticker": row["ticker"],
-                                                     "sleeve": row["sleeve"], "price": row["entry_signal_close"],
-                                                     "details": {"mode": row["mode"]}})).execute()
+                k = ledger_key(row["signal_date"], "BUY", row["sleeve"], row["ticker"], row["signal_date"])
+                if k not in ledger_keys:
+                    late = {"late": True} if row["details"].get("late_buy") else {}
+                    client.table("swing_ledger").insert(native({"session_date": row["signal_date"], "action": "BUY", "ticker": row["ticker"],
+                                                         "sleeve": row["sleeve"], "price": row["entry_signal_close"],
+                                                         "details": {"mode": row["mode"], "signal_date": row["signal_date"],
+                                                                     "logged_at": now, **late}})).execute()
+                    ledger_keys.add(k)
     for s in sells:
         if client is not None and s["fill"] is not None:
-            client.table("swing_ledger").insert(native({"session_date": session.isoformat(), "action": "SELL", "ticker": s["ticker"],
-                                                 "sleeve": s["sleeve"], "price": s["fill"],
-                                                 "details": {"exit_reason": s["reason"]}})).execute()
+            # one date convention everywhere: the exit session, plus logged_at (the run's session kept apart)
+            k = ledger_key(s["exit_date"], "SELL", s["sleeve"], s["ticker"], s["signal_date"])
+            if k not in ledger_keys:
+                client.table("swing_ledger").insert(native({"session_date": s["exit_date"].isoformat(), "action": "SELL",
+                                                     "ticker": s["ticker"], "sleeve": s["sleeve"], "price": s["fill"],
+                                                     "details": {"exit_reason": s["reason"], "signal_date": s["signal_date"],
+                                                                 "logged_at": now, "run_session": session.isoformat(),
+                                                                 **s["late"]}})).execute()
+                ledger_keys.add(k)
 
     # 6. Sleeve status (real research numbers or "not yet tested")
     if client is not None:
@@ -339,7 +476,12 @@ def main() -> int:
                 "sleeve": sl, "name": SLEEVE_NAMES[sl], "status": c["status"], "universe": c.get("universe", "shadow"),
                 "u2_beta_adj": (c.get("u2") or {}).get("mean_beta_adj_pct"), "u1_beta_adj": (c.get("u1") or {}).get("mean_beta_adj_pct"),
                 "reasons": c.get("reasons") or [],
-                "details": {"u2": c.get("u2"), "u1": c.get("u1"), "last_session": last_bar.isoformat(), "stale": stale},
+                "details": {"u2": c.get("u2"), "u1": c.get("u1"), "last_session": last_bar.isoformat(), "stale": stale,
+                            # the processed marker: the last session this sleeve's BUY scan ran on (read by the next run
+                            # and by workflow_health.py)
+                            "processed_session": (ran.get(sl) or own.get(sl)).isoformat() if (ran.get(sl) or own.get(sl)) else None,
+                            **({"processed_at": now} if sl in ran else
+                               {k: v for k, v in ((status_rows.get(sl) or {}).get("details") or {}).items() if k == "processed_at"})},
                 "research_run_id": prov.get("github_run_id"), "last_evaluated_at": now,
             }), on_conflict="sleeve").execute()
         if not stale:
@@ -358,6 +500,19 @@ def main() -> int:
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
         json.dump({"last_session": session.isoformat()}, open(STATE, "w"))
     health["new_signals"] = {"live": len(live_buys), "shadow": len(new_rows) - len(live_buys)}
+    health["late_sells"] = sum(1 for s in sells if s.get("late"))
+    health["late_buys"] = sum(1 for r in new_rows if (r.get("details") or {}).get("late_buy"))
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write("\n".join([
+                f"### Swing signals, session {last_bar}{' (stale data: no BUYs)' if stale else ''}", "",
+                f"- Open signals reconciled: {health['reconciled_open']}; not reconciled: {sum(unreconciled.values())}"
+                + (f" ({', '.join(f'{k}: {v}' for k, v in unreconciled.items())})" if unreconciled else ""),
+                f"- Stops and targets rebased onto re-adjusted bars: {health.get('rebased', 0)}",
+                f"- SELLs logged late: {health['late_sells']}; BUYs logged late: {health['late_buys']}",
+                f"- Sleeves that had already scanned {last_bar}: "
+                + (", ".join(sl for sl in SLEEVES if (health.get(f'sleeve_{sl}') or {}).get('already_processed')) or "none"),
+                f"- New signals: {len(new_rows)}", ""]) + "\n")
     print("::notice title=Swing provider health::" + json.dumps(health, default=str)[:3500])
     logger.info("Swing signals done: %s", json.dumps(health, default=str)[:2000])
     return 0

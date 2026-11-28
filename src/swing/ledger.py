@@ -47,12 +47,18 @@ def record_ledger_entry(
     price: float,
     units: float = 1.0,
     details: Optional[Dict[str, Any]] = None,
+    signal_date: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Append entry to local daily ledger file under ledger/YYYY-MM-DD.jsonl."""
+    """Append entry to local daily ledger file under ledger/YYYY-MM-DD.jsonl. session_date is the BUY's signal
+    session or the SELL's exit session; timestamp (= logged_at) is when it was written; signal_date names the
+    signal, so an event is logged once (scripts/merge_ledger.py)."""
     os.makedirs(LEDGER_DIR, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
     entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now,
+        "logged_at": now,
         "session_date": session_date.isoformat(),
+        "signal_date": (signal_date or session_date).isoformat() if (signal_date or action == "BUY") else None,
         "action": action,
         "ticker": ticker,
         "sleeve": sleeve,

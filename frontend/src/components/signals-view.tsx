@@ -46,9 +46,11 @@ export default function SignalsView({ signals, sleeves, latestDataDate }: Signal
   const bySleeve = new Map(sleeves.map((s) => [s.sleeve, s]));
   const tested = sleeves.some((s) => Boolean(s.research_run_id));
 
-  // A signal is live only if it was issued while its sleeve was LIVE (the mode stored with it).
-  const live = signals.filter((s) => isLiveMode(s.mode ?? s.details?.sleeve_status));
-  const shadow = signals.filter((s) => !isLiveMode(s.mode ?? s.details?.sleeve_status));
+  // A signal is live only if it was issued while its sleeve was LIVE (the mode stored with it). Voided
+  // signals (record corrections) are never shown or counted.
+  const kept = signals.filter((s) => s.status !== 'void');
+  const live = kept.filter((s) => isLiveMode(s.mode ?? s.details?.sleeve_status));
+  const shadow = kept.filter((s) => !isLiveMode(s.mode ?? s.details?.sleeve_status));
 
   const sells = live.filter((s) => (s.status === 'closed' && s.exit_date === latestDataDate) ||
                                    (s.status === 'open' && Boolean(s.details?.pending_exit)));

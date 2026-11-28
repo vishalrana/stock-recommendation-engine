@@ -14,6 +14,11 @@ on:
         required: false
         default: false
         type: boolean
+      plan_corrections:
+        description: 'Write the swing-record correction plan as an artifact (reads Supabase, writes nothing)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write          # ledger push to the signals-ledger branch
@@ -71,7 +76,19 @@ jobs:
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
+          if [ "${{ github.event.inputs.plan_corrections }}" = "true" ]; then
+            git fetch -q origin signals-ledger
+            DRY_RUN_FLAG="--dry-run --plan-corrections outputs/swing_corrections_plan.json"
+          fi
           python jobs/generate_swing_signals.py $DRY_RUN_FLAG
+
+      - name: Upload the correction plan
+        if: github.event.inputs.plan_corrections == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: swing-corrections-plan
+          path: outputs/swing_corrections_plan.json
+          retention-days: 90
 
       - name: Save swing live cache
         if: always()
@@ -85,31 +102,19 @@ jobs:
             data/cache/universe
           key: swing-live-v2-${{ github.run_id }}
 
+      # always(): a failed engine step may already have written Supabase rows; their ledger lines must follow
       - name: Push forward ledger to the signals-ledger branch
-        if: github.event.inputs.dry_run != 'true'
+        if: always() && github.event.inputs.dry_run != 'true' && github.event.inputs.plan_corrections != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -d ledger ] && [ -n "$(ls -A ledger)" ]; then
-            mkdir -p /tmp/ledger_new && cp -r ledger/* /tmp/ledger_new/
-            if git ls-remote --exit-code --heads origin signals-ledger; then
-              git fetch origin signals-ledger
-              git checkout -B signals-ledger origin/signals-ledger
-            else
-              git checkout --orphan signals-ledger
-              git rm -rf . > /dev/null
-            fi
-            mkdir -p ledger
-            for f in /tmp/ledger_new/*.jsonl; do
-              # append tonight's lines without duplicating ones already on the branch
-              touch "ledger/$(basename "$f")"
-              cat "$f" >> "ledger/$(basename "$f")"
-              sort -u -o "ledger/$(basename "$f")" "ledger/$(basename "$f")"
-            done
-            # Vercel builds every branch from frontend/: tell it to skip this data-only branch
-            mkdir -p frontend
-            echo '{"git": {"deploymentEnabled": false}, "ignoreCommand": "exit 0"}' > frontend/vercel.json
-            git add -f ledger/ frontend/vercel.json
+            git fetch origin signals-ledger
+            git worktree add -B signals-ledger /tmp/ledger-branch origin/signals-ledger
+            # one line per event: a re-run of a session never writes its BUYs or SELLs again
+            python scripts/merge_ledger.py ledger /tmp/ledger-branch/ledger
+            cd /tmp/ledger-branch
+            git add -f ledger/
             if ! git diff --staged --quiet; then
               git commit -m "Swing signals ledger: $(date -u +'%Y-%m-%d')"
               git push origin signals-ledger
@@ -117,3 +122,13 @@ jobs:
           else
             echo "No ledger entries tonight."
           fi
+
+      # swing_signals, the jsonl ledger and swing_ledger name the same BUYs and SELLs (exit 1 otherwise)
+      - name: Ledger consistency
+        if: always() && github.event.inputs.dry_run != 'true' && github.event.inputs.plan_corrections != 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          git fetch -q origin signals-ledger
+          python scripts/check_swing_ledger.py --ref origin/signals-ledger

@@ -421,7 +421,7 @@ export async function fetchSwingData(): Promise<{
   const supabase = getSupabase();
   try {
     const [{ data: signals, error: sigErr }, { data: sleeves, error: slvErr }] = await Promise.all([
-      supabase.from('swing_signals').select('*').order('signal_date', { ascending: false }),
+      supabase.from('swing_signals').select('*').neq('status', 'void').order('signal_date', { ascending: false }),
       supabase.from('swing_sleeve_status').select('*'),
     ]);
 

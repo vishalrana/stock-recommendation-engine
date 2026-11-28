@@ -124,3 +124,4 @@
 {"timestamp": "2026-11-21T08:53:17.989748+00:00", "session_date": "2026-11-20", "action": "BUY", "ticker": "VTRS", "sleeve": "T", "price": 19.63, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 17.962799072265625, "target": 22.964399337768555}}
 {"timestamp": "2026-11-21T08:53:17.989795+00:00", "session_date": "2026-11-20", "action": "BUY", "ticker": "WEX", "sleeve": "T", "price": 174.95, "units": 1.0, "details": {"mode": "SHADOW", "stop_loss": 156.6820068359375, "target": 211.48590087890625}}
 {"timestamp": "2026-11-26T10:00:22.093867+00:00", "session_date": "2026-11-20", "action": "SELL", "ticker": "SB", "sleeve": "T", "price": 7.3418, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}
+{"timestamp": "2026-11-28T09:20:19.229665+00:00", "session_date": "2026-11-20", "action": "SELL", "ticker": "FBP", "sleeve": "T", "price": 23.5375, "units": 1.0, "details": {"exit_reason": "stop", "mode": "SHADOW"}}

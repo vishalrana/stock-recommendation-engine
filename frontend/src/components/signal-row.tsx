@@ -10,7 +10,19 @@ interface SignalRowProps {
   isLiveSleeve?: boolean;
 }
 
+// When the nightly wrote it, in India Standard Time (the user's clock)
+export function generatedAtIst(iso?: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return `${d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric',
+                                        hour: '2-digit', minute: '2-digit', hour12: false })} IST`;
+}
+
 export default function SignalRow({ signal, mode, isLiveSleeve = false }: SignalRowProps) {
+  // a SELL was generated when its exit was logged; a BUY or open signal when it was issued
+  const generated = generatedAtIst(mode === 'SELL' ? String(signal.details?.logged_at ?? signal.updated_at ?? '') : signal.created_at);
+  const lateSessions = signal.details?.late ? Number(signal.details?.late_sessions ?? 0) : 0;
 
   const sleeveBadgeColors: Record<string, string> = {
     T: 'bg-emerald-950/60 text-emerald-300 border-emerald-800/80',
@@ -45,6 +57,12 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
             <span className="text-[11px] font-semibold text-rose-400 bg-rose-950/40 px-2 py-0.5 rounded border border-rose-800/60">
               SELL at next open
             </span>
+            {Boolean(signal.details?.late) && (
+              <span className="text-[10px] font-bold text-amber-300 bg-amber-950/50 px-1.5 py-0.5 rounded border border-amber-800/70"
+                    title="Decided for an earlier session than the night it was logged">
+                late{lateSessions > 0 ? ` (${lateSessions} session${lateSessions === 1 ? '' : 's'})` : ''}
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-4 text-xs font-semibold">
@@ -66,7 +84,8 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
         </div>
 
         <div className="mt-2 text-[11px] text-slate-400 flex items-center justify-between border-t border-slate-800/60 pt-2">
-          <span>Reason: <strong className="text-slate-200">{signal.exit_reason || String(signal.details?.pending_exit || 'rule exit')}</strong></span>
+          <span>Reason: <strong className="text-slate-200">{signal.exit_reason || String(signal.details?.pending_exit || 'rule exit')}</strong>
+            {generated && <span className="ml-2 text-slate-500">Generated {generated}</span>}</span>
           {signal.details?.why_exit?.summary && (
             <span className="italic text-slate-400/90 truncate max-w-md">&ldquo;{signal.details.why_exit.summary}&rdquo;</span>
           )}
@@ -119,6 +138,8 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
             </div>
           </div>
         </div>
+
+        {generated && <div className="mt-1.5 text-[10px] text-slate-500">Generated {generated}</div>}
 
         {/* Why it moved & citations */}
         {whyMoved && (
@@ -204,6 +225,7 @@ export default function SignalRow({ signal, mode, isLiveSleeve = false }: Signal
           </div>
         </div>
       </div>
+      {generated && <div className="mt-1 text-[10px] text-slate-500">Generated {generated}</div>}
     </div>
   );
 }

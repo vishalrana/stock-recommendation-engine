@@ -144,7 +144,7 @@ export interface SwingSignalRecord {
   id: number;
   ticker: string;
   sleeve: 'T' | 'E' | 'N' | 'P' | 'I';
-  status: 'open' | 'closed' | 'cancelled';
+  status: 'open' | 'closed' | 'cancelled' | 'void';   // void: corrected away, never shown or counted
   signal_date: string;
   entry_signal_close: number;
   entry_fill_price?: number | null;

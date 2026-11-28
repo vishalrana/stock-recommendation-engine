@@ -6,7 +6,33 @@ import SignalsView from '../src/components/signals-view';
 import TrackRecord from '../src/components/track-record';
 import ClosedIdeasView from '../src/components/closed-ideas-view';
 import ScanHistoryView from '../src/components/scan-history-view';
+import SignalRow, { generatedAtIst } from '../src/components/signal-row';
 import { SwingSignalRecord, SwingSleeveStatus } from '../src/types/database';
+
+test('SignalsView: voided signals are neither shown nor counted', () => {
+  const sleeves: SwingSleeveStatus[] = [{ sleeve: 'T', name: 'Trend', status: 'SHADOW', universe: 'shadow' }];
+  const signals: SwingSignalRecord[] = [
+    { id: 1, ticker: 'GSL', sleeve: 'T', status: 'open', mode: 'SHADOW', signal_date: '2026-10-15', entry_signal_close: 42, stop_loss: 38 },
+    { id: 2, ticker: 'GSL', sleeve: 'T', status: 'void', mode: 'SHADOW', signal_date: '2026-11-10', entry_signal_close: 42, stop_loss: 38 },
+  ];
+  const html = renderToStaticMarkup(<SignalsView signals={signals} sleeves={sleeves} latestDataDate="2026-11-27" />);
+  assert.ok(html.includes('Shadow signals (<!-- -->1<!-- --> open)') || html.includes('Shadow signals (1 open)'), html.slice(0, 400));
+});
+
+test('SignalRow: a late SELL is labelled, and rows say when they were generated (IST)', () => {
+  assert.strictEqual(generatedAtIst('2026-11-21T08:49:01Z'), '21 Nov 2026, 14:19 IST');
+  assert.strictEqual(generatedAtIst(null), null);
+  const sell: SwingSignalRecord = { id: 3, ticker: 'ECO', sleeve: 'T', status: 'closed', mode: 'LIVE', signal_date: '2026-10-19',
+    exit_date: '2026-11-05', entry_signal_close: 80, stop_loss: 75, exit_price: 75, exit_reason: 'stop',
+    details: { late: true, late_sessions: 10, logged_at: '2026-11-21T08:49:01Z' } };
+  const html = renderToStaticMarkup(<SignalRow signal={sell} mode="SELL" isLiveSleeve />);
+  assert.ok(html.includes('late (10 sessions)') || html.includes('late<!-- --> (10 sessions)'), html);
+  assert.ok(html.includes('Generated <!-- -->21 Nov 2026, 14:19 IST') || html.includes('Generated 21 Nov 2026, 14:19 IST'));
+  const onTime = renderToStaticMarkup(<SignalRow signal={{ ...sell, details: {} }} mode="SELL" isLiveSleeve />);
+  assert.ok(!onTime.includes('Decided for an earlier session'));   // no late label ("slate" classes contain "late")
+  const open = renderToStaticMarkup(<SignalRow signal={{ ...sell, status: 'open', created_at: '2026-10-20T06:00:00Z' }} mode="OPEN" />);
+  assert.ok(open.includes('20 Oct 2026, 11:30 IST'));
+});
 
 const section = (html: string, label: string) =>
   html.match(new RegExp(`<section[^>]*aria-label="${label}"[^>]*>([\\s\\S]*?)</section>`))?.[1];

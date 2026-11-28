@@ -79,6 +79,7 @@ TEST_SUITES = [
     "tests/test_partial_session_cache.py",
     "tests/test_stale_share.py",
     "tests/test_pinned_environment.py",
+    "tests/test_workflow_health.py",
     "tests/test_cache_writers.py",
 ]
 

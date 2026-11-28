@@ -1,0 +1,37 @@
+name: Workflow health
+
+# Daily check of the scheduled workflows (scripts/workflow_health.py). It fails, so GitHub emails
+# the owner, when a scheduled workflow is not active (one disabled for inactivity is re-enabled),
+# when the latest completed session has no successful nightly or no swing "processed" marker, or
+# when a weekly run is missing; it warns on runs that started more than 6 hours after their cron.
+
+on:
+  schedule:
+    - cron: '7 14 * * *'   # 14:07 UTC, before the 14:30 UTC US open (13:30 UTC in summer)
+  workflow_dispatch:
+
+permissions:
+  actions: write          # re-enable a workflow GitHub disabled for inactivity
+  contents: read
+
+jobs:
+  health:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: .
+      GITHUB_TOKEN: ${{ github.token }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      APPRISE_URLS: ${{ secrets.APPRISE_URLS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.17'
+          cache: 'pip'
+      - run: |
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
+      - name: Check
+        run: python scripts/workflow_health.py

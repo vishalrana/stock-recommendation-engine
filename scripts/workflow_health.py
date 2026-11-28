@@ -29,7 +29,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 UTC = dt.timezone.utc
 REPO = os.environ.get("GITHUB_REPOSITORY", "vishalrana/stock-recommendation-engine")
-WEEKLY = ("parity_replay.yml", "refresh_earnings.yml", "price_refresh_timing.yml")
+WEEKLY = ("parity_replay.yml", "refresh_earnings.yml", "price_refresh_timing.yml", "forward_test_review.yml")
 LATE_CHECKED = ("nightly_scan.yml", "swing_signals.yml")
 LATE_START = dt.timedelta(hours=6)
 RUN_ID = re.compile(r"\b\d{10,12}\b")

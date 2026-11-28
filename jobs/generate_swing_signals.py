@@ -117,6 +117,40 @@ def simulate_row(r: Dict[str, Any], a, ctx):
     return tr, ratio
 
 
+def review_inputs(rows: List[Dict[str, Any]], ctx, cost: float = 0.10):
+    """The forward-test review's swing inputs (report only; docs/forward-test-reviews.md). Every non-void signal
+    is replayed on tonight's bars (simulate_row): closed ones keep their beta-adjusted return and get the median
+    of 200 placebo runs built like the holdout's (SwingPlacebo); open ones are marked at the latest close, net
+    of costs, beta-adjusted against SPY from the fill-day open. Returns (rows, marks, placebo medians) by id."""
+    from src.swing.engine import SwingPlacebo
+    out, marks, closed = [], {}, defaultdict(list)
+    for r in rows:
+        a = ctx.tickers.get(r["ticker"])
+        sd = date.fromisoformat(r["signal_date"])
+        i = a.pos(sd) if a is not None else None
+        if r["status"] == "void" or i is None:
+            continue
+        tr, _ = simulate_row(r, a, ctx)
+        if tr is not None and tr.exit_date is not None:
+            tr.details = dict(tr.details or {}, atr14=float(a.atr[i]), signal_close=float(a.c[i]))
+            closed[r["sleeve"]].append((r["id"], tr))
+            out.append({"id": r["id"], "sleeve": r["sleeve"], "status": "closed", "beta_adj_pct": tr.beta_adj_pct,
+                        "signal_date": r["signal_date"]})
+            continue
+        out.append({"id": r["id"], "sleeve": r["sleeve"], "status": "open", "beta_adj_pct": None, "signal_date": r["signal_date"]})
+        if i + 1 < len(a.c) and r.get("beta") is not None:
+            so, sc = ctx.spy_open.get(a.index[i + 1].date()), ctx.spy_close.get(a.index[-1].date())
+            fill = float(a.o[i + 1])
+            if so and sc and fill > 0:
+                marks[r["id"]] = (float(a.c[-1]) / fill - 1) * 100 - 2 * cost - float(r["beta"]) * (sc / so - 1) * 100
+    medians = {}
+    placebo = SwingPlacebo(ctx, cost_pct_per_side=cost) if closed else None
+    for sl, items in closed.items():
+        med = placebo.run(sl, [tr for _, tr in items])["per_trade_median"]
+        medians.update({k: (float(m) if np.isfinite(m) else None) for (k, _), m in zip(items, med)})
+    return out, marks, medians
+
+
 def ledger_key(session_date, action, sleeve, ticker, signal_date=None) -> Tuple:
     """One BUY and one SELL per signal: (session, action, sleeve, ticker, signal date). A BUY's session is its
     signal date; SELLs logged before 2026-11-28 carry no signal date."""
@@ -203,6 +237,8 @@ def main() -> int:
     ap.add_argument("--form4-budget", type=int, default=8000)
     ap.add_argument("--plan-corrections", default=None, metavar="PATH",
                     help="write the swing-record correction plan (scripts/correct_swing_records.py) and stop: no writes")
+    ap.add_argument("--review-report", default=None, metavar="PATH",
+                    help="write the forward-test review's swing section (scripts/forward_test_review.py) and stop: no writes")
     args = ap.parse_args()
 
     from scripts.research_signal_ic import SECTOR_TO_ETF
@@ -219,7 +255,8 @@ def main() -> int:
     session = live.latest_completed_session()
     logger.info("Latest completed NYSE session: %s; sleeve modes %s (research run %s)", session,
                 {s: c["status"] for s, c in cfg.items()}, prov.get("github_run_id"))
-    client = None if (args.dry_run and not args.plan_corrections) else client_or_none()   # a plan reads, never writes
+    reads_only = bool(args.plan_corrections or args.review_report)
+    client = None if (args.dry_run and not reads_only) else client_or_none()   # a plan or review reads, never writes
     all_rows = fetch_rows(client, "swing_signals")
     open_rows = [r for r in all_rows if r["status"] == "open"]
     recent_closed = [r for r in all_rows if r["status"] == "closed"
@@ -328,6 +365,15 @@ def main() -> int:
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                 f.write("### Swing correction plan (counts only)\n\n```\n" + json.dumps(doc["counts"], indent=1) + "\n```\n")
+        return 0
+
+    if args.review_report:
+        from scripts.forward_test_review import swing_report
+        rep = swing_report(*review_inputs(all_rows, ctx))
+        os.makedirs(os.path.dirname(os.path.abspath(args.review_report)), exist_ok=True)
+        with open(args.review_report, "w", encoding="utf-8") as f:
+            json.dump(native(rep), f, indent=1, default=str)
+        logger.info("Forward-test review: swing section written to %s", args.review_report)
         return 0
 
     # 4. Reconcile open signals

@@ -30,6 +30,7 @@ data/backtest_history_long/
 *.json
 !config/*.json
 !frontend/src/lib/issued-evidence.json
+!frontend/src/lib/forward-test-status.json
 !.github/swing_research_trigger.json
 outputs/
 ledger/*.jsonl

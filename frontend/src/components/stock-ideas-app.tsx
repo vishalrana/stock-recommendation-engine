@@ -17,6 +17,7 @@ import {
 import { Lightbulb, Archive, History, Sparkles, RefreshCw, RotateCcw, ShieldCheck, TrendingUp } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { BACKTEST_VERDICT } from '../lib/backtest-verdict';
+import { forwardTestBanner } from '../lib/forward-test-status';
 import { IDEAS_SHADOW } from '../lib/ideas-mode';
 import { scanStatusNote } from '../lib/scan-status';
 import { useSizing } from '../lib/sizing';
@@ -540,6 +541,11 @@ export default function StockIdeasApp({
               }`}>
                 {BACKTEST_VERDICT.line}
               </div>
+              {forwardTestBanner() && (
+                <div role="status" className="text-[11px] font-medium px-3 py-2 rounded-lg border bg-rose-950/40 border-rose-900/60 text-rose-200">
+                  {forwardTestBanner()}
+                </div>
+              )}
               {!IDEAS_SHADOW && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                 <span className="font-bold uppercase tracking-wider text-[10px]">Sizing guide</span>

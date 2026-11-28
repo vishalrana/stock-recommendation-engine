@@ -1,0 +1,121 @@
+name: Forward-Test Review
+
+# Applies the pre-registered forward-test review rules (docs/forward-test-reviews.md) mechanically
+# (scripts/forward_test_review.py). Saturdays 13:17 UTC: a review runs only when one of R1-R4 has
+# passed without a report; otherwise the run says none is due and stops. The report
+# (docs/forward-test-reviews/<date>.md, with this run's id) and, on STOP or END, the app's status
+# file are committed to main. dry_run: fixtures only, no live outcomes, no commit.
+
+on:
+  schedule:
+    - cron: '17 13 * * 6'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run on fixtures (no live outcomes, no commit)'
+        required: false
+        default: false
+        type: boolean
+      as_of:
+        description: 'Run as of this date (YYYY-MM-DD; empty = today, UTC)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write          # the report and status file on main
+
+concurrency:
+  group: forward-test-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      PYTHONPATH: .
+      SKIP_NLP: 'true'
+      AS_OF: ${{ inputs.as_of }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.17'
+          cache: 'pip'
+      - run: |
+          python -m pip install pip==26.2.1
+          pip install -r requirements.lock
+      - name: Installed versions (job summary)
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Environment"; echo; echo '```'; python --version; pip freeze; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry run on fixtures
+        if: inputs.dry_run == true
+        shell: bash
+        run: python scripts/forward_test_review.py --dry-run --as-of "${AS_OF:-$(date -u +%F)}"
+
+      - name: Review due
+        id: due
+        if: inputs.dry_run != true
+        shell: bash
+        run: |
+          D=$(python scripts/forward_test_review.py --print-due --as-of "${AS_OF:-$(date -u +%F)}" | tail -1)
+          if [ -z "$D" ]; then echo "No review due." | tee -a "$GITHUB_STEP_SUMMARY"; else echo "Review due: $D"; fi
+          echo "date=$D" >> "$GITHUB_OUTPUT"
+
+      # The swing section comes from the swing job's own context (read only; the cache is restored, never saved)
+      - name: Restore swing live cache
+        if: steps.due.outputs.date != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/swing_live
+            data/backtest_history_long/insider_zips
+            data/backtest_history_long/insider_purchases.parquet
+            data/backtest_history_long/insider_symbol_cik.parquet
+            data/cache/universe
+          key: swing-live-v2-${{ github.run_id }}
+          restore-keys: swing-live-v2-
+
+      - name: Swing section (report only)
+        if: steps.due.outputs.date != ''
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: python -m jobs.generate_swing_signals --dry-run --no-alerts --review-report outputs/forward_test_swing.json
+
+      - name: Ideas review and decision
+        if: steps.due.outputs.date != ''
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        shell: bash
+        run: >
+          python scripts/forward_test_review.py --as-of "${AS_OF:-$(date -u +%F)}"
+          --swing-report outputs/forward_test_swing.json --write
+
+      - name: Commit the report to main
+        if: steps.due.outputs.date != ''
+        shell: bash
+        run: |
+          git add docs/forward-test-reviews config/forward_test_status.json frontend/src/lib/forward-test-status.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Forward-test review ${{ steps.due.outputs.date }} (run ${{ github.run_id }})"
+          for i in 1 2 3 4 5; do
+            git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0
+            sleep 15
+          done
+          echo "::error::Could not push the review report"; exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.due.outputs.date != ''
+        with:
+          name: forward-test-review
+          retention-days: 400
+          path: |
+            outputs/forward_test_swing.json
+            docs/forward-test-reviews/

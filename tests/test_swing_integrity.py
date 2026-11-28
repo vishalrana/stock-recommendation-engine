@@ -14,8 +14,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from jobs.generate_swing_signals import (blocked_until, ledger_key, processed_sessions, scan_window, sessions_after,
-                                         simulate_row)
+from jobs.generate_swing_signals import (blocked_until, ledger_key, processed_sessions, review_inputs, scan_window,
+                                         sessions_after, simulate_row)
 from scripts.check_swing_ledger import differences, effective, expected
 from scripts.correct_swing_records import first_run_end, ledger_redates, plan, replay_book
 from scripts.merge_ledger import merge
@@ -89,6 +89,18 @@ class TestRebase(unittest.TestCase):
         self.assertTrue(tr is None or tr.exit_date is None)           # still open (None: no exit before the data ends)
         tr0, _ = simulate_row(dict(row, entry_signal_close=97.0), a, ctx)   # no rebase: the false stop
         self.assertEqual(tr0.exit_reason, "stop")
+
+    def test_review_inputs_mark_open_signals_and_skip_voided(self):
+        closes = [97.0] * 8
+        a, ctx, idx = asset([c * 0.995 for c in closes], closes)
+        a.o, a.atr = a.c, a.c * 0.02
+        ctx.tickers = {"PSTL": a}
+        row = {"id": 1, "ticker": "PSTL", "sleeve": "T", "signal_date": str(idx[0].date()), "stop_loss": 97.0,
+               "target": 130.0, "entry_signal_close": 100.0, "beta": 1.0, "status": "open"}
+        rows, marks, medians = review_inputs([row, dict(row, id=2, status="void"), dict(row, id=3, ticker="NONE")], ctx)
+        self.assertEqual([(r["id"], r["status"]) for r in rows], [(1, "open")])
+        self.assertAlmostEqual(marks[1], -0.2)          # flat price and SPY: both sides' cost only
+        self.assertEqual(medians, {})                   # no closed signal, no placebo
 
     def test_late_sells_count_sessions(self):
         self.assertEqual(sessions_after(date(2026, 10, 19), date(2026, 11, 13), CAL), 19)

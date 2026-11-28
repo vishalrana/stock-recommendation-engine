@@ -61,6 +61,10 @@ import pandas as pd
 import numpy as np
 
 
+# Freshness is judged against today: an "upcoming" date must stay in the future whenever the suite runs
+UPCOMING = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+
+
 class TestEarningsInfrastructure(unittest.TestCase):
 
     def setUp(self):
@@ -76,7 +80,7 @@ class TestEarningsInfrastructure(unittest.TestCase):
         cache_data = {
             "AAPL": {
                 "ticker": "AAPL",
-                "next_earnings_date": "2026-10-30",
+                "next_earnings_date": UPCOMING,
                 "last_earnings_date": "2026-08-01",
                 "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "status": EarningsStatus.KNOWN_UPCOMING.value,
@@ -88,7 +92,7 @@ class TestEarningsInfrastructure(unittest.TestCase):
             res = fetch_earnings_calendar(["AAPL"], supabase=None, cache_path=self.test_cache_file)
             mock_provider.assert_not_called()
             self.assertIn("AAPL", res)
-            self.assertEqual(res["AAPL"]["next_earnings_date"], "2026-10-30")
+            self.assertEqual(res["AAPL"]["next_earnings_date"], UPCOMING)
             self.assertEqual(res["AAPL"]["source"], "local_cache")
 
     # 2. Supabase cache hit
@@ -103,7 +107,7 @@ class TestEarningsInfrastructure(unittest.TestCase):
         mock_in.execute.return_value = MagicMock(data=[
             {
                 "ticker": "MSFT",
-                "next_earnings_date": "2026-10-25",
+                "next_earnings_date": UPCOMING,
                 "last_earnings_date": "2026-07-25",
                 "fiscal_period": "Q1",
                 "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -114,7 +118,7 @@ class TestEarningsInfrastructure(unittest.TestCase):
             res = fetch_earnings_calendar(["MSFT"], supabase=mock_supabase, cache_path=self.test_cache_file)
             mock_provider.assert_not_called()
             self.assertIn("MSFT", res)
-            self.assertEqual(res["MSFT"]["next_earnings_date"], "2026-10-25")
+            self.assertEqual(res["MSFT"]["next_earnings_date"], UPCOMING)
             self.assertEqual(res["MSFT"]["source"], "supabase")
 
     # 3. Provider fetch
@@ -333,7 +337,7 @@ class TestEarningsInfrastructure(unittest.TestCase):
     # 19. Repeated scan does not repeatedly fetch the same earnings data
     def test_19_repeated_scan_cache_reuse(self):
         with patch("src.filters.earnings_filter.fetch_single_ticker_provider") as mock_provider:
-            mock_provider.return_value = ("REPEATED_CO", "2026-11-05", None, None, EarningsStatus.KNOWN_UPCOMING.value)
+            mock_provider.return_value = ("REPEATED_CO", UPCOMING, None, None, EarningsStatus.KNOWN_UPCOMING.value)
             
             # Scan 1: Cache miss -> calls provider
             res1 = fetch_earnings_calendar(["REPEATED_CO"], supabase=None, cache_path=self.test_cache_file)

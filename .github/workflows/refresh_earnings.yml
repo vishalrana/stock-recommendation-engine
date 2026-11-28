@@ -20,6 +20,10 @@ on:
         default: '50'
         type: string
 
+concurrency:
+  group: nightly-scan          # it restores and saves the nightly price cache, like the first-Sunday rebuild
+  cancel-in-progress: false
+
 jobs:
   refresh-earnings:
     name: Refresh Earnings

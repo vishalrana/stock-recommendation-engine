@@ -6,7 +6,8 @@ name: Price cache tools
 #   report   only the reports asked for (screen, SEC events and audit, split sweep), no refresh
 #   rebuild  full adjusted history into a fresh directory; only if it passes the coverage,
 #            history-length and last-bar checks is it saved as the newest nightly cache
-# Run outside the nightly window (01:00-10:00 UTC), so no nightly saves an older cache after it.
+# In the nightly-scan concurrency group with the nightly and the earnings refresh (#75): no run that
+# saves the nightly cache overlaps another, so no nightly saves an older cache after a rebuild.
 
 on:
   schedule:

@@ -8,8 +8,9 @@ Fails, so GitHub emails the owner, and writes a job summary when:
   - the latest completed NYSE session has no successful nightly in scan_log, and no non-success row
     documented with a run id;
   - the swing job has not processed the latest completed session (its per-session marker);
-  - a weekly run is missing at the next day's check: Saturday's parity replay, Sunday's earnings
-    refresh and cache-tools run (on a month's first Sunday, the rebuild must have run and passed).
+  - a weekly run is missing at the next day's check: Saturday's parity replay and forward-test review,
+    Sunday's earnings refresh and cache-tools run (on a month's first Sunday, the rebuild must have run
+    and passed).
 It warns, without failing, when a nightly or swing run started more than 6 hours after its cron.
 With APPRISE_URLS set, the same text also goes out through Apprise.
 """
